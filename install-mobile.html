@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>众包美食家 · 手机版（Android）</title>
+<style>
+  :root{--brand:#b45309;--bg:#faf7f2;--card:#fff;--sub:#6b7280;--ok:#059669}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#1a1a2e;min-height:100vh;display:flex;justify-content:center;padding:20px 14px}
+  .wrap{max-width:520px;width:100%}
+  h1{font-size:22px;margin-bottom:6px}
+  .sub{color:var(--sub);margin-bottom:20px;line-height:1.6;font-size:14px}
+  .card{background:var(--card);border-radius:14px;padding:20px;margin-bottom:14px;box-shadow:0 2px 8px rgba(0,0,0,.05)}
+  .card h2{font-size:16px;margin-bottom:12px}
+  .step{display:flex;gap:10px;margin:10px 0;font-size:14px;line-height:1.6;color:#374151}
+  .step b{flex-shrink:0;width:24px;height:24px;border-radius:50%;background:#eef2f7;color:#6b7280;display:flex;align-items:center;justify-content:center;font-size:13px;margin-top:1px}
+  code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:12px;word-break:break-all}
+  .btn{display:block;background:var(--brand);color:#fff;border:none;border-radius:10px;padding:13px 20px;font-size:15px;cursor:pointer;font-weight:600;text-decoration:none;margin-top:12px;text-align:center}
+  .btn.alt{background:#fff;color:var(--brand);border:1.5px solid var(--brand)}
+  .note{font-size:12px;color:var(--sub);margin-top:10px;line-height:1.6}
+  .ok-note{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;padding:12px 14px;border-radius:10px;font-size:13px;line-height:1.7;margin-top:8px}
+  .warn-note{background:#fffbeb;border:1px solid #fde68a;color:#92400e;padding:12px 14px;border-radius:10px;font-size:13px;line-height:1.7;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📱 众包美食家 · 手机版（Android）</h1>
+  <p class="sub">两种参与方式：<b>全自动采集</b>（装一次插件，之后自己跑）或<b>免安装网页提交</b>（手动但零门槛）。</p>
+
+  <!-- ============ 全自动：狐猴浏览器 + 插件 ============ -->
+  <!-- ============ Firefox 通道（一键安装） ============ -->
+  <div class="card">
+    <h2>🦊 Firefox 安卓版（推荐 · 一键安装）</h2>
+    <div class="step"><b>1</b><div>应用商店装 <b>Firefox</b>，<b>用 Firefox 打开本页</b>（或把 Firefox 设为默认浏览器后扫码进来）</div></div>
+    <div class="step"><b>2</b><div>点下方按钮 → 弹出「添加扩展」→ 点<b>添加</b>，装完自动打开协议页 → 「我要加入」→ 小红书登录一次 → 全自动</div></div>
+    <a class="btn" href="https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/crowd-extension-v3.4.9-firefox-signed.xpi">⬇️ 第一步：下载插件包（v3.4.9）</a>
+    <p class="note">点上面按钮后文件会进 Firefox 的「下载」列表（不会直接安装，这是 Firefox 的规矩）。然后：</p>
+    <div class="step"><b>2</b><div>Firefox 右下角 <b>⋮</b> → <b>设置</b> → 最底部 <b>关于 Firefox</b> → <b>连点 Firefox 图标 5 下</b>（开启开发者菜单）</div></div>
+    <div class="step"><b>3</b><div>返回设置 → 点新出现的 <b>「从文件安装扩展」</b> → 选刚下载的 .xpi 文件 → 确认安装</div></div>
+    <div class="step"><b>4</b><div>弹出参与协议页 → 点「我要加入」→ 同意 → 开始。装好自动升级，以后刷小红书即自动采集</div></div>
+  </div>
+
+  <div class="card">
+    <h2>🤖 狐猴浏览器（全自动采集 · 装好就不用管）</h2>
+    <div class="step"><b>1</b><div>应用商店搜索安装 <b>狐猴浏览器（Lemur Browser）</b>——仍在维护、支持 Chrome 扩展的安卓浏览器</div></div>
+    <div class="step"><b>2</b><div>点下方按钮下载插件 zip（不用解压）</div></div>
+    <div class="step"><b>3</b><div>狐猴浏览器：右下角菜单 → <b>扩展商店/扩展管理</b> → 选择「从本地安装/加载 zip」→ 选中刚下载的 <code>crowd-extension-v3.4.8.zip</code></div></div>
+    <div class="step"><b>4</b><div>首次安装会自动打开「参与协议」页：点 <b>「我要加入」</b>自动获得编号 → 同意并开始</div></div>
+    <div class="step"><b>5</b><div>打开 <code>www.xiaohongshu.com</code> 登录你的账号，浏览器菜单里开启「<b>桌面版网站</b>」开关（让小红书按电脑版显示，插件才能正确识别页面）</div></div>
+    <div class="ok-note">✅ 之后全自动：插件自己领任务 → 搜索 → 采集 → 回传 → 领下一个任务。插件有新版本也会自动更新。</div>
+    <a class="btn" href="https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/crowd-extension-v3.4.8.zip" download="crowd-extension-v3.4.8.zip">⬇️ 下载插件 v3.4.8（zip）</a>
+    <div class="warn-note" style="margin-top:10px;">
+      说明：旧方案用的 Kiwi 浏览器已于 2025 年初停止维护，不再推荐。若你已装 Kiwi 且一切正常，也可继续用它加载同一个 zip（步骤相同）。
+    </div>
+  </div>
+
+  <!-- ============ 免安装：网页提交 ============ -->
+  <div class="card">
+    <h2>⚡ 免安装 · 网页提交（任何手机都能用）</h2>
+    <div class="step"><b>1</b><div>打开「手机提交」网页 → 点「我要加入」自动获得编号</div></div>
+    <div class="step"><b>2</b><div>中枢自动分配门店 → 去小红书搜该店 → 复制笔记网址（或 App 分享链接）→ 粘贴提交</div></div>
+    <a class="btn alt" href="submit.html">🚀 打开手机提交页</a>
+    <p class="note">iPhone 请用此方式（苹果系统不允许任何浏览器插件，这是平台硬限制）：用 Safari 打开后点底部「分享」按钮 →「添加到主屏幕」，之后从桌面图标直达提交页。</p>
+  </div>
+</div>
+</body>
+</html>

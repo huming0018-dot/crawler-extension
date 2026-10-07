@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>众包美食家 · 插件安装引导</title>
+<style>
+  :root{--brand:#b45309;--bg:#faf7f2;--card:#fff;--sub:#6b7280;--ok:#059669;--warn:#b45309}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#1a1a2e;min-height:100vh;display:flex;justify-content:center;padding:32px 16px}
+  .wrap{max-width:720px;width:100%}
+  h1{font-size:24px;margin-bottom:6px}
+  .sub{color:var(--sub);margin-bottom:24px;line-height:1.6}
+  .card{background:var(--card);border-radius:14px;padding:24px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.05)}
+  .card h2{font-size:17px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+  .badge{display:inline-block;font-size:12px;padding:2px 10px;border-radius:20px;background:#fef3c7;color:var(--warn);font-weight:600}
+  .badge.ok{background:#d1fae5;color:var(--ok)}
+  .step{display:flex;gap:10px;margin:8px 0;font-size:14px;line-height:1.6;color:#374151}
+  .step b{flex-shrink:0;width:22px;height:22px;border-radius:50%;background:#eef2f7;color:#6b7280;display:flex;align-items:center;justify-content:center;font-size:12px;margin-top:1px}
+  code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:13px}
+  .btn{display:inline-block;background:var(--brand);color:#fff;border:none;border-radius:10px;padding:12px 22px;font-size:15px;cursor:pointer;font-weight:600;text-decoration:none;margin-top:10px}
+  .btn.alt{background:#fff;color:var(--brand);border:1.5px solid var(--brand)}
+  .hidden{display:none}
+  .dl-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  .note{font-size:13px;color:var(--sub);margin-top:10px;line-height:1.6}
+  .ok-note{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;padding:12px 14px;border-radius:10px;font-size:14px;line-height:1.7;margin-top:8px}
+  .warn-note{background:#fffbeb;border:1px solid #fde68a;color:#92400e;padding:12px 14px;border-radius:10px;font-size:14px;line-height:1.7;margin-top:8px}
+  #detect-box{padding:16px;background:#f3f4f6;border-radius:10px;margin-bottom:16px;font-size:14px}
+  #detect-box .spinner{display:inline-block;width:14px;height:14px;border:2px solid #d1d5db;border-top-color:var(--brand);border-radius:50%;animation:spin 1s linear infinite;margin-right:6px;vertical-align:middle}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🍜 众包美食家 · 插件安装</h1>
+  <p class="sub">已自动检测你的电脑系统，为你推荐最省事的安装方式。<b>无需 Python</b>，全程图形化点击即可。</p>
+
+  <div id="detect-box">
+    <span class="spinner"></span><span id="detect-text">正在检测系统与浏览器…</span>
+  </div>
+
+  <!-- ============ 方案A：macOS 一键脚本 ============ -->
+  <div class="card hidden" id="card-mac">
+    <h2>🖥 你的系统：macOS <span class="badge ok">推荐 · 双击即装 · 自动升级</span></h2>
+    <div class="step"><b>1</b><div>点击下方下载 <b>安装.command</b>（这是安装器，不是插件本体）</div></div>
+    <div class="step"><b>2</b><div>在「访达」里找到下载的文件，<b>双击</b>它（若提示「无法打开」：右键 → 打开 → 仍要打开，仅首次）</div></div>
+    <div class="step"><b>3</b><div>按提示输入一次<b>开机密码</b>（用于登记 Chrome 策略），脚本会自动重启 Chrome</div></div>
+    <div class="step"><b>4</b><div>完成！Chrome 会<b>自己下载并安装</b>插件（约 1 分钟），并自动打开「参与协议」页</div></div>
+    <div class="dl-row">
+      <a class="btn" href="https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/crowd-install-mac.command" download="安装.command">⬇️ 下载 macOS 安装器</a>
+      <a class="btn alt" href="https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/crowd-extension-v3.3.0.zip" download>备用：插件 zip（手动模式）</a>
+    </div>
+    <p class="note">✨ <b>以后插件升级全自动</b>：每次发布新版本，Chrome 会在后台自动更新，不需要再运行任何脚本、不需要重装。</p>
+  </div>
+
+  <!-- ============ 方案B：Windows 一键脚本 ============ -->
+  <div class="card hidden" id="card-win">
+    <h2>🖥 你的系统：Windows <span class="badge ok">推荐 · 双击即装 · 自动升级</span></h2>
+    <div class="step"><b>1</b><div>点击下方下载 <b>安装.bat</b>（这是安装器，不是插件本体）</div></div>
+    <div class="step"><b>2</b><div>在「下载」文件夹找到它，<b>双击</b>运行（若出现蓝色 SmartScreen 提示 → 「更多信息」→「仍要运行」，仅首次）</div></div>
+    <div class="step"><b>3</b><div>弹出权限请求（UAC）点「是」——用于登记 Chrome 策略，脚本会自动重启 Chrome</div></div>
+    <div class="step"><b>4</b><div>完成！Chrome 会<b>自己下载并安装</b>插件（约 1 分钟），并自动打开「参与协议」页</div></div>
+    <div class="dl-row">
+      <a class="btn" href="https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/crowd-install-win.bat" download="安装.bat">⬇️ 下载 Windows 安装器</a>
+      <a class="btn alt" href="https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/crowd-extension-v3.3.0.zip" download>备用：插件 zip（手动模式）</a>
+    </div>
+    <p class="note">✨ <b>以后插件升级全自动</b>：每次发布新版本，Chrome 会在后台自动更新，不需要再运行任何脚本、不需要重装。</p>
+  </div>
+
+  <!-- ============ 方案C：Linux / 其他（手动引导） ============ -->
+  <div class="card hidden" id="card-other">
+    <h2>🖥 你的系统：Linux / 其他 <span class="badge">手动安装</span></h2>
+    <div class="step"><b>1</b><div>下载插件 zip 并解压到任意文件夹（如 <code>~/food-crowd</code>）</div></div>
+    <div class="step"><b>2</b><div>打开 Chrome 或 Edge，地址栏输入 <code>chrome://extensions</code>（Edge 为 <code>edge://extensions</code>）</div></div>
+    <div class="step"><b>3</b><div>右上角开启「开发者模式」</div></div>
+    <div class="step"><b>4</b><div>点「加载已解压的扩展程序」→ 选择刚才解压出的文件夹</div></div>
+    <div class="dl-row">
+      <a class="btn" href="https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/crowd-extension-v3.3.0.zip" download>⬇️ 下载插件 zip</a>
+    </div>
+  </div>
+
+  <!-- ============ 方案D：手机版（Android） ============ -->
+  <div class="card hidden" id="card-mobile">
+    <h2>📱 检测到 Android 设备 <span class="badge ok">手机版可用</span></h2>
+    <div class="step"><b>1</b><div>安装 <b>Kiwi Browser</b>（Google Play 免费，Chromium 内核，支持 Chrome 扩展）</div></div>
+    <div class="step"><b>2</b><div>下载插件 zip，用 Kiwi 打开或先解压</div></div>
+    <div class="step"><b>3</b><div>Kiwi 地址栏输入 <code>chrome://extensions</code> → 开「开发者模式」→ 「+ 从 .zip/.crx 加载」→ 选 zip</div></div>
+    <div class="step"><b>4</b><div>填写参与编号 → 打开小红书页面 → 自动采集</div></div>
+    <div class="dl-row">
+      <a class="btn" href="https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/crowd-extension-v3.3.0.zip" download="crowd-extension-v3.3.0.zip">⬇️ 下载插件 zip</a>
+      <a class="btn alt" href="install-mobile.html">📄 手机版详细教程</a>
+    </div>
+    <p class="note">iPhone 暂不支持（苹果系统限制第三方扩展加载）。手机与电脑同一任务池，可换设备续采。</p>
+  </div>
+
+  <!-- ============ 手机版入口（所有系统可见） ============ -->
+  <div class="card">
+    <h2>📱 想在手机上采集？</h2>
+    <div class="step"><b>1</b><div>Android 手机：安装 <b>Kiwi Browser</b>，加载同一插件 zip —— 与电脑完全同步</div></div>
+    <div class="step"><b>2</b><div>iPhone：暂不支持（苹果系统限制），建议用电脑或 Android 手机</div></div>
+    <a class="btn alt" href="install-mobile.html" style="margin-top:10px;">📲 查看手机版安装教程</a>
+  </div>
+
+  <!-- ============ 安装后统一指引 ============ -->
+  <div class="card">
+    <h2>✅ 安装完成后（两步开始采集）</h2>
+    <div class="step"><b>1</b><div>首次安装会<b>自动打开「参与协议」页</b>（没打开就点右上角拼图图标 🧩 → 「众包美食家」→「选项」）：点 <b>「我要加入」</b>自动获得参与编号</div></div>
+    <div class="step"><b>2</b><div>阅读并同意《参与协议》→ 回到小红书页面（需已登录你的账号）→ 点插件图标 → 「▶ 启动采集」</div></div>
+    <div class="ok-note">✅ 之后全部自动：自动领任务 → 自动搜索 → 自动回传 → 自动领下一个任务。插件本身也会自动升级到最新版，无需任何手动操作。</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  // 插件版本：zip 下载链接统一由此拼出（与本页同级路径）
+  const EXT_VERSION = '3.4.3';
+  const BUCKET = 'https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd';
+  const ZIP_NAME = "crowd-extension-v" + EXT_VERSION + ".zip";
+  document.querySelectorAll('a[href$=".zip"]').forEach((a) => {
+    a.href = BUCKET + '/' + ZIP_NAME;
+    a.setAttribute("download", ZIP_NAME);
+  });
+
+  // 自动检测：平台 + 浏览器
+  const ua = navigator.userAgent;
+  const detect = document.getElementById("detect-text");
+  const spinner = document.querySelector("#detect-box .spinner");
+  let os = "other";
+  if (/mac/i.test(ua)) os = "mac";
+  else if (/win/i.test(ua)) os = "win";
+  else if (/linux/i.test(ua)) os = "linux";
+
+  const browser =
+    /edg/i.test(ua) ? "Edge" :
+    /brave/i.test(ua) ? "Brave" :
+    /chrome|crios/i.test(ua) ? "Chrome" :
+    /firefox/i.test(ua) ? "Firefox" :
+    "未知浏览器";
+
+  // 显示检测结果（延迟一下让 spinner 有存在感）
+  setTimeout(() => {
+    spinner.remove();
+    detect.textContent = "检测完成：你的系统是 " +
+      (os === "mac" ? "macOS" : os === "win" ? "Windows" : "Linux/其他") +
+      "，当前浏览器是 " + browser + "。" +
+      (browser === "Firefox" ? "（建议改用 Chrome / Edge，本插件为 Chrome 系扩展）" : "");
+  }, 600);
+
+  // 显示对应卡片
+  setTimeout(() => {
+    if (os === "mac") document.getElementById("card-mac").classList.remove("hidden");
+    else if (os === "win") document.getElementById("card-win").classList.remove("hidden");
+    else document.getElementById("card-other").classList.remove("hidden");
+    // Android 设备额外显示手机版卡片（手机浏览器访问时）
+    if (/android/i.test(ua)) document.getElementById("card-mobile").classList.remove("hidden");
+  }, 650);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>众包美食家 · 插件下载</title>
+<style>
+  :root{--bg:#faf8f5;--card:#fff;--line:#e7e2da;--ink:#2a2419;--sub:#8a8172;--brand:#b3541e;--ok:#2e7d32;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:32px 16px;}
+  .wrap{max-width:560px;width:100%;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:32px 28px;margin-bottom:16px;}
+  h1{font-size:22px;margin-bottom:6px;}
+  .sub{color:var(--sub);font-size:13px;line-height:1.7;margin-bottom:20px;}
+  .tag{display:inline-block;background:#fdf0e6;color:var(--brand);font-size:12px;padding:2px 10px;border-radius:99px;margin-bottom:12px;}
+  .hint{font-size:12px;color:var(--sub);margin-top:4px;line-height:1.6;}
+  .steps{margin-top:20px;border-top:1px dashed var(--line);padding-top:16px;}
+  .steps b{font-size:14px;}
+  .steps ol{margin:10px 0 0 18px;font-size:13px;color:var(--sub);line-height:2;}
+  .dl{margin-top:20px;border-top:1px dashed var(--line);padding-top:16px;text-align:center;}
+  .dl .zip-name{font-size:13px;color:var(--sub);margin-top:8px;}
+  .dl a.zip{display:inline-block;margin-top:12px;padding:12px 28px;background:var(--ok);color:#fff;border-radius:10px;text-decoration:none;font-weight:600;font-size:15px;}
+  .dl a.zip:hover{opacity:.9;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ============ 下载卡（纯下载页：报名已移至插件内） ============ -->
+  <div class="card">
+    <span class="tag">招募中 · 插件内报名</span>
+    <h1>众包美食家 · 插件下载</h1>
+    <p class="sub">参与「众包美食家」收录与真实口味评分。使用你自己的小红书账号，安装浏览器插件后按安全线自动采集。参与编号在<strong>插件内</strong>点「我要加入」自动获得（编号与本设备绑定，一机一号）。</p>
+
+    <div class="dl">
+      <div style="font-size:14px;font-weight:600;">第一步：下载插件</div>
+      <a id="dlLink" class="zip" href="crowd-extension-v3.3.0.zip" download>⬇️ 下载插件 v3.3.0（zip）</a>
+      <p class="zip-name">文件：crowd-extension-v3.3.0.zip · 全自动采集 · 安全线保护 · 支持电脑/Android</p>
+    </div>
+
+    <div class="steps">
+      <b>第二步：安装插件</b>
+      <p class="hint" style="margin-top:8px;">电脑（macOS/Windows）：<a href="install.html" style="color:var(--brand);font-weight:600;">点此打开安装引导</a>（自动检测系统，一键脚本）<br>
+      Android 手机：<a href="install-mobile.html" style="color:var(--brand);font-weight:600;">点此打开手机版教程</a>（需 Kiwi 浏览器）<br>
+      iPhone 暂不支持（苹果系统限制）。</p>
+    </div>
+
+    <div class="steps">
+      <b>第三步：获得参与编号</b>
+      <ol>
+        <li>安装后打开插件选项页（onboarding），完整阅读参与协议</li>
+        <li>点击「<b>我要加入</b>」自动获得 <b>P-</b> 参与编号，再点「同意并开始使用」</li>
+        <li>插件自动领取任务包、按安全线采集、自动回传</li>
+        <li>按有效条数结算（细则见插件内 README）</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- ============ 参与流程卡 ============ -->
+  <div class="card steps" style="margin-top:0;">
+    <b>参与流程</b>
+    <ol>
+      <li>下载插件 → 安装后在插件内点「<b>我要加入</b>」获得编号</li>
+      <li>编号立即可用（风控后置，异常行为会被暂停/拉黑）</li>
+      <li>在插件选项页（onboarding）同意协议后即可开始</li>
+      <li>插件自动领取任务包、按安全线采集、自动回传</li>
+      <li>按有效条数结算（细则见插件内 README）</li>
+    </ol>
+  </div>
+</div>
+
+<script>
+(function(){
+  // 插件版本：下载链接由此拼出（与本页同级的 zip，勿加 releases/ 前缀）
+  const EXT_VERSION = '3.4.3';
+  const ZIP_NAME = "crowd-extension-v" + EXT_VERSION + ".zip";
+
+  // 页面静态下载链接统一由 EXT_VERSION 重建（同级路径）
+  const dlLink = document.getElementById("dlLink");
+  dlLink.href = ZIP_NAME;
+  dlLink.setAttribute("download", ZIP_NAME);
+  dlLink.textContent = "⬇️ 下载插件 v" + EXT_VERSION + "（zip）";
+  const zipNameEl = document.querySelector(".dl .zip-name");
+  if (zipNameEl) zipNameEl.textContent = "文件：" + ZIP_NAME + " · 全自动采集 · 安全线保护 · 支持电脑/Android";
+})();
+</script>
+</body>
+</html>

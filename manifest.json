@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "Crawler Extension",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxHtZyugqfYc7TekJF4MErW+IQOOCiOFkETReUl6TC146YeurtsUujFBtuYx87mch4bIwFqUVi4RDMucQ4WamK331RXOXwG0JmC1OXf6vgQRPD+ZkuSHIMfxrkmuJdr6QIeTqrpwt06vnWWwF1DWSRKAIjYsu8IKI5v8UxcUa2B4SAdZhfnxdsdSKa9A/T14HF5S8LOoUNSNky5k0MVyYTtXCCIzh8m2u6dURqbj0hnhcWEHuaqSjIvj66NAKuC7ehLj/kRofT1YORGcxtPzUpewG+pCA+zHbmz4FCHBgBEYSs5FBWriswxwy/YUeuodMthvV1laV8Uu9+mwksmbQiQIDAQAB",
+  "update_url": "https://huming0018-dot.github.io/crowd-pages/updates.xml",
+  "description": "Informed, voluntary crowdsourced collection extension. Participants use their own account, device and network to collect public Xiaohongshu notes and taste ratings under server-issued safety limits. Uploads go through security-definer RPCs with server-side confirmation and local verification against false positives. Open source and auditable.",
+  "permissions": [
+    "storage",
+    "alarms",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "https://www.xiaohongshu.com/*",
+    "https://m.xiaohongshu.com/*",
+    "https://bdwrhshgdeghgyzwpxnl.supabase.co/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "scripts": [
+      "src/sampler.js",
+      "src/device_profile.js",
+      "src/config.js",
+      "src/safety_engine.js",
+      "src/background.js"
+    ]
+  },
+  "action": {
+    "default_title": "众包美食家",
+    "default_popup": "src/popup.html"
+  },
+  "options_page": "src/onboarding.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.xiaohongshu.com/*",
+        "https://m.xiaohongshu.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "128": "icons/icon128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "crowd-meishijia@huming0018-dot.github.io",
+      "strict_min_version": "126.0",
+      "update_url": "https://bdwrhshgdeghgyzwpxnl.supabase.co/storage/v1/object/public/crowd/updates-firefox.json",
+      "data_collection_permissions": {
+        "required": [
+          "websiteContent"
+        ]
+      }
+    }
+  }
+}

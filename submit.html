@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>众包美食家 · 手机提交</title>
+<meta name="theme-color" content="#b45309">
+<link rel="manifest" href="app-manifest.json">
+<style>
+  :root{--brand:#b45309;--bg:#faf7f2;--card:#fff;--sub:#6b7280;--ok:#059669;--err:#b91c1c}
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  body{background:var(--bg);font-family:-apple-system,'PingFang SC',sans-serif;color:#1a1a2e;padding:16px;max-width:560px;margin:0 auto}
+  h1{font-size:20px;margin-bottom:4px}
+  .sub{color:var(--sub);font-size:13px;margin-bottom:16px;line-height:1.5}
+  .card{background:var(--card);border-radius:14px;padding:18px;margin-bottom:14px;box-shadow:0 2px 8px rgba(0,0,0,.05)}
+  .card h2{font-size:15px;margin-bottom:10px}
+  .row{display:flex;gap:8px}
+  input,textarea{width:100%;padding:12px;border:1px solid #d1d5db;border-radius:10px;font-size:16px;background:#fff}
+  textarea{min-height:64px;resize:vertical}
+  .btn{display:inline-block;background:var(--brand);color:#fff;border:none;border-radius:10px;padding:13px 18px;font-size:16px;font-weight:600;cursor:pointer;text-align:center}
+  .btn:disabled{opacity:.5}
+  .btn.alt{background:#fff;color:var(--brand);border:1.5px solid var(--brand)}
+  .btn.block{width:100%;margin-top:10px}
+  .note{font-size:12px;color:var(--sub);margin-top:8px;line-height:1.6}
+  .target{font-size:19px;font-weight:700;color:var(--brand);line-height:1.4;padding:14px;background:#fef3c7;border-radius:10px;text-align:center;word-break:break-all}
+  .target .pct{display:block;font-size:12px;color:#92400e;font-weight:400;margin-top:6px}
+  .ok-note{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;padding:12px;border-radius:10px;font-size:14px;line-height:1.6;margin-top:10px;word-break:break-all}
+  .err-note{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px;border-radius:10px;font-size:14px;line-height:1.6;margin-top:10px;word-break:break-all}
+  .steps{font-size:13px;color:#374151;line-height:1.9;background:#f3f4f6;border-radius:10px;padding:10px 12px;margin:8px 0}
+  .hidden{display:none}
+  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:12px;background:#eef2f7;color:#6b7280;margin-left:6px}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid #d1d5db;border-top-color:var(--brand);border-radius:50%;animation:sp 1s linear infinite;vertical-align:middle;margin-right:4px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .skip-link{display:block;text-align:center;font-size:13px;color:var(--sub);margin-top:10px;text-decoration:underline}
+  .banner{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px 14px;border-radius:10px;font-size:14px;line-height:1.7;margin-bottom:14px}
+</style>
+</head>
+<body>
+<h1>🍜 众包美食家 · 手机提交</h1>
+<p class="sub">任务由中枢自动分配，你只管采集提交，不用做任何选择。</p>
+
+<div class="banner hidden" id="apiBanner">
+  ⚠️ <b>当前浏览器连不上服务器</b>（某些应用内置浏览器会拦截）。<br>
+  请点浏览器菜单选择「<b>用 Safari / Chrome 打开</b>」本页；或切换 WiFi/流量后
+  <a href="javascript:location.reload()" style="color:#991b1c;font-weight:600">点这里重试</a>。
+</div>
+
+<div class="banner hidden" id="storageBanner">
+  ⚠️ 当前浏览器禁用了本地存储：<b>刷新或关掉页面后编号会丢失</b>。拿到编号后请截图保存，下次手动填回。
+</div>
+
+<!-- ① 身份 -->
+<div class="card" id="card-id">
+  <h2>① 你的参与编号 <span class="pill" id="pidStatus">未设置</span></h2>
+  <div id="pidForm">
+    <div class="row">
+      <input id="pid" placeholder="P- 开头编号" style="flex:1" autocapitalize="characters">
+      <button class="btn alt" id="savePid">保存</button>
+    </div>
+    <button class="btn block" id="join">我要加入（点一下自动获得编号）</button>
+    <button class="btn alt block" id="installApp">📲 添加到主屏幕（之后从桌面图标直达本页）</button>
+  </div>
+</div>
+
+<!-- ② 中枢分配的当前目标 -->
+<div class="card hidden" id="card-task">
+  <h2>② 中枢分配的当前目标 <button class="btn alt" id="refresh" style="float:right;padding:6px 12px;font-size:13px">刷新</button></h2>
+  <div class="target" id="targetBox"><span class="spin"></span>分配中…</div>
+  <div id="taskMeta" class="note"></div>
+  <a class="skip-link" id="skipKw">这家店找不到笔记？换一家（会通知中枢）</a>
+</div>
+
+<!-- ③ 提交 -->
+<div class="card hidden" id="card-submit">
+  <h2>③ 粘贴笔记链接</h2>
+  <div class="steps">
+    <b>最简单的方法（推荐）</b>：在本浏览器<b>新开一个标签页</b>打开 <b>m.xiaohongshu.com</b>（不用登录）→ 搜索上方目标店名 → 打开一篇笔记 → <b>直接复制地址栏网址</b> → 回来粘贴。<br>
+    从小红书 App 分享也可以：复制分享链接粘贴到下面，会自动解析（等几秒）。
+  </div>
+  <input id="noteUrl" placeholder="粘贴笔记网址或分享文本">
+  <div id="parseStatus" class="note"></div>
+  <input id="noteTitle" placeholder="笔记标题（必填，解析失败请手填）" style="margin-top:8px">
+  <textarea id="noteExcerpt" placeholder="口味相关的正文片段（可选）"></textarea>
+  <button class="btn block" id="submit">提交这条笔记</button>
+  <div id="result"></div>
+</div>
+
+<div class="card">
+  <h2>📊 我的进度</h2>
+  <div id="myProgress" class="note">提交后这里显示任务进度。</div>
+</div>
+
+<script>
+(function(){
+"use strict";
+const API_BASE = "https://bdwrhshgdeghgyzwpxnl.supabase.co";
+const API_KEY = "sb_publishable_c93XenGzZsoa308e3bTg6A__lfaqQ-B";
+const $ = (id) => document.getElementById(id);
+const PID_RE = /^P-[A-Z0-9]{6,12}$/;
+
+// H2 防护：localStorage 在某些浏览器（Safari「阻止所有 Cookie」/部分 App 内置 WebView）会抛异常。
+// 全部读写走 safeStorage：抛异常时降级内存 Map（本次会话内有效），页面不死。
+const storageOK = (() => { try { localStorage.setItem("__crowd_t", "1"); localStorage.removeItem("__crowd_t"); return true; } catch (e) { return false; } })();
+const memStore = new Map();
+const safeStorage = {
+  get(k) { try { const v = localStorage.getItem(k); return v === null ? (memStore.has(k) ? memStore.get(k) : null) : v; } catch (e) { return memStore.has(k) ? memStore.get(k) : null; } },
+  set(k, v) { memStore.set(k, v); try { localStorage.setItem(k, v); } catch (e) { /* 降级内存 */ } },
+  del(k) { memStore.delete(k); try { localStorage.removeItem(k); } catch (e) { } }
+};
+
+// H1 防护：crypto.randomUUID 需要 Chrome 92+ / iOS 15.4+，老内核（老微信 X5 等）没有 → 兜底手造 v4
+function genUUID() {
+  if (window.crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = new Uint8Array(16); crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+  return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
+}
+
+// H3：服务端 R2 只认 https://www.xiaohongshu.com/explore/<24位小写hex>——统一规范化后再提交
+function normalizeNoteUrl(id) { return "https://www.xiaohongshu.com/explore/" + String(id).toLowerCase(); }
+const NOTE_ID_RE = /^[0-9a-f]{24}$/i;
+
+// H5/L3：服务端英文 reason 码 → 中文人话映射（映射不到时原样展示）
+const REASON_MAP = {
+  item_url_invalid: "链接格式不对（请复制小红书笔记的完整网址）",
+  item_note_id_invalid: "笔记编号格式不对",
+  item_url_note_id_mismatch: "链接与笔记编号不一致",
+  item_content_empty: "缺标题或正文",
+  item_quota_exceeded: "今日配额已满，明天再试",
+  quota_exceeded: "今日配额已满，明天再试",
+  duplicate: "已收录过（去重）",
+  duplicate_note: "已收录过（去重）",
+  duplicate_skipped: "已收录过（去重）",
+  duplicate_seq_replay: "重复提交，已忽略",
+  item_kind_invalid: "内容类型不支持",
+  item_platform_unsupported: "暂时只支持小红书",
+  item_missing_note: "缺笔记链接",
+  item_keyword_not_in_pack: "这条笔记不属于当前目标店",
+  pack_mismatch: "任务数据异常，请点②刷新重试",
+  item_parse_error: "提交内容格式异常",
+  item_insert_error: "服务器写入失败，请重试",
+  item_task_fulfilled: "该任务已完成，可换下一个目标",
+  task_not_open: "任务已关闭或被认领，请点②刷新领新目标",
+  participant_unavailable: "编号无效或已停用",
+  participant_id_mismatch: "编号不一致，请重新保存编号",
+  stale_client: "页面版本过旧，请刷新页面",
+  envelope_parse_error: "提交数据异常，请重试",
+  envelope_missing_task_or_seq: "缺少任务信息，请点②刷新后重试",
+  captured_at_future: "手机时间不准，请校准系统时间",
+  captured_at_too_old: "提交内容已过期，请重新采集",
+  device_salt_invalid: "设备标识异常，请换浏览器重试",
+  no_open_task: "暂时没有可分配的目标",
+  no_url: "没识别到链接",
+  unsupported_host: "只支持小红书链接",
+  resolve_timeout: "短链解析超时，请改用复制地址栏网址的方式",
+  no_redirect: "短链解析失败，请改用地址栏网址",
+  no_note_id: "没解析出笔记编号，请改复制地址栏网址",
+  submission_in_progress: "正在处理中，请稍候",
+  id_generation_retry_exhausted: "服务器忙，请重试",
+  device_already_registered: "该设备已注册过"
+};
+function cnReason(code) { return REASON_MAP[code] || null; }
+
+let target = null;   // 中枢分配的当前目标 {task_id, kw_index, keyword, kpi_min, accepted, lease_until}
+let resolved = null; // {note_id, canonical_url}
+let skipped;
+try { skipped = new Set(JSON.parse(safeStorage.get("kw_skipped") || "[]")); }
+catch (e) { skipped = new Set(); }
+
+function toast(el, cls, html) { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; el.innerHTML = ""; el.appendChild(d); }
+async function rpc(fn, body, timeoutMs) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs || 15000);
+  try {
+    const r = await fetch(API_BASE + "/rest/v1/rpc/" + fn, {
+      method: "POST",
+      headers: {"Content-Type":"application/json","apikey":API_KEY,"Authorization":"Bearer "+API_KEY},
+      body: JSON.stringify(body), signal: ctl.signal
+    });
+    return { httpOk: r.ok, status: r.status, data: await r.json().catch(() => null) };
+  } catch (e) { return { httpOk: false, status: 0, data: null, network: true, error: String(e) }; }
+  finally { clearTimeout(timer); }
+}
+// 把失败原因翻译成人话：网络层失败（浏览器/网络到不了服务器）和服务端业务错误分开
+function failText(r, fallback) {
+  if (r.network) return "网络连接失败：当前浏览器或网络连不上服务器。\n请①点浏览器菜单「用 Safari / Chrome 打开」本页，或②切换 WiFi/流量后重试。";
+  const d = r.data || {};
+  const raw = d.message || d.hint || d.reason || "";
+  const detail = cnReason(raw) || raw;
+  return (fallback || "操作失败") + (detail ? "：" + detail : "") + (r.status ? "（HTTP " + r.status + "）" : "");
+}
+function extractDirect(url) {
+  const m = url.match(/xiaohongshu\.com\/(?:explore|discovery\/item)\/([0-9a-zA-Z]+)/);
+  return m ? m[1] : null;
+}
+function extractAnyUrl(text) {
+  const m = (text || "").match(/https?:\/\/[^\s，。；、"'<>）)]+/);
+  return m ? m[0] : null;
+}
+function seqKey() { return "proof_seq_" + target.task_id + "_" + target.kw_index; }
+// 从分享文本提取标题：优先《…》，其次首条非链接行的前 50 字（去前导数字/表情/标点）
+function extractTitle(text) {
+  if (!text) return "";
+  const m = text.match(/《(.{2,50}?)》/);
+  if (m) return m[1].trim();
+  const lines = text.split(/\n+/).map(l => l.replace(/https?:\/\/\S+/g, "").trim())
+    .filter(l => l.length >= 4 && !/^\d+$/.test(l) && !/复制|打开|小红书App/i.test(l));
+  if (!lines.length) return "";
+  return lines[0].replace(/^[\d\s\.、，。:：\-—\[\]【】]+/, "").slice(0, 50).trim();
+}
+function prefillTitle(text) {
+  if ($("noteTitle").value.trim()) return;
+  const t = extractTitle(text);
+  if (t) $("noteTitle").value = t;
+}
+
+// ---------- ① 编号 ----------
+function setPidUI(pid) {
+  $("pidStatus").textContent = pid;
+  $("pidForm").classList.add("hidden");
+  $("card-task").classList.remove("hidden");
+}
+$("savePid").onclick = () => {
+  const pid = $("pid").value.trim().toUpperCase();
+  if (!PID_RE.test(pid)) { alert("编号格式应为 P- 加 6~12 位大写字母数字"); return; }
+  safeStorage.set("participant_id", pid);
+  setPidUI(pid); loadTarget();
+};
+$("join").onclick = async () => {
+  const btn = $("join"); btn.disabled = true; btn.textContent = "注册中…";
+  try {
+    let salt = safeStorage.get("device_salt");
+    if (!salt) {
+      const buf = new Uint8Array(8); crypto.getRandomValues(buf);
+      salt = "Dsalt" + [...buf].map(b => b.toString(16).padStart(2, "0")).join("");
+      safeStorage.set("device_salt", salt);
+    }
+    const r = await rpc("crowd_register_participant", { p_device_salt: salt, p_source: "mobile_web" });
+    const d = r.data || {};
+    const pid = d.participant_id || (Array.isArray(d) && d[0] && d[0].participant_id);
+    if (pid && PID_RE.test(pid)) {
+      safeStorage.set("participant_id", pid);
+      setPidUI(pid); loadTarget();
+    } else { alert(failText(r, "注册失败")); }
+  } finally { btn.disabled = false; btn.textContent = "我要加入（点一下自动获得编号）"; }
+};
+
+// ---------- ② 中枢分配目标 ----------
+$("refresh").onclick = loadTarget;
+$("skipKw").onclick = () => {
+  if (!target) return;
+  skipped.add(target.keyword);
+  safeStorage.set("kw_skipped", JSON.stringify([...skipped]));
+  target = null;
+  loadTarget();
+};
+async function loadTarget() {
+  const pid = safeStorage.get("participant_id");
+  if (!pid) return;
+  $("targetBox").innerHTML = '<span class="spin"></span>正在问中枢要目标…';
+  const r = await rpc("crowd_next_target", { p_participant_id: pid, p_exclude: [...skipped] });
+  const d = r.data || {};
+  if (r.network) {
+    target = null;
+    $("targetBox").textContent = "连不上服务器";
+    $("taskMeta").textContent = "当前浏览器/网络无法连接服务器。请用系统浏览器（Safari/Chrome）打开本页，或切换 WiFi/流量后点刷新。";
+    return;
+  }
+  if (!d.ok) {
+    target = null;
+    if (d.reason === "participant_unavailable") {
+      // 编号在服务端不存在/被停用（如被清理）→ 给出重新注册出口
+      $("targetBox").textContent = "编号已失效";
+      $("taskMeta").innerHTML = "当前编号（" + pid + "）在服务端不存在。" +
+        '<a href="#" id="rejoin" style="color:var(--brand);font-weight:600">点这里重新获取编号</a>';
+      document.getElementById("rejoin").onclick = (e) => {
+        e.preventDefault();
+        safeStorage.del("participant_id");
+        location.reload();
+      };
+      $("card-submit").classList.add("hidden");
+      return;
+    }
+    $("targetBox").textContent = "暂时没有可分配的目标";
+    $("taskMeta").textContent = "（" + (d.reason || "未知") + "）点刷新重试；全部完成时也会显示在这里。";
+    $("card-submit").classList.add("hidden");
+    return;
+  }
+  target = d;
+  $("targetBox").innerHTML = "🎯 " + d.keyword +
+    '<span class="pct">已收录 ' + (d.accepted || 0) + "/" + d.kpi_min + " 条 · 做完自动换下一家</span>";
+  $("taskMeta").textContent = "任务 #" + d.task_id + " · 目标有效期至 " +
+    (d.lease_until ? new Date(d.lease_until).toLocaleString() : "-") + (d.reused ? " · 续上次的进度" : " · 新分配");
+  $("card-submit").classList.remove("hidden");
+}
+
+// ---------- 链接解析（粘贴即触发） ----------
+let parseTimer = null;
+$("noteUrl").addEventListener("input", () => {
+  resolved = null;
+  clearTimeout(parseTimer);
+  parseTimer = setTimeout(autoResolve, 500);
+});
+async function autoResolve() {
+  const raw = $("noteUrl").value.trim();
+  if (!raw) { $("parseStatus").innerHTML = ""; return; }
+  prefillTitle(raw);
+  const url = extractAnyUrl(raw) || raw;
+  const direct = extractDirect(url);
+  if (direct) {
+    if (!NOTE_ID_RE.test(direct)) {
+      $("parseStatus").innerHTML = "❌ 链接里的笔记编号格式不对（应为 24 位字母数字），请重新复制完整网址。";
+      return;
+    }
+    const nid = direct.toLowerCase();
+    resolved = { note_id: nid, canonical_url: normalizeNoteUrl(nid) };
+    $("parseStatus").innerHTML = "✅ 已识别笔记 <code>" + nid + "</code>";
+    return;
+  }
+  if (/^https?:\/\/(www\.)?xhslink\.(com|cn)\//.test(url)) {
+    $("parseStatus").innerHTML = '<span class="spin"></span>正在解析短链（几秒到十几秒）…';
+    const r = await rpc("crowd_resolve_link", { p_input: url }, 45000);
+    const d = r.data || {};
+    if (d.ok && d.note_id) {
+      const nid = String(d.note_id).toLowerCase();
+      resolved = { note_id: nid, canonical_url: normalizeNoteUrl(nid) };
+      $("noteUrl").value = resolved.canonical_url;
+      $("parseStatus").innerHTML = "✅ 已解析笔记 <code>" + nid + "</code>";
+    } else {
+      // 自动解析失败 → 给一键降级路径：新标签页打开短链，落地后复制地址栏回来粘贴
+      $("parseStatus").innerHTML = "❌ 自动解析失败（" + (d.reason || "网络") + "）。" +
+        '<br><a href="' + url + '" target="_blank" rel="noopener" style="color:var(--brand);font-weight:600">👉 点我打开这条分享链接</a>' +
+        "：新标签页里等它跳转完，<b>复制地址栏网址</b>回这里粘贴即可（本页进度都在）。";
+    }
+    return;
+  }
+  $("parseStatus").innerHTML = "❌ 只支持小红书链接：xiaohongshu.com 笔记网址，或 App 分享的 xhslink.com / xhslink.cn 短链。";
+}
+
+// ---------- ③ 提交 ----------
+$("submit").onclick = async () => {
+  const pid = safeStorage.get("participant_id");
+  if (!target) { alert("中枢还没分配目标，点②的刷新"); return; }
+  if (!resolved) {
+    // L2：解析窗口期点击不再静默吞——给可读提示
+    toast($("result"), "err-note", $("noteUrl").value.trim()
+      ? "⏳ 识别中，请稍候…（若一直无反应，请检查链接是否复制完整）"
+      : "❌ 先粘贴笔记链接，等识别成功后再提交。");
+    return;
+  }
+  const title = $("noteTitle").value.trim();
+  const excerpt = $("noteExcerpt").value.trim().slice(0, 200);
+  // H4：镜像服务端 item_content_empty 口径（标题去标点 <2 且正文 <10），本地拦截，不再送上去烧拒收率
+  const bare = (s) => s.replace(/[\s\p{P}]/gu, "");
+  if (bare(title).length < 2 && bare(excerpt).length < 10) {
+    toast($("result"), "err-note", "❌ 这条笔记缺标题和正文，请补上标题再提交。");
+    return;
+  }
+  const keyword = target.keyword;
+  const seq = parseInt(safeStorage.get(seqKey()) || "0", 10);
+  const envelope = {
+    submission_id: genUUID(),   // H1：老内核无 crypto.randomUUID 的兜底
+    participant_id: pid,
+    task_id: target.task_id,
+    kw_index: target.kw_index,
+    kpi_min: target.kpi_min,
+    proof_seq: seq,
+    captured_at: new Date().toISOString(),
+    sync_version: 3,
+    items: [{
+      kind: "note", platform: "xiaohongshu",
+      note_id: resolved.note_id,
+      note_url: resolved.canonical_url,   // H3：已规范化为服务端认可的形态
+      title: title,
+      excerpt: excerpt,
+      matched_store: keyword,
+      raw_query: keyword
+    }]
+  };
+  const btn = $("submit"); btn.disabled = true; btn.textContent = "提交中…";
+  try {
+    const r = await rpc("crowd_submit_proof", { p_participant_id: pid, p_envelope: envelope });
+    const d = r.data || {};
+    if (d.ok) {
+      safeStorage.set(seqKey(), String(seq + 1));
+      const v = (d.results && d.results[0]) || {};
+      const gate = v.gate || v.verdict || "accepted";
+      const kp = (d.keyword_progress || []).map(k => k.keyword + " " + k.accepted + "/" + target.kpi_min).join(" · ");
+      $("myProgress").textContent = kp || ("任务进度 " + (d.new_progress != null ? d.new_progress : "?"));
+      // H5：按条目级 gate 分流——拒收绝不显示成绿色"已确认"
+      if (gate === "rejected" || gate === "error") {
+        toast($("result"), "err-note", "❌ " + (cnReason(v.reason) || ("未收录：" + (v.reason || gate))) +
+          "<br>可修正后重试，不会重复计酬。");
+        return; // 保留已填内容便于修改重试；不换目标
+      }
+      toast($("result"), "ok-note",
+        (gate === "accepted"
+          ? "✅ 已收录！" + (v.reason ? "（" + (cnReason(v.reason) || v.reason) + "）" : "")
+          : "🔁 这条已收录过（去重），不重复计酬。") +
+        "<br>" + kp);
+      $("noteUrl").value = ""; $("noteTitle").value = ""; $("noteExcerpt").value = "";
+      $("parseStatus").innerHTML = ""; resolved = null;
+      loadTarget(); // 自动问中枢要下一个目标
+    } else {
+      toast($("result"), "err-note", "❌ " + failText(r, "未入库") + "<br>可稍后重试，不会重复计酬。");
+    }
+  } finally { btn.disabled = false; btn.textContent = "提交这条笔记"; }
+};
+
+// ---------- PWA：注册 SW + 安装提示 + 分享直达 ----------
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+let deferredInstall = null;
+window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); deferredInstall = e; });
+$("installApp").onclick = async () => {
+  if (deferredInstall) {
+    deferredInstall.prompt();
+    await deferredInstall.userChoice; deferredInstall = null;
+  } else {
+    const isiOS = /iP(hone|ad|od)/i.test(navigator.userAgent) ||
+      (navigator.maxTouchPoints > 1 && /mac/i.test(navigator.userAgent));
+    alert(isiOS
+      ? "请点 Safari 底部的「分享」按钮 →「添加到主屏幕」。\n之后从桌面图标直达本页提交。"
+      : "请点浏览器菜单（⋮）→「添加到主屏幕」。\n装好后：在小红书 App 里打开笔记 → 分享 → 选「众包美食家」，即可自动提交，不用复制粘贴。");
+  }
+};
+
+// 分享直达：从小红书 App 分享过来时，自动 取分享文本 → 解析 → 提交到当前分配目标
+async function drainShare() {
+  if (!location.search.includes("share=1")) return;
+  try {
+    const db = await new Promise((res, rej) => {
+      const r = indexedDB.open("crowd-share-db", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("pending", { autoIncrement: true });
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    const items = await new Promise((res) => {
+      const rq = db.transaction("pending", "readonly").objectStore("pending").getAll();
+      rq.onsuccess = () => res(rq.result || []); rq.onerror = () => res([]);
+    });
+    if (!items.length) return;
+    await new Promise((res) => {
+      const tx = db.transaction("pending", "readwrite");
+      tx.objectStore("pending").clear(); tx.oncomplete = res;
+    });
+    $("noteUrl").value = items[items.length - 1].text || "";
+    toast($("result"), "ok-note", "📥 已收到小红书分享，自动解析提交中…");
+    await autoResolve();
+    if (resolved) $("submit").click();
+    else toast($("result"), "err-note", "❌ 分享内容里没解析出笔记链接，请手动粘贴一次。");
+  } catch (e) { /* 静默：用户仍可手动粘贴 */ }
+}
+
+// ---------- 启动 ----------
+// 打开页面先探测服务器连通性：失败则亮出醒目提示条（内置浏览器拦截是常见原因）
+async function pingApi() {
+  const r = await rpc("crowd_status_summary", {}, 8000);
+  if (r.network) $("apiBanner").classList.remove("hidden");
+}
+if (!storageOK) $("storageBanner").classList.remove("hidden");
+pingApi();
+const pid = safeStorage.get("participant_id");
+if (pid && PID_RE.test(pid)) {
+  setPidUI(pid);
+  loadTarget().then(drainShare);
+} else { drainShare(); }
+})();
+</script>
+</body>
+</html>

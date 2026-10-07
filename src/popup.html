@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>众包美食家 · 状态</title>
+<style>
+body{width:300px;font-family:-apple-system,'PingFang SC',sans-serif;padding:14px;font-size:13px;color:#1a1a2e}
+h1{font-size:15px;margin:0 0 10px}
+.row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0f0}
+.label{color:#6b7280}
+.val{font-weight:600}
+.btn{width:100%;padding:8px;margin-top:10px;border:none;border-radius:6px;cursor:pointer;font-size:13px}
+.btn-start{background:#b45309;color:#fff}
+.btn-stop{background:#e5e7eb;color:#374151}
+.status-ok{color:#059669}.status-warn{color:#b45309}.status-bad{color:#dc2626}
+/* M1 评分区（口味评分体系 §8）：样式与弹窗现有浅色系一致 */
+#rate_box{margin-top:10px;border-top:1px solid #f0f0f0;padding-top:8px;display:none}
+#rate_box h2{font-size:13px;margin:0 0 6px;color:#374151}
+.rate-card{border:1px solid #f0f0f0;border-radius:8px;padding:8px;margin-bottom:8px}
+.rate-card .store{font-weight:600;font-size:12px;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stars{display:flex;gap:4px;margin:2px 0 6px}
+.star{font-size:20px;line-height:1;color:#d1d5db;cursor:pointer;background:none;border:none;padding:0}
+.star.on{color:#f59e0b}
+.rate-card textarea{width:100%;box-sizing:border-box;border:1px solid #e5e7eb;border-radius:6px;padding:6px;font-size:12px;font-family:inherit;resize:vertical;min-height:44px}
+.rate-meta{display:flex;justify-content:space-between;align-items:center;margin-top:4px}
+.rate-meta .cnt{font-size:11px;color:#9ca3af}
+.rate-btn{padding:5px 14px;border:none;border-radius:6px;background:#b45309;color:#fff;font-size:12px;cursor:pointer}
+.rate-btn:disabled{background:#e5e7eb;color:#9ca3af;cursor:default}
+.rate-done{color:#059669;font-size:12px;font-weight:600}
+.rate-msg{font-size:11px;margin-top:4px}
+</style>
+</head>
+<body>
+<h1>🍜 众包美食家</h1>
+<div id="status">
+  <div class="row"><span class="label">状态</span><span class="val" id="s_state">—</span></div>
+  <div class="row"><span class="label">今日搜索</span><span class="val" id="s_searches">—</span></div>
+  <div class="row"><span class="label">冷却</span><span class="val" id="s_cooldown">—</span></div>
+  <div class="row"><span class="label">待回传</span><span class="val" id="s_queue">—</span></div>
+  <div class="row"><span class="label">回流健康</span><span class="val" id="s_flow">—</span></div>
+  <div class="row"><span class="label">当前任务</span><span class="val" id="s_task">—</span></div>
+  <div class="row"><span class="label">已完成任务</span><span class="val" id="s_done">—</span></div>
+  <div id="kw_box" style="margin-top:8px;"></div>
+  <div id="rate_box"><h2>⭐ 给门店打分（可选）</h2><div id="rate_list"></div></div>
+  <div class="row"><span class="label">参与编号</span><span class="val" id="s_pid">—</span></div>
+  <div class="row"><span class="label">拦截原因</span><span class="val" id="s_gate">—</span></div>
+</div>
+<button class="btn btn-start" id="start">▶ 启动采集</button>
+<button class="btn btn-stop" id="stop">⏸ 停止</button>
+<script src="popup.js"></script>
+</body>
+</html>
