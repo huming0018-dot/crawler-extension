@@ -188,7 +188,7 @@
           }
           s.candidates.shift();
           // Mark before navigation: crashes cannot create infinite note loops.
-          s.seen.push(id); s.visits++; s.note_id = id; s.note_url = url; s.phase = 'note'; s.loaded_at = null; s.scrolls = 0; s.comment_rounds = 0;
+          s.seen.push(id); s.visits++; s.note_id = id; s.note_url = url; s.phase = 'note'; s.loaded_at = null; s.scrolls = 0; s.comment_rounds = 0; s.comment_snapshot = null; s.comment_stalls = 0;
           s.dwell_ms = C.between(45000, 90000, this.r.random); s.page_deadline = now + 180000;
           s.next_at = now + 30000; await this.save(s);
           await this.r.open(url); alive();
@@ -199,7 +199,7 @@
               if (['known_note','note_busy'].includes(s.last_error)) { s.phase = 'search_done'; s.note_url = null; s.note_id = null; await this.save(s); }
               return;
             }
-            await this.r.open(s.note_url); alive(); s.phase = 'note'; s.loaded_at = null; s.scrolls = 0; s.comment_rounds = 0;
+            await this.r.open(s.note_url); alive(); s.phase = 'note'; s.loaded_at = null; s.scrolls = 0; s.comment_rounds = 0; s.comment_snapshot = null; s.comment_stalls = 0;
             s.page_deadline = now + 180000; s.next_at = now + 30000;
           }
         } else if (s.phase === 'note') {
@@ -210,18 +210,31 @@
             if (now - s.loaded_at < s.dwell_ms || s.scrolls < 2) {
               if (!await this.admit(s, 'scroll', alive, signal)) return;
               await this.r.probe('scroll'); alive(); s.scrolls++; s.next_at = now + C.between(30000, 45000, this.r.random);
-            } else if (page.record.extra.comments && !page.record.extra.comments.truncated && (s.comment_rounds || 0) < 4) {
-              // A bounded public-page expansion; never click like, compose, or post controls.
-              if (!await this.admit(s, 'comment', alive, signal)) return;
-              const progress = await this.r.probe('comments'); alive(); this.checkPage(progress, s, now);
-              s.comment_rounds = (s.comment_rounds || 0) + 1;
-              s.next_at = now + 30000;
             } else {
-              C.validate(page.record);
-              s.outbox.push({request: this.r.uuid(), task: s.task.id, lease: s.task.lease_token, record: page.record});
-              s.page_failures = 0;
-              s.phase = 'search_done'; s.notes_in_session++; s.note_url = null; s.note_id = null; s.loaded_at = null;
-              s.next_at = now + (s.notes_in_session % 8 === 0 ? C.between(300000, 600000, this.r.random) : C.between(30000, 60000, this.r.random));
+              const comments = page.record.extra.comments;
+              // Compare actual loaded content, not just item count: virtual lists
+              // and reply updates can change text without increasing the count.
+              const snapshot = comments ? JSON.stringify(comments.items.map(item => [item.comment_id || item.key, item.parent_key, item.text])) : null;
+              if (s.comment_snapshot != null) {
+                s.comment_stalls = snapshot === s.comment_snapshot ? (s.comment_stalls || 0) + 1 : 0;
+                s.comment_snapshot = null; // Consume each attempted expansion once, even if admission is denied.
+              }
+              const empty = comments && page.record.standard.comment_count === 0 && !comments.items.length && !comments.more_available;
+              const stalled = (s.comment_stalls || 0) >= (comments?.more_available ? 2 : 1);
+              if (comments && !comments.truncated && !empty && !stalled && (s.comment_rounds || 0) < 4) {
+                if (!await this.admit(s, 'comment', alive, signal)) return;
+                s.comment_snapshot = snapshot;
+                // Persist before the DOM action so worker restart cannot repeat an uncounted expansion.
+                s.comment_rounds = (s.comment_rounds || 0) + 1;
+                s.next_at = this.r.now() + 30000; await this.save(s); alive();
+                const progress = await this.r.probe('comments'); alive(); this.checkPage(progress, s, now);
+              } else {
+                C.validate(page.record);
+                s.outbox.push({request: this.r.uuid(), task: s.task.id, lease: s.task.lease_token, record: page.record});
+                s.page_failures = 0;
+                s.phase = 'search_done'; s.notes_in_session++; s.note_url = null; s.note_id = null; s.loaded_at = null;
+                s.next_at = now + (s.notes_in_session % 8 === 0 ? C.between(300000, 600000, this.r.random) : C.between(30000, 60000, this.r.random));
+              }
             }
           }
         }

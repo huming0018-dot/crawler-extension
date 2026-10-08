@@ -5,7 +5,7 @@ const chrome={webNavigation:Object.fromEntries(['onBeforeNavigate','onCommitted'
  openOptionsPage:async()=>{optionsOpened++;},
  onMessage:{addListener:fn=>listener=fn},onStartup:{addListener:fn=>startup=fn},onInstalled:{addListener:fn=>installed=fn}},
  storage:{local:{get:async key=>({[key]:structuredClone(data[key])}),set:async value=>Object.assign(data,structuredClone(value)),setAccessLevel:async value=>accesses.push(value.accessLevel)}},
- alarms:{get:async name=>name==='crowd_diagnostics'?diagnosticAlarm:alarm,create:async(name,info)=>{if(name==='crowd_diagnostics')diagnosticAlarm={name,...info};else alarm={name,...info};},clear:async name=>{if(name==='crowd_diagnostics')diagnosticAlarm=null;else alarm=null;},onAlarm:{addListener:fn=>alarmListener=fn}},
+ alarms:{get:async name=>name==='crowd_diagnostics'?diagnosticAlarm:alarm,create:async(name,info)=>{if(name==='crowd_diagnostics')diagnosticAlarm={name,...info};else alarm={name,...info,scheduledTime:info.when??Date.now()+30000};},clear:async name=>{if(name==='crowd_diagnostics')diagnosticAlarm=null;else alarm=null;},onAlarm:{addListener:fn=>alarmListener=fn}},
  windows:{getAll:async()=>windows,update:async(id,info)=>{createdWindows.push({id,...info});},create:async info=>{createdWindows.push(info);return {tabs:[{id:77}]};}},
  tabs:{onRemoved:{addListener:()=>{}},get:async()=>tabInfo,create:async info=>{createdTabs.push(info);return {id:77};},update:async(id,info)=>{createdTabs.push({id,...info});return {windowId:1};},sendMessage:async()=>{if(probeReply instanceof Error)throw probeReply;return await (typeof probeReply === 'function' ? probeReply() : probeReply);},remove:async()=>{}}};
 const context=vm.createContext({chrome,console,URL,Date,Math,AbortController,crypto:require('node:crypto').webcrypto,setTimeout,clearTimeout,
@@ -15,6 +15,14 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
 (async()=>{
  installed();await new Promise(r=>setImmediate(r));assert.equal(fetches.length,0,'installation must not start collection');assert.deepEqual(accesses,['TRUSTED_CONTEXTS']);
  assert.equal(optionsOpened,1);
+ // Deadline-aligned wakeups, with Chrome's 30s floor and bounded heartbeat during long waits.
+ const wake=Date.now()+45000;await vm.runInContext('runtime.schedule('+wake+')',context);
+ assert.equal(alarm.when,wake,'45s deadline must not be rounded to an unrelated 60s tick');
+ const same=alarm;await vm.runInContext('runtime.schedule('+wake+')',context);assert.equal(alarm,same,'same deadline does not postpone an existing wakeup');
+ await vm.runInContext('runtime.schedule(Date.now()+1)',context);assert.ok(alarm.when>=Date.now()+29000);
+ await vm.runInContext('runtime.schedule(Date.now()+3600000)',context);assert.ok(alarm.when<=Date.now()+60000,'long waits retain control polling without clearing durable deadlines');
+ await vm.runInContext('runtime.cancel()',context);assert.equal(alarm,null);
+
  context.CROWD_CONFIG.trialInvite='a'.repeat(64);installed();await new Promise(r=>setImmediate(r));
  assert.equal(data.pending_invite,'a'.repeat(64));assert.equal(fetches.length,0,'trial handoff does not consent or register');
  data.pending_invite='b'.repeat(64);installed({reason:'update'});await new Promise(r=>setImmediate(r));

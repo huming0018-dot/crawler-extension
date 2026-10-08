@@ -174,7 +174,7 @@ try {
   globalThis.commands=[];let enabled=false,session=true;
   globalThis.chrome={runtime:{sendMessage:async message=>{
    commands.push(message);
-   if(message.type==='state')return {ok:true,data:{session,invited:true,agent:{enabled:false,phase:'idle',outbox:[],rejected:[],last_error:'page_timeout'},status:{participant:{status:'approved'}},diagnostics:{enabled,sent_at:enabled?Date.now():null}}};
+   if(message.type==='state')return {ok:true,data:{session,invited:true,agent:{enabled:false,phase:'idle',outbox:[],rejected:[{reason:'unrelated_note',record:{evidence:{text:'PRIVATE_EVIDENCE_MUST_NOT_APPEAR'}}}],last_error:'page_timeout'},status:{participant:{status:'approved'}},diagnostics:{enabled,sent_at:enabled?Date.now():null}}};
    if(message.type==='diagnostics'){await new Promise(r=>setTimeout(r,50));enabled=message.enabled;}
    if(message.type==='logout')session=false;
    return {ok:true,data:{}};
@@ -183,6 +183,8 @@ try {
  await controller.goto('https://controller.example.test/controller.html');
  await controller.waitForFunction(()=>!document.getElementById('diagnostics').disabled);
  assert.equal(await controller.locator('#diagnostics').isChecked(),false);
+ assert.ok((await controller.locator('#status').textContent()).includes('unrelated_note'),'rejection reason remains visible independently of transient last_error');
+ assert.equal((await controller.locator('body').textContent()).includes('PRIVATE_EVIDENCE_MUST_NOT_APPEAR'),false);
  await controller.locator('#diagnostics').check();
  await controller.waitForFunction(()=>document.getElementById('diagnostics_status').textContent.includes('最近诊断送达'));
  await controller.waitForFunction(()=>!document.getElementById('diagnostics').disabled);

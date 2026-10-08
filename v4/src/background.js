@@ -18,11 +18,15 @@ async function probeTab(id, action) {
 }
 const runtime = {
   storage, now: Date.now, random: Math.random, uuid: () => crypto.randomUUID(),
-  // Durable phase deadlines live in agent.next_at; one repeating alarm repairs
-  // missed ticks after sleep without bypassing cooldowns or daily quotas.
-  async schedule() {
+  // Align the next wake with the durable deadline, not an unrelated 30s grid.
+  // Keep a repeating fallback for worker crashes; poll waits at least once/minute
+  // so sleep detection and independent control refresh keep their semantics.
+  async schedule(when) {
+    const now = Date.now();
+    const at = Math.max(now + 30000, Math.min(Number.isFinite(when) ? when : now + 30000, now + 60000));
     const alarm = await chrome.alarms.get('crowd_tick');
-    if (alarm?.periodInMinutes !== .5) await chrome.alarms.create('crowd_tick', {periodInMinutes: .5});
+    if (alarm?.periodInMinutes !== .5 || !Number.isFinite(alarm.scheduledTime) || Math.abs(alarm.scheduledTime - at) > 1000)
+      await chrome.alarms.create('crowd_tick', {when: at, periodInMinutes: .5});
   },
   cancel: () => chrome.alarms.clear('crowd_tick'),
   async open(url) {
