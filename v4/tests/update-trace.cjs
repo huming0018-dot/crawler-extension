@@ -17,6 +17,16 @@ const c=vm.createContext({console,Date});for(const f of ['updater.js','trace.js'
  chrome.runtime.sendNativeMessage=async()=>({status:'ready',version:'4.2.0'});
  await updater.bootstrap();await updater.bootstrap();
  assert.equal(alarmCreations,1,'worker restarts must not postpone an existing update alarm');
+ const settingsCalls=[];
+ chrome.runtime.sendNativeMessage=async(_,m)=>{settingsCalls.push(m);return {status:m.action==='settings'?'configured':'ready',version:'4.2.3',protocol:2};};
+ await updater.bootstrap();assert.equal(settingsCalls.at(-1).action,'settings');assert.equal(settingsCalls.at(-1).enabled,true);
+ await updater.setEnabled(false);assert.equal(settingsCalls.at(-1).enabled,false);assert.equal(data.updater_enabled,false);
+ assert.equal((await updater.status()).system_ota,true);
+ chrome.runtime.sendNativeMessage=async()=>({status:'error',error:'busy'});
+ await assert.rejects(updater.setEnabled(true),/busy/);assert.equal(data.updater_enabled,false,'failed native preference sync cannot pretend system OTA was enabled');
+ data.updater_enabled=true;await updater.check();assert.equal(updateAlarm.delayInMinutes,1,'busy OS poll gets a one-minute retry instead of another hourly collision');
+ chrome.runtime.sendNativeMessage=async()=>({status:'pending_reload',version:'4.2.3',protocol:2});
+ const reloadBefore=calls.filter(x=>x==='reload').length;await updater.bootstrap();assert.equal(calls.filter(x=>x==='reload').length,reloadBefore+1,'worker loaded before offline swap must reload the new files');
  let settings={id:'user' ,enabled:true,revision:1},now=1800000000000;
  const trace=new c.CrowdTrace({storage,settings:async()=>settings,uuid:()=>crypto.randomUUID(),now:()=>now});
  await trace.event('admission_requested',{start:true});await trace.event('admission_allowed');await trace.event('open_requested');

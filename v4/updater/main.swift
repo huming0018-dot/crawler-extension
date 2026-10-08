@@ -59,27 +59,37 @@ func rollback(_ dir: URL, _ s: inout [String:Any]) throws -> Bool {
   try fm.removeItem(at:backup)
  }
  if fm.fileExists(atPath:stage.path){try safePath(stage);try fm.removeItem(at:stage)}
- s["failed_sequence"]=s["pending_sequence"];s["pending"]=nil;s["pending_sequence"]=nil;s["pending_digest"]=nil;s["applied_at"]=nil;s["status"]="rolled_back"
+ s["failed_sequence"]=s["pending_sequence"];s["pending"]=nil;s["pending_sequence"]=nil;s["pending_digest"]=nil;s["applied_at"]=nil;s["awaiting_launch"]=nil;s["status"]="rolled_back"
  try write(s,stateURL);return true
 }
-func handle(_ message: [String:Any]) throws -> [String:Any] {
- try require(Set(message.keys).isSubset(of:["action","version","release_sha256"]),"invalid_request")
+func handle(_ message: [String:Any], prepareOnly: Bool = false, unattended: Bool = false) throws -> [String:Any] {
+ try require(Set(message.keys).isSubset(of:["action","version","release_sha256","enabled"]),"invalid_request")
  let dir=try configuredDirectory(), (stage,backup)=paths(dir); var s=try state()
  let loaded=message["version"] as? String ?? ""; _=try version(loaded)
  let local=try read(dir.appendingPathComponent("manifest.json"))["version"] as? String ?? ""
  guard let action=message["action"] as? String else {throw Failure("invalid_request")}
+ if action=="settings" {
+  try require(Set(message.keys)==Set(["action","version","enabled"]) && message["enabled"] is Bool,"invalid_request")
+  var config=try read(configURL);config["scheduled_enabled"]=message["enabled"];try write(config,configURL)
+  return ["status":"configured","protocol":2]
+ }
  if action=="rollback" {try require(s["pending"] as? String == loaded,"no_pending_update");let restored=try rollback(dir,&s);return ["status":restored ? "rolled_back":"idle"]}
  if action=="ack" {
   if s["pending"] != nil && local != s["pending"] as? String {_=try rollback(dir,&s)}
   if let pending=s["pending"] as? String {
+   if s["awaiting_launch"] as? Bool == true {
+    s["awaiting_launch"]=nil;s["applied_at"]=Date().timeIntervalSince1970;try write(s,stateURL)
+    if loaded != pending {return ["status":"pending_reload","version":pending,"protocol":2]}
+   }
    try require(loaded==pending && local==pending && message["release_sha256"] as? String==s["pending_digest"] as? String,"handshake_mismatch")
    try require(digest(Data(contentsOf:dir.appendingPathComponent("release.json")))==s["pending_digest"] as? String,"handshake_mismatch")
-   s["sequence"]=s["pending_sequence"];s["loaded_version"]=loaded;s["status"]="applied";s["pending"]=nil;s["pending_sequence"]=nil;s["pending_digest"]=nil;s["applied_at"]=nil
+   s["sequence"]=s["pending_sequence"];s["loaded_version"]=loaded;s["status"]="applied";s["pending"]=nil;s["pending_sequence"]=nil;s["pending_digest"]=nil;s["applied_at"]=nil;s["awaiting_launch"]=nil
    try write(s,stateURL);if fm.fileExists(atPath:backup.path){try fm.removeItem(at:backup)}
+   let cache=root.appendingPathComponent("cache");if fm.fileExists(atPath:cache.path){try safePath(cache);try fm.removeItem(at:cache)}
   }
-  return ["status":s["status"] as? String ?? "ready","version":local]
+  return ["status":s["status"] as? String ?? "ready","version":local,"protocol":2]
  }
- if action=="status" {return ["status":s["pending"] == nil ? (s["status"] as? String ?? "ready") : "pending_reload","version":local]}
+ if action=="status" {return ["status":s["pending"] == nil ? (s["status"] as? String ?? "ready") : "pending_reload","version":local,"protocol":2]}
  try require(action=="apply","invalid_request");try require(local==loaded,"version_mismatch")
  if s["pending"] != nil {return ["status":"pending_reload","version":local]}
  let temp=root.appendingPathComponent("download-"+UUID().uuidString);try fm.createDirectory(at:temp,withIntermediateDirectories:false);defer{try? fm.removeItem(at:temp)}
@@ -87,7 +97,10 @@ func handle(_ message: [String:Any]) throws -> [String:Any] {
  #if TESTING
  channel=(try read(configURL))["test_channel"] as? String ?? channel
  #endif
- let envelopeURL=temp.appendingPathComponent("channel.json");try fetch(channel,envelopeURL,16384)
+ let cache=root.appendingPathComponent("cache"), cachedEnvelope=root.appendingPathComponent("cache/channel.json"), cachedArchive=root.appendingPathComponent("cache/extension.zip")
+ let useCache = !unattended && fm.fileExists(atPath:cachedEnvelope.path) && fm.fileExists(atPath:cachedArchive.path)
+ let envelopeURL=temp.appendingPathComponent("channel.json")
+ if useCache {try safePath(cachedEnvelope);try fm.copyItem(at:cachedEnvelope,to:envelopeURL)} else {try fetch(channel,envelopeURL,16384)}
  let envelope=try read(envelopeURL)
  guard let encoded=envelope["payload"] as? String,let payload=Data(base64Encoded:encoded),let sigText=envelope["signature"] as? String,let signature=Data(base64Encoded:sigText),let keyData=Data(base64Encoded:releasePublicKey) else {throw Failure("invalid_signature")}
  let key=try Curve25519.Signing.PublicKey(rawRepresentation:keyData);try require(key.isValidSignature(signature,for:payload),"invalid_signature")
@@ -100,7 +113,7 @@ func handle(_ message: [String:Any]) throws -> [String:Any] {
  #if !TESTING
  try require(url.range(of:"^https://raw\\.githubusercontent\\.com/huming0018-dot/crowd-pages/[a-f0-9]{40}/v4/releases/[a-z0-9.-]+\\.zip$",options:.regularExpression) != nil,"invalid_url")
  #endif
- let archive=temp.appendingPathComponent("extension.zip");try fetch(url,archive,2097152);let data=try Data(contentsOf:archive);try require(data.count==bytes && digest(data)==hash,"hash_mismatch")
+ let archive=temp.appendingPathComponent("extension.zip");if useCache {try safePath(cachedArchive);try fm.copyItem(at:cachedArchive,to:archive)} else {try fetch(url,archive,2097152)};let data=try Data(contentsOf:archive);try require(data.count==bytes && digest(data)==hash,"hash_mismatch")
  let listing=try run("/usr/bin/unzip",["-Z","-1",archive.path]);guard let namesText=String(data:listing,encoding:.utf8) else {throw Failure("unsafe_archive")}
  let names=namesText.split(separator:"\n").map(String.init)
  try require(names.count<100 && Set(names).count==names.count && names.allSatisfy{!$0.isEmpty && !$0.hasPrefix("/") && !$0.contains("\\") && !$0.split(separator:"/",omittingEmptySubsequences:false).contains(where:{$0==".." || $0=="." || $0.isEmpty}) && $0.unicodeScalars.allSatisfy{$0.value>=32 && $0.value<127}},"unsafe_archive")
@@ -131,12 +144,36 @@ func handle(_ message: [String:Any]) throws -> [String:Any] {
  for field in ["permissions","host_permissions","externally_connectable","content_scripts"] {
   let a=try JSONSerialization.data(withJSONObject:oldManifest[field] ?? [],options:[.sortedKeys,.fragmentsAllowed]);let b=try JSONSerialization.data(withJSONObject:newManifest[field] ?? [],options:[.sortedKeys,.fragmentsAllowed]);try require(a==b,"permission_change")
  }
+ // Keep a verified package while a browser owns the live directory. The
+ // browser revalidates this signed cache before applying it, including offline.
+ if unattended {
+  if fm.fileExists(atPath:cache.path){try safePath(cache)}else{try fm.createDirectory(at:cache,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
+  try data.write(to:cachedArchive,options:.atomic);try Data(contentsOf:envelopeURL).write(to:cachedEnvelope,options:.atomic)
+ }
+ if try prepareOnly || (unattended && browserRunning()) {return ["status":"downloaded","version":next]}
  // Persist intent before swap. Recovery handles a process crash at each boundary.
- s["pending"]=next;s["pending_sequence"]=sequence;s["pending_digest"]=releaseHash;s["applied_at"]=Date().timeIntervalSince1970;s["status"]="applying";try write(s,stateURL)
+ s["pending"]=next;s["pending_sequence"]=sequence;s["pending_digest"]=releaseHash;s["applied_at"]=Date().timeIntervalSince1970;s["status"]="applying";s["awaiting_launch"]=unattended;try write(s,stateURL)
  try fm.moveItem(at:stage,to:backup)
  try require(renameatx_np(AT_FDCWD,dir.path,AT_FDCWD,backup.path,UInt32(RENAME_SWAP))==0,"swap_failed")
  s["status"]="pending_reload";try write(s,stateURL)
  return ["status":"pending_reload","version":next]
+}
+func browserRunning() throws -> Bool {
+ #if TESTING
+ if let value=(try read(configURL))["test_browser_running"] as? Bool {return value}
+ #endif
+ let process=Process();process.executableURL=URL(fileURLWithPath:"/usr/bin/pgrep")
+ process.arguments=["-u",String(getuid()),"-f","Google Chrome|Microsoft Edge"]
+ process.standardOutput=FileHandle.nullDevice;process.standardError=FileHandle.nullDevice
+ try process.run();process.waitUntilExit();try require([0,1].contains(process.terminationStatus),"process_check_failed")
+ return process.terminationStatus==0
+}
+func scheduledPoll() throws {
+ let dir=try configuredDirectory();guard (try read(configURL))["scheduled_enabled"] as? Bool == true else {return}
+ let local=try read(dir.appendingPathComponent("manifest.json"))["version"] as? String ?? ""
+ let supportsOffline = !(try greater("4.2.3",local))
+ let result=try handle(["action":"apply","version":local],prepareOnly: try !supportsOffline || browserRunning(),unattended:true)
+ var current=try state();current["last_poll_at"]=Date().timeIntervalSince1970;current["poll_status"]=result["status"];current["poll_error"]=nil;try write(current,stateURL)
 }
 func install(_ directory: String, _ browser: String) throws {
  try require(["Google Chrome","Microsoft Edge"].contains(browser),"unsupported_browser")
@@ -148,9 +185,13 @@ func install(_ directory: String, _ browser: String) throws {
  let home=fm.homeDirectoryForCurrentUser, support=home.appendingPathComponent("Library/Application Support"), dest=support.appendingPathComponent("CrowdV4Updater")
  if fm.fileExists(atPath:dest.path){try safePath(dest);if fm.fileExists(atPath:dest.appendingPathComponent("config.json").path){try require(try read(dest.appendingPathComponent("config.json"))["directory"] as? String==dir.path,"different_installation")}}
  else {try fm.createDirectory(at:dest,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])}
+ let installLock=open(dest.appendingPathComponent("update.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600)
+ try require(installLock>=0,"lock_failed");defer{close(installLock)}
+ try require(flock(installLock,LOCK_EX|LOCK_NB)==0,"busy")
  let binary=dest.appendingPathComponent("crowd-v4-updater")
  try Data(contentsOf:executable).write(to:binary,options:.atomic);try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:binary.path)
- try write(["directory":dir.path,"extension_key":encoded],dest.appendingPathComponent("config.json"))
+ let prior=(try? read(dest.appendingPathComponent("config.json"))) ?? [:]
+ try write(["directory":dir.path,"extension_key":encoded,"scheduled_enabled":prior["scheduled_enabled"] as? Bool ?? false],dest.appendingPathComponent("config.json"))
  let browserSupport=support.appendingPathComponent(browser=="Google Chrome" ? "Google/Chrome":"Microsoft Edge"), hosts=browserSupport.appendingPathComponent("NativeMessagingHosts")
  if fm.fileExists(atPath:hosts.path){try safePath(hosts)}else{try fm.createDirectory(at:hosts,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])}
  try write(["name":hostName,"description":"Verified updates for the existing crowd v4 extension","path":binary.path,"type":"stdio","allowed_origins":[origin]],hosts.appendingPathComponent(hostName+".json"))
@@ -160,16 +201,25 @@ func install(_ directory: String, _ browser: String) throws {
  try PropertyListSerialization.data(fromPropertyList:value,format:.xml,options:0).write(to:plist,options:.atomic)
  _=try? run("/bin/launchctl",["bootout","gui/\(getuid())",plist.path])
  _=try run("/bin/launchctl",["bootstrap","gui/\(getuid())",plist.path])
+ let otaPlist=agents.appendingPathComponent(hostName+".ota.plist")
+ let ota:[String:Any]=["Label":hostName+".ota","ProgramArguments":[binary.path,"--poll"],"StartInterval":3600,"RunAtLoad":true]
+ try PropertyListSerialization.data(fromPropertyList:ota,format:.xml,options:0).write(to:otaPlist,options:.atomic)
+ _=try? run("/bin/launchctl",["bootout","gui/\(getuid())",otaPlist.path])
+ _=try run("/bin/launchctl",["bootstrap","gui/\(getuid())",otaPlist.path])
  FileHandle.standardError.write(Data("更新助手已接通；只更新原 v4 插件，不关闭浏览器。\n".utf8))
 }
 func output(_ value: [String:Any]) {if let data=try? JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]){var n=UInt32(data.count).littleEndian;FileHandle.standardOutput.write(Data(bytes:&n,count:4));FileHandle.standardOutput.write(data)}}
 func exactRead(_ count: Int) throws -> Data {var data=Data();while data.count<count {let chunk=FileHandle.standardInput.readData(ofLength:count-data.count);if chunk.isEmpty {throw Failure("invalid_message")};data.append(chunk)};return data}
 do {
  if CommandLine.arguments.count==4 && CommandLine.arguments[1]=="--install" {try install(CommandLine.arguments[2],CommandLine.arguments[3]);exit(0)}
- try require(CommandLine.arguments.count==2 && (CommandLine.arguments[1]==origin || CommandLine.arguments[1]=="--recover"),"invalid_origin")
+ try require(CommandLine.arguments.count==2 && (CommandLine.arguments[1]==origin || CommandLine.arguments[1]=="--recover" || CommandLine.arguments[1]=="--poll"),"invalid_origin")
  let fd=open(root.appendingPathComponent("update.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600);try require(fd>=0,"lock_failed");defer{close(fd)};try require(flock(fd,LOCK_EX|LOCK_NB)==0,"busy")
- if CommandLine.arguments[1]=="--recover" {
-  let dir=try configuredDirectory();var s=try state();if let at=s["applied_at"] as? Double,Date().timeIntervalSince1970-at>300 {_=try rollback(dir,&s)}
+ if CommandLine.arguments[1]=="--poll" {
+  do {try scheduledPoll()} catch {var current=(try? state()) ?? [:];current["last_poll_at"]=Date().timeIntervalSince1970;current["poll_error"]=(error as? Failure)?.code ?? "operation_failed";try? write(current,stateURL);throw error}
+ } else if CommandLine.arguments[1]=="--recover" {
+  let dir=try configuredDirectory();var s=try state()
+  if let pending=s["pending"] as? String,try read(dir.appendingPathComponent("manifest.json"))["version"] as? String != pending {_=try rollback(dir,&s)}
+  else if s["awaiting_launch"] as? Bool != true,let at=s["applied_at"] as? Double,Date().timeIntervalSince1970-at>300 {_=try rollback(dir,&s)}
   else if s["pending"]==nil,let at=s["staging_at"] as? Double,Date().timeIntervalSince1970-at>300 {
    let(stage,_)=paths(dir);if fm.fileExists(atPath:stage.path){try safePath(stage);try fm.removeItem(at:stage)};s["staging_at"]=nil;try write(s,stateURL)
   }

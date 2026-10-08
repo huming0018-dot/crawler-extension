@@ -52,7 +52,7 @@ async function refresh() {
   const updates={ready:'更新助手已接通',applied:'新版已加载',current:'已是当前发布版本',checking:'正在检查和验证更新',pending_reload:'文件已更新，等待插件重载',helper_unavailable:'尚未接通本机更新助手',error:'本次更新未完成，原记录保留',rolled_back:'更新失败，已恢复原文件'};
   $('auto_update').checked=data.updater?.enabled!==false;
   $('auto_update').disabled=!!data.updater?.busy;
-  $('updater_status').textContent=(updates[data.updater?.state]||'更新状态尚未确认')+(data.updater?.error?'（'+data.updater.error+'）':'');
+  $('updater_status').textContent=(updates[data.updater?.state]||'更新状态尚未确认')+(data.updater?.error?'（'+data.updater.error+'）':'')+(data.updater?.system_ota?'；系统定时 OTA 已接通':'；系统定时 OTA 尚未接通');
   $('profiles').checked=s.profiles===true;
   $('profiles').disabled=!data.session || actions>0;
   $('welcome').textContent = errors[p.error] || errors[s.last_error] || (s.enabled ? (s.phase === 'idle' ? '自动任务已开启，正在等待下一步。' : '自动任务执行中，你可以随时停止。') : data.session ? '参与身份已就绪，可点击继续；无需再次报名。' : data.invited ? '邀请已接续，请确认是否参与。' : '请从邀请链接打开，无需注册中台账号。');

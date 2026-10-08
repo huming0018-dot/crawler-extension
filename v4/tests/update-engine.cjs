@@ -10,7 +10,8 @@ const manifest=JSON.parse(fs.readFileSync(path.join(fixture.directory,'manifest.
 fs.mkdirSync(path.join(profile,'NativeMessagingHosts'),{recursive:true});fs.writeFileSync(path.join(profile,'NativeMessagingHosts',host+'.json'),JSON.stringify({name:host,description:'isolated updater test',path:path.join(fixture.helper,'crowd-v4-updater'),type:'stdio',allowed_origins:['chrome-extension://licijehcpohikchlnkbpjdjdfkcocndg/']}));
 let browser;const result={scope:'Real installed extension and native host; synthetic local identity/evidence; signed fixture channel',started_at:new Date().toISOString()};
 (async()=>{try{
- browser=await puppeteer.launch({executablePath:process.env.CROWD_CHROME_BIN,headless:false,pipe:true,userDataDir:profile,protocolTimeout:15000,ignoreDefaultArgs:['--disable-extensions'],args:[`--disable-extensions-except=${fixture.directory}`,`--load-extension=${fixture.directory}`,'--host-resolver-rules=MAP *.supabase.co ~NOTFOUND']});
+ const launchOptions={executablePath:process.env.CROWD_CHROME_BIN,headless:false,pipe:true,userDataDir:profile,protocolTimeout:15000,ignoreDefaultArgs:['--disable-extensions'],args:[`--disable-extensions-except=${fixture.directory}`,`--load-extension=${fixture.directory}`,'--host-resolver-rules=MAP *.supabase.co ~NOTFOUND']};
+ browser=await puppeteer.launch(launchOptions);
  const developerPage=await browser.newPage();await developerPage.goto('chrome://extensions/');
  result.developerMode=await developerPage.evaluate(()=>{const manager=document.querySelector('extensions-manager');const toolbar=manager.shadowRoot.querySelector('extensions-toolbar');const toggle=toolbar.shadowRoot.querySelector('cr-toggle');if(!toggle.checked)toggle.click();return toggle.checked;});assert.equal(result.developerMode,true);await developerPage.close();
  const pid=browser.process().pid,tab=await browser.newPage();await tab.goto('data:text/html,<title>Preserve this tab</title>browser stays open');
@@ -21,6 +22,14 @@ let browser;const result={scope:'Real installed extension and native host; synth
  result.native=await worker.evaluate(()=>chrome.runtime.sendNativeMessage('com.crowd.v4.updater',{action:'status',version:CrowdCore.VERSION}));assert.ok(['ready','rolled_back'].includes(result.native.status));
  await worker.evaluate(async()=>{await chrome.alarms.clear('crowd_update');await chrome.storage.local.set({session:{user:{id:'fixture-participant'}},pending_invite:'fixture-kept','agent:fixture-participant':{...CrowdCore.initial(),enabled:false,consent:CrowdCore.CONSENT,outbox:[{request:'original-evidence',record:{unchanged:true}}],rejected:[{request:'old-rejection',reason:'unrelated_note'}],next_at:Date.now()+600000}});});
  const saved=await worker.evaluate(()=>chrome.storage.local.get(['session','pending_invite','agent:fixture-participant']));
+ if(process.env.CROWD_SYSTEM_OTA){
+  const configFile=path.join(fixture.helper,'config.json'),config=JSON.parse(fs.readFileSync(configFile));config.test_browser_running=true;config.scheduled_enabled=true;fs.writeFileSync(configFile,JSON.stringify(config));
+  require('child_process').execFileSync(path.join(fixture.helper,'crowd-v4-updater'),['--poll']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.directory,'manifest.json'))).version,manifest.version);
+  assert.ok(fs.existsSync(path.join(fixture.helper,'cache/extension.zip')));fs.unlinkSync(fixture.channel);
+  result.systemDownloadWhileBrowserRunning=true;
+ }
+
  await worker.evaluate(()=>updater.check()).catch(e=>{if(!/Target closed|context|Session closed|Protocol error/i.test(e.message))throw e;});
  const until=Date.now()+25000;let next;
  while(Date.now()<until){const target=browser.targets().find(t=>t.type()==='service_worker'&&t.url().endsWith(targetWorker));if(target){try{next=await target.worker();if(await next.evaluate(()=>CrowdCore.VERSION)===targetVersion)break;}catch{}}await new Promise(r=>setTimeout(r,200));}
@@ -46,5 +55,32 @@ with zipfile.ZipFile(sys.argv[2],'w',zipfile.ZIP_DEFLATED) as z:
  assert.ok(rollbackWorker,'broken release did not roll back and reload old worker');
  assert.deepEqual(await rollbackWorker.evaluate(()=>chrome.storage.local.get(['session','pending_invite','agent:fixture-participant'])),saved);
  assert.equal(browser.process().pid,pid);assert.equal(await tab.title(),'Preserve this tab');
- result.brokenReleaseRolledBack=true;result.identityPreserved=true;result.evidencePreserved=true;result.browserNotRestarted=true;result.result='PASS';
+ result.brokenReleaseRolledBack=true;result.identityPreserved=true;result.evidencePreserved=true;result.browserNotRestarted=true;
+ if(process.env.CROWD_SYSTEM_OTA){
+  await browser.close();browser=null;
+  const future=path.join(root,'future.zip');
+  cp.execFileSync('python3',['-c',`import json,zipfile,hashlib,sys
+with zipfile.ZipFile(sys.argv[1]) as z:files={n:z.read(n) for n in z.namelist()}
+m=json.loads(files['manifest.json']);old=m['background']['service_worker'];new=old.replace(sys.argv[3].replace('.','_'),sys.argv[4].replace('.','_'));m['version']=sys.argv[4];m['background']['service_worker']=new;files['manifest.json']=json.dumps(m).encode();files[new]=files.pop(old).replace(sys.argv[3].encode(),sys.argv[4].encode());files['src/core.js']=files['src/core.js'].replace(sys.argv[3].encode(),sys.argv[4].encode())
+r=json.loads(files.pop('release.json'));r['version']=sys.argv[4];r['worker']=new;r['files']={n:hashlib.sha256(b).hexdigest() for n,b in files.items()};files['release.json']=json.dumps(r).encode()
+with zipfile.ZipFile(sys.argv[2],'w',zipfile.ZIP_DEFLATED) as z:
+ for n,b in files.items():
+  i=zipfile.ZipInfo(n);i.create_system=3;i.external_attr=0o100644<<16;i.compress_type=zipfile.ZIP_DEFLATED;z.writestr(i,b)
+`,fixture.new,future,targetVersion,badVersion]);
+  cp.execFileSync(process.execPath,['v4/updater/publish.cjs',fixture.private_key,future,require('url').pathToFileURL(future).href,'6',fixture.channel]);
+  const configFile=path.join(fixture.helper,'config.json'),config=JSON.parse(fs.readFileSync(configFile));config.test_browser_running=false;fs.writeFileSync(configFile,JSON.stringify(config));
+  cp.execFileSync(path.join(fixture.helper,'crowd-v4-updater'),['--poll']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.directory,'manifest.json'))).version,badVersion);
+  const offlineState=JSON.parse(fs.readFileSync(stateFile));assert.equal(offlineState.awaiting_launch,true);offlineState.applied_at=Date.now()/1000-86400;fs.writeFileSync(stateFile,JSON.stringify(offlineState));
+  cp.execFileSync(path.join(fixture.helper,'crowd-v4-updater'),['--recover']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.directory,'manifest.json'))).version,badVersion);
+  config.test_browser_running=true;fs.writeFileSync(configFile,JSON.stringify(config));
+  browser=await puppeteer.launch(launchOptions);
+  const fresh=await(await browser.waitForTarget(t=>t.type()==='service_worker'&&t.url().endsWith('background_v'+badVersion.replaceAll('.','_')+'.js'))).worker();
+  const deadline=Date.now()+15000;while(Date.now()<deadline&&JSON.parse(fs.readFileSync(stateFile)).loaded_version!==badVersion)await new Promise(r=>setTimeout(r,200));
+  assert.equal(JSON.parse(fs.readFileSync(stateFile)).loaded_version,badVersion);
+  assert.deepEqual(await fresh.evaluate(()=>chrome.storage.local.get(['session','pending_invite','agent:fixture-participant'])),saved);
+  result.closedBrowserUpdated=true;result.nextLaunchConfirmed=badVersion;result.identityPreservedAfterClosedUpdate=true;
+ }
+ result.result='PASS';
 }catch(e){if(browser){result.targets=browser.targets().map(t=>({type:t.type(),url:t.url()}));try{const p=await browser.newPage();await p.goto('chrome://extensions/');result.extensionErrors=await p.evaluate(()=>new Promise(resolve=>chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true},items=>resolve(items.filter(i=>i.id==='licijehcpohikchlnkbpjdjdfkcocndg').map(i=>({state:i.state,runtimeErrors:i.runtimeErrors,manifestErrors:i.manifestErrors}))))));}catch{}}result.result='FAIL';result.error=e.message;process.exitCode=1;}finally{if(browser)await browser.close();result.finished_at=new Date().toISOString();fs.writeFileSync(path.join(root,'browser-result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));}})();
