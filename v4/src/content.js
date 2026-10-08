@@ -211,6 +211,10 @@
       if (sender.id !== chrome.runtime.id || message.type !== 'crowd_probe') return;
       try { reply(probe(message.action)); } catch (e) { reply({ready: false, error: e.message}); }
     });
-    chrome.runtime.sendMessage({type: 'page_ready'}).catch(() => {});
+    // Register at document_start: a parser-blocking script must not hide an
+    // already rendered search or gate from the worker. Probes decide readiness.
+    const notify = () => chrome.runtime.sendMessage({type: 'page_ready'}).catch(() => {});
+    notify();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', notify, {once: true});
   }
 })(globalThis);

@@ -1,13 +1,13 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
-const src=path.resolve(__dirname,'../src'); let listener, installed, startup, alarmListener, accesses=[],fetches=[],optionsOpened=0, alarm=null,diagnosticAlarm=null, windows=[{id:1}],tabInfo={status:'complete'},createdTabs=[],createdWindows=[],probeReply={ready:false},diagnosticsOffline=false;const data={}; const navListeners={};
+const src=path.resolve(__dirname,'../src'); let listener, installed, startup, alarmListener, accesses=[],fetches=[],optionsOpened=0, alarm=null,diagnosticAlarm=null, windows=[{id:1}],tabInfo={status:'complete'},createdTabs=[],createdWindows=[],probeReply={ready:false},diagnosticsOffline=false;const data={}; const navListeners={};let tabNavigationHook=async()=>{};
 const chrome={webNavigation:Object.fromEntries(['onBeforeNavigate','onCommitted','onDOMContentLoaded','onCompleted','onErrorOccurred'].map(name=>[name,{addListener:fn=>navListeners[name]=fn}])),runtime:{id:'test-extension',getURL:x=>'chrome-extension://test-extension/'+x,
  openOptionsPage:async()=>{optionsOpened++;},
  onMessage:{addListener:fn=>listener=fn},onStartup:{addListener:fn=>startup=fn},onInstalled:{addListener:fn=>installed=fn}},
  storage:{local:{get:async key=>({[key]:structuredClone(data[key])}),set:async value=>Object.assign(data,structuredClone(value)),setAccessLevel:async value=>accesses.push(value.accessLevel)}},
  alarms:{get:async name=>name==='crowd_diagnostics'?diagnosticAlarm:alarm,create:async(name,info)=>{if(name==='crowd_diagnostics')diagnosticAlarm={name,...info};else alarm={name,...info,scheduledTime:info.when??Date.now()+30000};},clear:async name=>{if(name==='crowd_diagnostics')diagnosticAlarm=null;else alarm=null;},onAlarm:{addListener:fn=>alarmListener=fn}},
  windows:{getAll:async()=>windows,update:async(id,info)=>{createdWindows.push({id,...info});},create:async info=>{createdWindows.push(info);return {tabs:[{id:77}]};}},
- tabs:{onRemoved:{addListener:()=>{}},get:async()=>tabInfo,create:async info=>{createdTabs.push(info);return {id:77};},update:async(id,info)=>{createdTabs.push({id,...info});return {windowId:1};},sendMessage:async()=>{if(probeReply instanceof Error)throw probeReply;return await (typeof probeReply === 'function' ? probeReply() : probeReply);},remove:async()=>{context.removed=(context.removed||0)+1;}}};
+ tabs:{onRemoved:{addListener:()=>{}},get:async()=>tabInfo,create:async info=>{createdTabs.push(info);await tabNavigationHook(77,info);return {id:77};},update:async(id,info)=>{createdTabs.push({id,...info});await tabNavigationHook(id,info);return {windowId:1};},sendMessage:async()=>{if(probeReply instanceof Error)throw probeReply;return await (typeof probeReply === 'function' ? probeReply() : probeReply);},remove:async()=>{context.removed=(context.removed||0)+1;}}};
 const context=vm.createContext({chrome,console,URL,Date,Math,AbortController,crypto:require('node:crypto').webcrypto,setTimeout,clearTimeout,
  fetch:async(url,options)=>{fetches.push({url,options});if(url.endsWith('crowd_v4_guard'))return {ok:true,json:async()=>({version:1,ttl_ms:600000,paused:false,allowed:true,reason:null,wait_ms:0,gap_ms:30000,caps:{search:30,detail:60,comment:120,scroll:120},counts:{search:0,detail:0,comment:0,scroll:0},session_count:0})};if(url.endsWith('crowd_v4_diagnostics')){if(diagnosticsOffline)throw new Error('offline');return {ok:true,json:async()=>({saved_at:new Date().toISOString()})};}return {ok:true,json:async()=>({participant:{status:'approved'}})};}});
 context.importScripts=(...names)=>{for(const name of names){if(name==='config.js')context.CROWD_CONFIG={url:'https://test.supabase.co',key:'sb_publishable_test'};else vm.runInContext(fs.readFileSync(path.join(src,name),'utf8'),context);}};
@@ -42,13 +42,13 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
  alarm=null;await vm.runInContext('agent.tick()',context);assert.equal(alarm.periodInMinutes,.5,'worker load/tick repairs cleared alarms');
  const url='https://www.xiaohongshu.com/explore/abcdef0123456789abcdef01';
  delete data.work_tab;await vm.runInContext('runtime.open('+JSON.stringify(url)+')',context);
- assert.equal(createdTabs.at(-1).active,false);assert.equal(createdTabs.at(-1).windowId,1);
+ assert.equal(createdTabs.at(-2).url,'about:blank');assert.equal(createdTabs.at(-2).windowId,1);assert.equal(createdTabs.at(-1).url,url);assert.equal(createdTabs.at(-1).active,false);assert.equal(data.work_tab,77);
  windows=[];delete data.work_tab;await vm.runInContext('runtime.open('+JSON.stringify(url)+')',context);
  assert.equal(createdWindows.at(-1).state,'minimized');assert.equal(createdWindows.at(-1).focused,false);
  tabInfo={status:'complete',url:'https://example.test/personal'};
  const beforeForeign=createdTabs.length;
  await vm.runInContext('runtime.open('+JSON.stringify(url)+')',context);
- assert.equal(createdTabs.length,beforeForeign,'a stale tab ID must not navigate an unrelated user tab');
+ assert.equal(createdTabs.length,beforeForeign+1,'only the newly created window tab is navigated');
  assert.equal(createdWindows.at(-1).state,'minimized');
  tabInfo={discarded:true};assert.equal((await vm.runInContext('runtime.probe("note")',context)).reopen,true);
  tabInfo={status:'loading'};probeReply={ready:true,links:[url]};
@@ -101,6 +101,13 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
  let navReport=JSON.parse(fetches.at(-1).options.body).p_state;
  assert.equal(navReport.nav_error,'ERR_NAME_NOT_RESOLVED');assert.equal(navReport.nav_stage,'failed');assert.equal(navReport.probe_status,'ok');
  assert.equal(JSON.stringify(navReport).includes('PRIVATE_'),false);
+ await vm.runInContext('clearNavigation(true)',context);
+ await vm.runInContext('reportDiagnostics()',context);
+ const retried=JSON.parse(fetches.at(-1).options.body).p_state;
+ assert.equal(retried.nav_stage,'unknown');assert.equal(retried.prev_nav_stage,'failed');
+ assert.equal(retried.prev_nav_error,'ERR_NAME_NOT_RESOLVED','a retry must not erase the last navigation failure');
+ assert.equal(JSON.stringify(retried).includes('PRIVATE_'),false);
+ await nav('onErrorOccurred',{error:'net::ERR_NAME_NOT_RESOLVED'});
  await nav('onErrorOccurred',{error:'PRIVATE_URL_TOKEN raw arbitrary error'});
  assert.equal(data['diagnostics:one:navigation'].error,'OTHER');
  await nav('onCompleted',{timeStamp:navEvent.timeStamp+1});
@@ -117,10 +124,19 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
  const loadingReport=JSON.parse(fetches.at(-1).options.body).p_state;
  assert.equal(loadingReport.tab_status,'loading');assert.equal(loadingReport.body_chars,200,'diagnostics probe DOM even while loading');
  tabInfo={status:'complete'};
+ // A fast main-frame event occurs before tabs.create/update resolves.
+ delete data.work_tab;windows=[{id:1}];
+ tabNavigationHook=async(id,info)=>{if(info.url?.startsWith('https://www.xiaohongshu.com/')){
+   navListeners.onCommitted({tabId:id,frameId:0,url:info.url,timeStamp:Date.now()});
+   await vm.runInContext('navigationQueue',context);
+ }};
+ await vm.runInContext('runtime.open('+JSON.stringify(url)+')',context);
+ assert.equal(data['diagnostics:one:navigation'].stage,'committed','new tab must be owned before a fast navigation event');
+ tabNavigationHook=async()=>{};
  assert.equal((await command({type:'diagnostics',enabled:false})).ok,true);assert.equal(diagnosticAlarm,null);
  assert.equal(JSON.parse(fetches.at(-1).options.body).p_action,'disable');
  assert.equal(JSON.parse(fetches.at(-1).options.body).p_state,null);
- assert.equal(data['diagnostics:one:navigation'],null,'opt-out clears local navigation snapshot');
+ assert.equal(data['diagnostics:one:navigation'],null,'opt-out clears local navigation snapshot');assert.equal(data['diagnostics:one:previous_navigation'],null,'opt-out clears the prior attempt too');
  await nav('onErrorOccurred',{error:'net::ERR_CONNECTION_RESET'});assert.equal(data['diagnostics:one:navigation'],null);
  diagnosticsOffline=true;await command({type:'diagnostics',enabled:true});
  assert.equal(data['agent:one'].enabled,false,'telemetry failure never changes collector state');
@@ -139,7 +155,7 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
  delete data.session;const beforeNoSession=fetches.length;await vm.runInContext('reportDiagnostics()',context);assert.equal(fetches.length,beforeNoSession,'signed-out identities send nothing');
  // Firefox event pages load background.scripts and have neither importScripts nor setAccessLevel.
  const manifest=JSON.parse(fs.readFileSync(path.join(src,'../manifest.json')));
- assert.equal(manifest.content_scripts[0].run_at,'document_end','page probe must be installed before subresource load completion');
+ assert.equal(manifest.content_scripts[0].run_at,'document_start','page probe must be installed before parser-blocking scripts');
  const firefox={...chrome,runtime:{...chrome.runtime,getURL:x=>'moz-extension://test-extension/'+x},storage:{local:{get:async()=>({}),set:async()=>{}}}};
  const page=vm.createContext({chrome:firefox,console,URL,Date,Math,AbortController,crypto:require('node:crypto').webcrypto,setTimeout,clearTimeout,fetch:()=>{throw new Error('Unexpected anonymous request');}});
  for(const file of manifest.background.scripts) {

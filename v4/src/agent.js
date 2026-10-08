@@ -186,8 +186,11 @@
           s.next_at = now + 3600000;
         } else if (s.phase === 'idle') {
           if (!await this.admit(s, 'search', alive, signal)) return;
-          await this.r.open(C.HOST + '/search_result?keyword=' + encodeURIComponent(s.task.query) + '&source=web_search_result_notes'); alive();
           s.phase = 'search'; s.page_deadline = now + 120000; s.next_at = now + 30000;
+          // Persist before navigation: a worker restart after tabs.update must
+          // resume probing instead of opening/charging the same search again.
+          await this.save(s); alive();
+          await this.r.open(C.HOST + '/search_result?keyword=' + encodeURIComponent(s.task.query) + '&source=web_search_result_notes'); alive();
         } else if (s.phase === 'search') {
           const page = await this.r.probe('search'); alive();
           const normalize = value => String(value || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();

@@ -159,7 +159,7 @@ try {
   create function auth.uid() returns uuid language sql as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;
   create function auth.role() returns text language sql as $$select current_setting('request.jwt.claim.role',true)$$;
   grant usage on schema auth to authenticated;grant execute on function auth.uid(),auth.role() to authenticated;`);
- for(const suffix of ['20261006145016_crowd_v4.sql','_crowd_v4_diagnostics.sql','_crowd_v4_navigation_diagnostics.sql','_crowd_v4_view_count.sql','_crowd_v4_safety.sql','_crowd_v4_receipt_recovery.sql','_crowd_v4_task_scheduling.sql','_crowd_v4_observations.sql','_crowd_v4_relevance_aliases.sql','_crowd_v4_login_diagnostics.sql']) await db.exec(fs.readFileSync(path.join(migrations,fs.readdirSync(migrations).find(n=>n.endsWith(suffix))),'utf8'));
+ for(const suffix of ['20261006145016_crowd_v4.sql','_crowd_v4_diagnostics.sql','_crowd_v4_navigation_diagnostics.sql','_crowd_v4_view_count.sql','_crowd_v4_safety.sql','_crowd_v4_receipt_recovery.sql','_crowd_v4_task_scheduling.sql','_crowd_v4_observations.sql','_crowd_v4_relevance_aliases.sql','_crowd_v4_login_diagnostics.sql','_crowd_v4_navigation_recovery.sql']) await db.exec(fs.readFileSync(path.join(migrations,fs.readdirSync(migrations).find(n=>n.endsWith(suffix))),'utf8'));
  await db.query('insert into auth.users values($1)',[user]);
  await db.query("insert into crowd_v4.participants(user_id,status,consent,quota_day) values($1,'approved','crowd-public-v4',2)",[user]);
  await db.exec(`insert into crowd_v4.tasks(source_key,query,store_name,anchor_terms,target) values('fixture','测试餐厅','测试餐厅','["测试餐厅"]',1)`);

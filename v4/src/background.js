@@ -32,7 +32,7 @@ const runtime = {
   cancel: () => chrome.alarms.clear('crowd_tick'),
   async open(url) {
     CrowdCore.navigationURL(url);
-    await clearNavigation();
+    await clearNavigation(true);
     const id = await storage.get('work_tab');
     if (id) { try {
       const tab = await chrome.tabs.get(id);
@@ -41,9 +41,12 @@ const runtime = {
       await chrome.tabs.update(id, {url, active: false}); return;
     } catch (_) {} }
     const [window] = await chrome.windows.getAll({windowTypes: ['normal']});
-    const tab = window ? await chrome.tabs.create({url, windowId: window.id, active: false}) :
-      (await chrome.windows.create({url, type: 'normal', state: 'minimized', focused: false})).tabs[0];
+    // Register ownership before starting a navigation. Otherwise fast commit /
+    // error events can arrive before work_tab exists and disappear from telemetry.
+    const tab = window ? await chrome.tabs.create({url: 'about:blank', windowId: window.id, active: false}) :
+      (await chrome.windows.create({url: 'about:blank', type: 'normal', state: 'minimized', focused: false})).tabs[0];
     await storage.set('work_tab', tab.id);
+    await chrome.tabs.update(tab.id, {url, active: false});
   },
   async probe(action) {
     const id = await storage.get('work_tab');
@@ -67,10 +70,16 @@ const diagnosticKey = (id, suffix) => 'diagnostics:' + id + ':' + suffix;
 const diagnosticErrors = ['page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','backend_login_required','user_login','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt'];
 const navigationErrors = ['ERR_NAME_NOT_RESOLVED','ERR_INTERNET_DISCONNECTED','ERR_CONNECTION_TIMED_OUT','ERR_TIMED_OUT','ERR_CONNECTION_RESET','ERR_CONNECTION_REFUSED','ERR_CONNECTION_CLOSED','ERR_ADDRESS_UNREACHABLE','ERR_NETWORK_CHANGED','ERR_TUNNEL_CONNECTION_FAILED','ERR_PROXY_CONNECTION_FAILED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID','ERR_SSL_PROTOCOL_ERROR','ERR_BLOCKED_BY_CLIENT','ERR_BLOCKED_BY_ADMINISTRATOR','ERR_ABORTED'];
 let navigationQueue = Promise.resolve();
-async function clearNavigation() {
+async function clearNavigation(restart = false) {
   await navigationQueue;
   const settings = await diagnosticSettings();
-  if (settings.id) await storage.set(diagnosticKey(settings.id, 'navigation'), null);
+  if (!settings.id) return;
+  const key = diagnosticKey(settings.id, 'navigation'), previousKey = diagnosticKey(settings.id, 'previous_navigation');
+  if (restart && settings.enabled) {
+    const current = await storage.get(key);
+    if (current?.revision === settings.revision) await storage.set(previousKey, current);
+  } else await storage.set(previousKey, null);
+  await storage.set(key, null);
 }
 // Only the collector's main frame, only during opt-in; no URL is persisted.
 for (const [event, stage] of Object.entries({onBeforeNavigate:'started',onCommitted:'committed',onDOMContentLoaded:'dom_ready',onCompleted:'complete',onErrorOccurred:'failed'})) {
@@ -139,9 +148,15 @@ async function reportDiagnostics() {
           const oneOf = (value, options, fallback) => options.includes(value) ? value : fallback;
           const savedNavigation = await storage.get(diagnosticKey(settings.id, 'navigation'));
           const navigation = savedNavigation?.revision === settings.revision && savedNavigation?.tab === id ? savedNavigation : null;
+          const savedPrevious = await storage.get(diagnosticKey(settings.id, 'previous_navigation'));
+          const previous = savedPrevious?.revision === settings.revision ? savedPrevious : null;
+          const age = at => Number.isFinite(at) ? Math.min(86400, Math.max(0, Math.floor((Date.now() - at) / 1000))) : null;
           snapshot = {version: CrowdCore.VERSION, enabled: s.enabled === true,
             nav_stage: navigation?.stage || 'unknown', nav_error: navigation?.error || null,
-            nav_age_s: navigation ? Math.min(86400, Math.max(0, Math.floor((Date.now() - navigation.at) / 1000))) : null,
+            nav_age_s: age(navigation?.at),
+            prev_nav_stage: previous?.stage || 'unknown', prev_nav_error: previous?.error || null, prev_nav_age_s: age(previous?.at),
+            page_failures: number(s.page_failures, 3), last_tick_age_s: age(s.last_tick),
+            next_in_s: Math.min(86400, Math.max(0, Math.ceil(((s.next_at || 0) - Date.now()) / 1000))),
             probe_status: probeStatus,
             phase: oneOf(s.phase, ['idle','search','search_done','note','reopen_note','enrich'], 'idle'),
             error: s.last_error ? oneOf(s.last_error, diagnosticErrors, 'unexpected_error') : null,

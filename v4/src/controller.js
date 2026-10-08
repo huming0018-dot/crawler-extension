@@ -22,7 +22,7 @@ async function send(type, extra = {}) {
   if (!reply.ok) throw new Error(reply.error); return reply.data;
 }
 errors.page_timeout = '采集页面准备超时。连续失败三次会暂停，请查看采集页面并保持运行诊断开启。';
-errors.page_loading = '小红书页面一直未完成加载。连续失败三次会暂停，请查看采集页面的网络提示。';
+errors.page_loading = '采集页面尚未就绪，未取得可读取内容。连续失败三次会暂停；诊断开启时由中台排查。';
 errors.content_unavailable = '页面已结束加载，但采集脚本未响应。请检查浏览器是否允许此插件访问小红书。';
 errors.probe_timeout = '采集页面没有及时响应，可能卡住；连续失败三次会暂停。';
 errors.page_mismatch = '当前页面搜索词与任务不一致，已暂停。点击继续会重新打开任务页面。';
