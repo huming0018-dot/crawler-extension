@@ -8,16 +8,16 @@ async function scenario(reject=false,gate=null){
  const comment=(id,text)=>({key:'comment-1',comment_id:id,parent_key:null,text,original_length:text.length,truncated:false,like_count:null,author_display:'甲',is_reply:false});
  const record=()=>({schema_version:4,standard:{platform:'xiaohongshu',note_id:id,url:C.HOST+'/explore/'+id,title:'餐厅',captured_at:new Date(now).toISOString(),published_at:null,author_display:'作者',like_count:1,collect_count:null,comment_count:3,view_count:null},extra:{author:{id:author,url:C.HOST+'/user/profile/'+author},author_opinion_quotes:[],comments:{items:[comment(expanded?'new':'old',expanded?'后来内容':'原来内容')],coverage:'visible_loaded_only',complete:false,captured_count:1,loaded_count:1,omitted_count:0,truncated:false,more_available:expanded===0}},evidence:{text:'好吃',original_length:2,truncated:false,parser_version:C.VERSION,source:'rendered_public_dom'}});
  state={...C.initial(),enabled:true,consent:C.CONSENT,profiles:true,phase:'note',task,note_id:id,note_url:C.HOST+'/explore/'+id,loaded_at:now-100000,dwell_ms:45000,scrolls:2,last_tick:now};
- const runtime={splitCapture:true,storage:{get:async()=>structuredClone(state),set:async(k,v)=>state=structuredClone(v)},now:()=>now,random:()=>0,uuid:crypto.randomUUID,schedule:async()=>{},cancel:async()=>{},close:async()=>{},open:async url=>{calls.push('open_profile');assert.equal(delivered,true);assert.equal(url,C.HOST+'/user/profile/'+author);},probe:async action=>{
+ const runtime={splitCapture:true,storage:{get:async()=>structuredClone(state),set:async(k,v)=>state=structuredClone(v)},now:()=>now,random:()=>0,uuid:crypto.randomUUID,schedule:async()=>{},cancel:async()=>{},close:async()=>{},open:async url=>{calls.push('open_profile');assert.equal(delivered,true);assert.equal(url,C.HOST+'/user/profile/'+author+'?xsec_token=local-only');},probe:async action=>{
   calls.push(action);if(action==='comments'){assert.equal(delivered,true,'base must be acknowledged before any expansion');expanded++;return gate?{ready:false,gate}:{ready:true};}
   if(action==='profile')return {ready:true,profile:{author_id:author}};
-  return {ready:true,record:record()};
+  return {ready:true,record:record(),author_navigation:C.HOST+'/user/profile/'+author+'?xsec_token=local-only'};
  }};
  const api={rpc:async(name,p)=>{
   calls.push(name);
   if(name==='guard')return {version:1,observations:1,ttl_ms:600000,paused:false,allowed:true,reason:null,wait_ms:0,gap_ms:30000,caps:{search:30,detail:60,comment:120,scroll:120},counts:{search:0,detail:1,comment:expanded,scroll:2}};
-  if(name==='submit'){if(reject)return {error:'unrelated_note'};delivered=true;return {request:p.p_request,inserted:true,duplicate:false,task_received:1,gate:'received'};}
-  if(name==='observe'){assert.equal(delivered,true);if(p.p_kind==='note'){assert.deepEqual(p.p_data.extra.comments.items.map(x=>x.comment_id),['old','new']);assert.equal(p.p_data.evidence.text,'好吃');}return {request:p.p_request,gate:'observed'};}
+  if(name==='submit'){assert.equal(JSON.stringify(p.p_record).includes('local-only'),false);if(reject)return {error:'unrelated_note'};delivered=true;return {request:p.p_request,inserted:true,duplicate:false,task_received:1,gate:'received'};}
+  if(name==='observe'){assert.equal(JSON.stringify(p).includes('local-only'),false);assert.equal(delivered,true);if(p.p_kind==='note'){assert.deepEqual(p.p_data.extra.comments.items.map(x=>x.comment_id),['old','new']);assert.equal(p.p_data.evidence.text,'好吃');}return {request:p.p_request,gate:'observed'};}
   if(name==='profile_claim')return {allowed:true,url:C.HOST+'/user/profile/'+author,token:parent};
   if(name==='finish')return {status:'complete',received:1};
   throw new Error('unexpected '+name);

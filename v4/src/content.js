@@ -151,7 +151,7 @@
         selector: body ? (body.id ? '#' + body.id : '.' + String(body.className).trim().replace(/\s+/g, '.')) : null,
         parser_version: C.VERSION, source: 'rendered_public_dom'}};
     record.extra.comments = comments(record);
-    return {ready: true, record};
+    return {ready: true, record, author_navigation: author ? authorLink.href : null};
   }
   function probe(action) {
     // Opt-in diagnostics use categories/counts, never page text or navigation tokens.

@@ -242,7 +242,7 @@
               page.record.extra.discovery = {method:'task_search',candidate:s.card_meta?.[s.note_id] || null};
               const request = this.r.uuid();
               s.outbox.push({request,task:s.task.id,lease:s.task.lease_token,record:page.record});
-              s.enrichment = {parent:request,record:JSON.parse(JSON.stringify(page.record)),stage:'comments',rounds:0,stalls:0,last:null};
+              s.enrichment = {parent:request,author_navigation:page.author_navigation || null,record:JSON.parse(JSON.stringify(page.record)),stage:'comments',rounds:0,stalls:0,last:null};
               s.phase = 'enrich'; s.next_at = now+30000;
             } else {
               const comments = page.record.extra.comments;
@@ -375,7 +375,8 @@
         const p=C.profileURL(grant.url);
         if(p.id!==e.record.extra.author.id)throw new Error('wrong_note');
         e.stage='profile_read';e.deadline=now+120000;e.profile_grant=grant.token;s.next_at=now+30000;await this.save(s);alive();
-        await this.r.open(p.url);alive();
+        const destination=e.author_navigation && C.profileURL(e.author_navigation).id===p.id ? e.author_navigation : p.url;
+        await this.r.open(destination);alive();
       } else if(e.stage==='profile_read') {
         if(!s.profiles){finish();return;}
         const page=await this.r.probe('profile');alive();if(page.gate)throw new Error(page.gate);
