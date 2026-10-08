@@ -25,7 +25,10 @@
    if(!this.chrome.runtime.sendNativeMessage)return;
    try {
     const r=await this.send('ack');await this.storage.set('updater_status',{state:r.status,version:this.version,checked_at:Date.now()});
-    if(await this.storage.get('updater_enabled')!==false){await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:60});}
+    if(await this.storage.get('updater_enabled')!==false){
+     const alarm=await this.chrome.alarms.get('crowd_update');
+     if(!alarm)await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:60});
+    }
    }catch(e){if(!await this.recoverMismatch(e.message))await this.storage.set('updater_status',{state:'helper_unavailable',version:this.version});}
   }
   async check() {

@@ -34,6 +34,7 @@ async function navigationDocument(id, tab) {
   }
   return {document_kind:kind(current), pending_kind:tab?.pendingUrl ? kind(tab.pendingUrl) : 'none'};
 }
+let pendingTabCreation = null;
 const runtime = {
   splitCapture: true,
   trace:(stage,options)=>trace.event(stage,options),
@@ -58,7 +59,9 @@ const runtime = {
     if (id) { try {
       const tab = await chrome.tabs.get(id);
       // Persisted IDs can point at another tab after a browser restart.
-      CrowdCore.navigationURL(tab.pendingUrl || tab.url);
+      // A pending destination does not make an uncommitted blank document
+      // reusable. A user retry must take the direct-create path as well.
+      CrowdCore.navigationURL(tab.url);
       reusable = true;
     } catch (_) {} }
     // A failed mutation is not a stale tab: never issue a second navigation
@@ -69,17 +72,20 @@ const runtime = {
       catch (_) { await trace.event('update_failed'); throw new Error('navigation_failed'); }
       return;
     }
-    // Register ownership before starting a navigation. Otherwise fast commit /
-    // error events can arrive before work_tab exists and disappear from telemetry.
+    // Navigate as part of creation. A separate about:blank + update leaves a
+    // second browser transition between opening the tab and requesting the page.
+    // Event handlers await this ownership barrier so early commits are retained.
     try {
-      const [window] = await chrome.windows.getAll({windowTypes: ['normal']});
-      const tab = window ? await chrome.tabs.create({url: 'about:blank', windowId: window.id, active: false}) :
-        (await chrome.windows.create({url: 'about:blank', type: 'normal', state: 'minimized', focused: false})).tabs[0];
-      await storage.set('work_tab', tab.id);
-      await trace.event('tab_created');
-      await chrome.tabs.update(tab.id, {url, active: false});
-      await trace.event('update_accepted');
+      pendingTabCreation = (async () => {
+        const [window] = await chrome.windows.getAll({windowTypes: ['normal']});
+        const tab = window ? await chrome.tabs.create({url, windowId: window.id, active: false}) :
+          (await chrome.windows.create({url, type: 'normal', state: 'minimized', focused: false})).tabs[0];
+        await storage.set('work_tab', tab.id);
+        await trace.event('tab_created');
+      })();
+      await pendingTabCreation;
     } catch (_) { await trace.event('update_failed'); throw new Error('navigation_failed'); }
+    finally { pendingTabCreation = null; }
   },
   async probe(action) {
     const id = await storage.get('work_tab');
@@ -139,7 +145,9 @@ async function clearNavigation(restart = false) {
 for (const [event, stage] of Object.entries({onBeforeNavigate:'started',onCommitted:'committed',onDOMContentLoaded:'dom_ready',onCompleted:'complete',onErrorOccurred:'failed'})) {
   chrome.webNavigation?.[event]?.addListener(details => {
     if (details.frameId !== 0) return;
+    const ownership = pendingTabCreation;
     navigationQueue = navigationQueue.then(async () => {
+      if (ownership) { try { await ownership; } catch (_) { return; } }
       const settings = await diagnosticSettings();
       if (!settings.enabled || details.tabId !== await storage.get('work_tab')) return;
       try { const u = new URL(details.url); if (u.protocol !== 'https:' || !['www.xiaohongshu.com','m.xiaohongshu.com'].includes(u.hostname)) return; } catch (_) { return; }

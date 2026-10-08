@@ -4,7 +4,8 @@ const c=vm.createContext({console,Date});for(const f of ['updater.js','trace.js'
 (async()=>{
  const data={},storage={get:async k=>data[k],set:async(k,v)=>{data[k]=structuredClone(v);}},calls=[];
  let releaseWriter;const agent={active:new Promise(r=>releaseWriter=r),maintenance:false};
- const chrome={runtime:{sendNativeMessage:async(host,m)=>{calls.push(m);return {status:m.action==='apply'?'pending_reload':'applied',version:'4.2.1'};},reload:()=>calls.push('reload')},alarms:{create:async()=>{},clear:async()=>{}}};
+ let updateAlarm=null,alarmCreations=0;
+ const chrome={runtime:{sendNativeMessage:async(host,m)=>{calls.push(m);return {status:m.action==='apply'?'pending_reload':'applied',version:'4.2.1'};},reload:()=>calls.push('reload')},alarms:{get:async()=>updateAlarm,create:async(_,info)=>{alarmCreations++;updateAlarm=info;},clear:async()=>{updateAlarm=null;}}};
  const updater=new c.CrowdUpdater({chrome,storage,agent,version:'4.2.0',releaseHash:async()=>'0'.repeat(64)});
  data['agent:user']={enabled:false,outbox:[{request:'original',record:'original evidence'}]};const before=structuredClone(data['agent:user']);
  const applying=updater.check();await new Promise(r=>setImmediate(r));assert.equal(agent.maintenance,true);assert.equal(calls.length,0,'must wait for pending agent writes');
@@ -13,6 +14,9 @@ const c=vm.createContext({console,Date});for(const f of ['updater.js','trace.js'
  data.updater_enabled=true;chrome.runtime.sendNativeMessage=async()=>({status:'error',error:'invalid_signature'});await updater.check();assert.equal(data.updater_status.error,'invalid_signature');assert.equal(agent.maintenance,false);
  chrome.runtime.sendNativeMessage=async(host,m)=>m.action==='apply'?{status:'error',error:'version_mismatch'}:{status:'rolled_back',version:'4.1.3'};
  const priorReloads=calls.filter(x=>x==='reload').length;await updater.check();assert.equal(calls.filter(x=>x==='reload').length,priorReloads+1,'after watchdog rollback reload the restored disk version');
+ chrome.runtime.sendNativeMessage=async()=>({status:'ready',version:'4.2.0'});
+ await updater.bootstrap();await updater.bootstrap();
+ assert.equal(alarmCreations,1,'worker restarts must not postpone an existing update alarm');
  let settings={id:'user' ,enabled:true,revision:1},now=1800000000000;
  const trace=new c.CrowdTrace({storage,settings:async()=>settings,uuid:()=>crypto.randomUUID(),now:()=>now});
  await trace.event('admission_requested',{start:true});await trace.event('admission_allowed');await trace.event('open_requested');

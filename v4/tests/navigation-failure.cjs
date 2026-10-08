@@ -1,15 +1,15 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
 const src=path.resolve(process.env.CROWD_TEST_SOURCE||'v4/src');
-function fixture({blank=false,pending=true,updateFails=false}={}) {
- const url='https://www.xiaohongshu.com/search_result?keyword=test',data={work_tab:7},calls={create:0,update:0,guard:0};
+function fixture({blank=false,pending=true,updateFails=false,createFails=false}={}) {
+ const url='https://www.xiaohongshu.com/search_result?keyword=test',data={work_tab:7},calls={create:0,update:0,guard:0,created:[]};
  const event={addListener(){}};
  const chrome={runtime:{id:'test',getURL:p=>'chrome-extension://test/'+p,onMessage:event,onMessageExternal:event,onInstalled:event,onStartup:event},
  storage:{local:{get:async k=>({[k]:data[k]}),set:async v=>Object.assign(data,structuredClone(v)),setAccessLevel:async()=>{}}},
  alarms:{get:async()=>null,create:async()=>{},clear:async()=>{},onAlarm:event},
  webNavigation:{getFrame:async()=>({url:blank?'about:blank':url}),...Object.fromEntries(['onBeforeNavigate','onCommitted','onDOMContentLoaded','onCompleted','onErrorOccurred'].map(k=>[k,event]))},
  windows:{getAll:async()=>[{id:1}]},tabs:{onRemoved:event,get:async()=>({id:7,url:blank?undefined:url,pendingUrl:blank&&pending?url:undefined,status:blank?'loading':'complete'}),
- create:async()=>{calls.create++;return {id:8};},update:async()=>{calls.update++;if(updateFails)throw Error('raw private browser error');return {};},sendMessage:async()=>{throw Error('no receiver');},remove:async()=>{}}};
+ create:async info=>{calls.create++;calls.created.push(info);if(createFails)throw Error('raw private create error');return {id:8};},update:async()=>{calls.update++;if(updateFails)throw Error('raw private browser error');return {};},sendMessage:async()=>{throw Error('no receiver');},remove:async()=>{}}};
  const c=vm.createContext({chrome,console,URL,Date,Math,AbortController,setTimeout,clearTimeout,crypto:require('node:crypto').webcrypto,fetch:async()=>{throw Error('unexpected network');}});
  c.importScripts=(...names)=>{for(const name of names){if(name==='config.js')c.CROWD_CONFIG={url:'https://example.supabase.co',key:'sb_publishable_test'};else vm.runInContext(fs.readFileSync(path.join(src,name),'utf8'),c);}};
  vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),c);
@@ -21,9 +21,18 @@ function fixture({blank=false,pending=true,updateFails=false}={}) {
   const f=fixture({updateFails:true});await assert.rejects(f.run("runtime.open('https://www.xiaohongshu.com/search_result?keyword=test')"),/^Error: navigation_failed$/);
   assert.equal(f.calls.update,1);assert.equal(f.calls.create,0);assert.equal(f.data.work_tab,7);
  });
- await test('new-tab navigation failure preserves the owned blank page without a second attempt',async()=>{
-  const f=fixture({blank:true,pending:false,updateFails:true});await assert.rejects(f.run("runtime.open('https://www.xiaohongshu.com/search_result?keyword=test')"),/^Error: navigation_failed$/);
-  assert.equal(f.calls.update,1);assert.equal(f.calls.create,1);assert.equal(f.data.work_tab,8);
+ await test('new search uses one direct creation and never the blank-to-update path',async()=>{
+  const f=fixture({blank:true,pending:false,updateFails:true});await f.run("runtime.open('https://www.xiaohongshu.com/search_result?keyword=test')");
+  assert.equal(f.calls.update,0);assert.equal(f.calls.create,1);assert.equal(f.data.work_tab,8);
+  assert.equal(f.calls.created[0].url,'https://www.xiaohongshu.com/search_result?keyword=test');
+ });
+ await test('retrying an existing blank with a pending destination also creates directly',async()=>{
+  const f=fixture({blank:true,pending:true,updateFails:true});await f.run("runtime.open('https://www.xiaohongshu.com/search_result?keyword=test')");
+  assert.equal(f.calls.update,0);assert.equal(f.calls.create,1);assert.equal(f.data.work_tab,8);
+ });
+ await test('failed direct creation is surfaced without a second navigation',async()=>{
+  const f=fixture({blank:true,pending:false,createFails:true});await assert.rejects(f.run("runtime.open('https://www.xiaohongshu.com/search_result?keyword=test')"),/^Error: navigation_failed$/);
+  assert.equal(f.calls.update,0);assert.equal(f.calls.create,1);assert.equal(f.data.work_tab,7);
  });
  await test('blank pending document is distinguished from loaded-page receiver failure',async()=>{
   for(const pending of [true,false]){const f=fixture({blank:true,pending});assert.equal((await f.run('runtime.probe("search")')).reason,'navigation_uncommitted');}
