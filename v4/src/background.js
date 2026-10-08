@@ -17,6 +17,7 @@ async function probeTab(id, action) {
   finally { clearTimeout(timer); }
 }
 const runtime = {
+  splitCapture: true,
   storage, now: Date.now, random: Math.random, uuid: () => crypto.randomUUID(),
   // Align the next wake with the durable deadline, not an unrelated 30s grid.
   // Keep a repeating fallback for worker crashes; poll waits at least once/minute
@@ -142,7 +143,7 @@ async function reportDiagnostics() {
             nav_stage: navigation?.stage || 'unknown', nav_error: navigation?.error || null,
             nav_age_s: navigation ? Math.min(86400, Math.max(0, Math.floor((Date.now() - navigation.at) / 1000))) : null,
             probe_status: probeStatus,
-            phase: oneOf(s.phase, ['idle','search','search_done','note','reopen_note'], 'idle'),
+            phase: oneOf(s.phase, ['idle','search','search_done','note','reopen_note','enrich'], 'idle'),
             error: s.last_error ? oneOf(s.last_error, diagnosticErrors, 'unexpected_error') : null,
             task_id: Number.isSafeInteger(s.task?.id) ? s.task.id : null,
             queued: number(s.outbox.length, 99999), rejected: number(s.rejected.length, 99999),
@@ -185,6 +186,12 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   (async () => {
     switch (message.type) {
       case 'state': { const settings = await diagnosticSettings(); return {agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message}))}; }
+      case 'profiles': {
+        if(typeof message.enabled !== 'boolean')throw new Error('invalid_request');
+        await agent.stop();
+        const result=await api.rpc('observation_preferences',{p_profiles:message.enabled});
+        const s=await agent.read();s.profiles=result.profiles===true;await agent.save(s);return {};
+      }
       case 'diagnostics': {
         if (typeof message.enabled !== 'boolean') throw new Error('invalid_request');
         await setDiagnostics(message.enabled); return {};

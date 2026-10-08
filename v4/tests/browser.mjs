@@ -88,9 +88,26 @@ try {
  await limits.locator('#detail-desc').evaluate(el=>el.innerText='推荐'+ '字'.repeat(23998));
  await limits.locator('.comments-container').evaluate(el=>{el.innerHTML=Array.from({length:70},()=>'<div class="comment-item"><div class="content">'+ '长'.repeat(2000)+'</div></div>').join('');});
  limited=await limits.evaluate(()=>CrowdPage.probe('note').record);assert.ok(JSON.stringify(limited).length<60000);assert.equal(await limits.evaluate(()=>!!CrowdCore.validate(CrowdPage.probe('note').record)),true);
+
+ // Author identity is taken from the current note, never a recommendation card.
+ await limits.locator('.note-container').evaluate(el=>el.insertAdjacentHTML('afterbegin','<div class="author-wrapper"><a href="/user/profile/bbbbbbbbbbbbbbbbbbbbbbbb?xsec_token=local"><span class="username">作者甲</span></a></div>'));
+ const identified=await limits.evaluate(()=>CrowdPage.probe('note').record);
+ assert.equal(identified.extra.author.id,'b'.repeat(24));assert.equal(identified.extra.author.url.includes('?'),false);
+ assert.equal(identified.standard.author_display,'作者甲');assert.equal(identified.extra.field_observations.like_count.status,'approximate');
+ await limits.locator('#detail-desc').evaluate(el=>el.innerText='好吃');
+ assert.equal((await limits.evaluate(()=>CrowdPage.probe('note'))).ready,true,'short text is not a load timeout');
+ const profilePage=await browser.newPage();
+ await profilePage.route('**/*',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:'<div class="user-info"><h1 class="user-name">作者甲</h1><span class="user-redId">小红书号：public123</span><div class="user-interactions"><div><span class="count">1.2万</span><span>粉丝</span></div><div><span class="count">23</span><span>笔记</span></div></div></div><section class="note-item"><a href="/explore/'+id+'?xsec_token=never-upload"><span class="title">公开笔记</span></a></section>'}));
+ await profilePage.goto('https://www.xiaohongshu.com/user/profile/'+'b'.repeat(24));
+ for(const name of ['core','content'])await profilePage.addScriptTag({content:fs.readFileSync(path.join(src,name+'.js'),'utf8')});
+ const profile=await profilePage.evaluate(()=>CrowdPage.probe('profile'));
+ assert.equal(profile.ready,true);assert.equal(profile.profile.metrics.followers.status,'approximate');assert.equal(profile.profile.metrics.followers.value,12000);assert.equal(profile.profile.metrics.notes.value,23);assert.equal(profile.profile.metrics.likes_collected.value,null);
+ assert.equal(profile.profile.public_handle,'public123');assert.equal(JSON.stringify(profile).includes('never-upload'),false);
+ await profilePage.close();
+
  await limits.locator('#detail-desc').evaluate(el=>el.remove());
  await limits.locator('.comments-container .content').first().evaluate(el=>el.classList.add('note-text'));
- assert.equal((await limits.evaluate(()=>CrowdPage.probe('note'))).ready,false,'comment text cannot replace missing note evidence');
+ const titleOnly=await limits.evaluate(()=>CrowdPage.probe('note'));assert.equal(titleOnly.ready,true,'title-only note is loaded');assert.equal(titleOnly.record.evidence.text,'','comments cannot replace missing note evidence');
  await limits.locator('body').evaluate(el=>el.insertAdjacentHTML('beforeend','<div class="captcha">验证</div>'));
  assert.equal((await limits.evaluate(()=>CrowdPage.probe('comments'))).gate,'captcha');await limits.close();
  console.log('PASS engagement: public view count, own comment fields, parent/reply links, read-only expansion, hidden/missing values, truncation and envelope budget');
@@ -115,7 +132,7 @@ try {
  const vm=await import('node:vm');
  const context=vm.createContext({console,AbortController,URL,Date,Math,setTimeout,clearTimeout});
  for(const name of ['core','agent'])vm.runInContext(fs.readFileSync(path.join(src,name+'.js'),'utf8'),context);
- const runtime={storage:{get:async k=>structuredClone(state[k]),set:async(k,v)=>state[k]=structuredClone(v)},now:()=>clock,random:()=>0,uuid:()=>crypto.randomUUID(),schedule:async()=>{},cancel:async()=>{},close:async()=>{},open:async url=>{
+ const runtime={splitCapture:true,storage:{get:async k=>structuredClone(state[k]),set:async(k,v)=>state[k]=structuredClone(v)},now:()=>clock,random:()=>0,uuid:()=>crypto.randomUUID(),schedule:async()=>{},cancel:async()=>{},close:async()=>{},open:async url=>{
   await host.goto(url);for(const name of ['core','content'])await host.addScriptTag({content:fs.readFileSync(path.join(src,name+'.js'),'utf8')});
  },probe:async action=>host.evaluate(action=>CrowdPage.probe(action),action)};
  const user=crypto.randomUUID();
@@ -124,7 +141,7 @@ try {
   create function auth.uid() returns uuid language sql as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;
   create function auth.role() returns text language sql as $$select current_setting('request.jwt.claim.role',true)$$;
   grant usage on schema auth to authenticated;grant execute on function auth.uid(),auth.role() to authenticated;`);
- for(const suffix of ['20261006145016_crowd_v4.sql','_crowd_v4_diagnostics.sql','_crowd_v4_navigation_diagnostics.sql','_crowd_v4_view_count.sql','_crowd_v4_safety.sql','_crowd_v4_receipt_recovery.sql','_crowd_v4_task_scheduling.sql']) await db.exec(fs.readFileSync(path.join(migrations,fs.readdirSync(migrations).find(n=>n.endsWith(suffix))),'utf8'));
+ for(const suffix of ['20261006145016_crowd_v4.sql','_crowd_v4_diagnostics.sql','_crowd_v4_navigation_diagnostics.sql','_crowd_v4_view_count.sql','_crowd_v4_safety.sql','_crowd_v4_receipt_recovery.sql','_crowd_v4_task_scheduling.sql','_crowd_v4_observations.sql','_crowd_v4_relevance_aliases.sql']) await db.exec(fs.readFileSync(path.join(migrations,fs.readdirSync(migrations).find(n=>n.endsWith(suffix))),'utf8'));
  await db.query('insert into auth.users values($1)',[user]);
  await db.query("insert into crowd_v4.participants(user_id,status,consent,quota_day) values($1,'approved','crowd-public-v4',2)",[user]);
  await db.exec(`insert into crowd_v4.tasks(source_key,query,store_name,anchor_terms,target) values('fixture','测试餐厅','测试餐厅','["测试餐厅"]',1)`);
@@ -139,7 +156,7 @@ try {
   const statements={guard:['select public.crowd_v4_guard($1,$2,$3) as result',[p.p_action,p.p_task??null,p.p_note??null]],status:['select public.crowd_v4_status() as result',[]],
    claim:['select public.crowd_v4_claim($1) as result',[p.p_task??null]],
    submit:['select public.crowd_v4_submit($1,$2,$3,$4::jsonb) as result',[p.p_request,p.p_task,p.p_lease,JSON.stringify(p.p_record)]],
-   finish:['select public.crowd_v4_finish($1,$2) as result',[p.p_task,p.p_lease]]};
+   finish:['select public.crowd_v4_finish($1,$2) as result',[p.p_task,p.p_lease]],observe:['select public.crowd_v4_observe($1,$2,$3,$4) as result',[p.p_request,p.p_parent,p.p_kind,p.p_data]]};
   if(name==='submit' && lostAck) {
    const bad=structuredClone(p.p_record);bad.standard.view_count=-1;
    assert.equal((await db.query('select public.crowd_v4_submit($1,$2,$3,$4::jsonb) as result',[crypto.randomUUID(),p.p_task,p.p_lease,JSON.stringify(bad)])).rows[0].result.error,'invalid_record');
@@ -161,7 +178,8 @@ try {
  assert.equal(stored[0].record.standard.url,'https://www.xiaohongshu.com/explore/'+id);
  assert.equal(stored[0].record.evidence.text,result.record.evidence.text);
  assert.deepEqual(stored[0].record.extra.hashtags,['清蒸鱼','上海美食']);
- assert.equal(stored[0].record.standard.view_count,13000);assert.equal(stored[0].record.extra.comments.items.length,4);assert.equal(stored[0].record.extra.comments.items[2].parent_key,'comment-1');
+ assert.equal(stored[0].record.standard.view_count,13000);assert.equal(stored[0].record.extra.comments.items.length,3,'base is sent before expansion');
+ const supplemental=(await db.query("select data from crowd_observation.snapshots where kind='note'")).rows;assert.equal(supplemental.length,1);assert.equal(supplemental[0].data.extra.comments.items.length,4);assert.equal(supplemental[0].data.extra.comments.items[3].parent_key,'comment-1');
  console.log('PASS Chromium + PostgreSQL: search_result detail route, real SQL claim/submit/finish, standard/extra/evidence stored once after lost acknowledgement');
  // Actual extension controller DOM with a fixed Chrome command fixture.
  const controller=await browser.newPage();

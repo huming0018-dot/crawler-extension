@@ -53,6 +53,7 @@
       const status = await this.api.rpc('status');
       if (generation !== this.generation) throw new Error('cancelled');
       if (status.participant?.status !== 'approved') throw new Error('approval_required');
+      if (s.enrichment) s.enrichment.stage='done';
       if (s.phase === 'note') s.phase = 'reopen_note';
       if (s.phase === 'search') { s.phase = 'idle'; s.search_round = 0; }
       s.enabled = true; s.last_error = null; s.page_failures = 0; s.control_checked = 0; s.last_tick = this.r.now();
@@ -87,6 +88,7 @@
         // Restore active work, never a stopped/blocked participant. A long
         // suspension must restart dwell; wake detection is an alarm-gap heuristic.
         if (recover || (s.last_tick != null && now - s.last_tick > 120000)) {
+          if (s.enrichment) { s.enrichment.stage = 'done'; }
           if (s.phase === 'note') { s.phase = 'reopen_note'; s.loaded_at = null; s.scrolls = 0; }
           else if (s.phase === 'search') { s.phase = 'idle'; s.search_round = 0; }
           // Keep persisted cooldowns, quota waits and evidence retry deadlines.
@@ -100,10 +102,24 @@
           catch (error) { alive(); s.control_error = true; if (error.status === 401 || error.status === 403) throw error; }
           await this.save(s);
         }
+        // Recheck only a rules-revision change, once, with the original evidence and UUID.
+        const revision=s.control?.relevance_revision || 0;
+        const retry=s.rejected.findIndex(item=>item.reason==='unrelated_note' && !item.kind && item.task===s.task?.id &&
+          (item.relevance_revision || 0)<revision && now-Date.parse(item.record?.standard?.captured_at)<86400000);
+        if(!s.outbox.length && retry>=0){
+          const item=s.rejected.splice(retry,1)[0];item.relevance_revision=revision;item.lease=s.task.lease_token;
+          s.outbox.push(item);await this.save(s);alive();
+        }
         // Delivery runs even during collection cooldown. One stable UUID per record.
         if (s.outbox.length) {
           const item = s.outbox[0];
           if ((item.retry_at || 0) > now) { await this.r.schedule(item.retry_at); return; }
+          if (item.kind) {
+            const receipt = await this.api.rpc('observe', {p_request:item.request,p_parent:item.parent,p_kind:item.kind,p_data:item.record}, signal); alive();
+            if (!receipt || receipt.request !== item.request || !['observed','rejected'].includes(receipt.gate)) throw new Error('invalid_receipt');
+            if (receipt.gate === 'rejected') s.rejected.push({...item,reason:receipt.error || 'invalid_record'});
+            s.outbox.shift(); if(s.rejected.length>=20)throw new Error('review_local_rejections'); await this.save(s); await this.r.schedule(now+30000); return;
+          }
           const receipt = C.receipt(await this.api.rpc('submit', {p_request: item.request, p_task: item.task,
             p_lease: item.lease, p_record: item.record}, signal), item.request);
           alive();
@@ -120,7 +136,10 @@
             else { s.rejected.push({...item, reason: 'lease_lost'}); s.outbox.shift(); s.task = null; s.phase = 'idle'; }
           } else {
             s.outbox.shift();
-            if (receipt.error) s.rejected.push({...item, reason: receipt.error});
+            if (receipt.error) {
+              s.rejected.push({...item, reason: receipt.error,relevance_revision:s.control?.relevance_revision || 0});
+              if (s.enrichment?.parent === item.request) { s.enrichment = null; s.phase = 'search_done'; }
+            }
             else {
               s.last_error = null;
               s.received += receipt.inserted ? 1 : 0;
@@ -140,6 +159,9 @@
         }
         if (s.next_at > now) { await this.r.schedule(s.next_at); return; }
         if (s.visits >= 60) { s.next_at = now + 3600000; await this.save(s); await this.r.schedule(s.next_at); return; }
+        if (s.enrichment) {
+          await this.enrich(s, alive, signal); await this.save(s); await this.r.schedule(Math.max(s.next_at,now+30000)); return;
+        }
         if (!s.task || Date.parse(s.task.lease_until) < now + 180000) {
           const claimed = await this.api.rpc('claim', {p_task: s.task?.id || null}, signal); alive();
           if (claimed.error === 'daily_quota') { s.next_at = C.quotaRetry(claimed, now); s.last_error = 'daily_quota'; await this.save(s); await this.r.schedule(s.next_at); return; }
@@ -175,7 +197,12 @@
             const known = new Set(Array.isArray(s.task.known_note_ids) ? s.task.known_note_ids : []);
             const found = new Map(s.candidates.map(url => [C.noteURL(url).id, url]).filter(([id]) => !known.has(id)));
             for (const url of page.links) { try { const note = C.noteURL(url); if (!known.has(note.id) && !s.seen.includes(note.id) && !s.history.includes(note.id)) found.set(note.id, note.navigation); } catch (_) {} }
-            s.candidates = [...found.values()].slice(0, 80);
+            s.card_meta ||= {};
+            for (const card of page.cards || []) { try { s.card_meta[C.noteURL(card.url).id] = {title:card.title,author_display:card.author_display}; } catch (_) {} }
+            const normalizeTerm = value => String(value || '').normalize('NFKC').toLowerCase().replace(/[\s\p{P}]/gu,'');
+            const score = url => (s.task.anchor_terms || []).filter(term => normalizeTerm(s.card_meta[C.noteURL(url).id]?.title).includes(normalizeTerm(term))).length;
+            s.candidates = [...found.values()].sort((a,b) => score(b)-score(a)).slice(0, 80);
+            s.card_meta = Object.fromEntries(s.candidates.map(url => {const id=C.noteURL(url).id;return [id,s.card_meta[id] || {}];}));
             s.search_round = (s.search_round || 0) + 1;
             if (s.search_round < 3) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } await this.r.probe('scroll'); alive(); s.next_at = now + C.between(30000, 45000, this.r.random); }
             else { s.search_round = 0; s.phase = 'search_done'; s.next_at = now + 30000; }
@@ -210,6 +237,13 @@
             if (now - s.loaded_at < s.dwell_ms || s.scrolls < 2) {
               if (!await this.admit(s, 'scroll', alive, signal)) return;
               await this.r.probe('scroll'); alive(); s.scrolls++; s.next_at = now + C.between(30000, 45000, this.r.random);
+            } else if (this.r.splitCapture && s.control.observations === 1) {
+              C.validate(page.record);
+              page.record.extra.discovery = {method:'task_search',candidate:s.card_meta?.[s.note_id] || null};
+              const request = this.r.uuid();
+              s.outbox.push({request,task:s.task.id,lease:s.task.lease_token,record:page.record});
+              s.enrichment = {parent:request,record:JSON.parse(JSON.stringify(page.record)),stage:'comments',rounds:0,stalls:0,last:null};
+              s.phase = 'enrich'; s.next_at = now+30000;
             } else {
               const comments = page.record.extra.comments;
               // Compare actual loaded content, not just item count: virtual lists
@@ -270,6 +304,85 @@
         if (s.outbox.length) { const item = s.outbox[0]; item.retries = (item.retries || 0) + 1; item.retry_at = now + Math.min(900000, 60000 * 2 ** Math.min(item.retries - 1, 4)); s.next_at = item.retry_at; }
         await this.save(s); await this.r.schedule(s.next_at);
       }
+    }
+    mergeComments(previous, current) {
+      if (!current) return previous;
+      if (!previous) return JSON.parse(JSON.stringify(current));
+      const result = JSON.parse(JSON.stringify(previous));
+      const identity = item => item.comment_id ? 'id:'+item.comment_id : JSON.stringify([item.author_display,item.text,item.published_label,item.is_reply]);
+      const seen = new Map(result.items.map(item => [identity(item),item]));
+      const remap = new Map();
+      for (const item of current.items) {
+        let known = seen.get(identity(item));
+        if (!known) {
+          if (result.items.length >= 50 || JSON.stringify(result).length + JSON.stringify(item).length > 20000) {result.truncated=true;break;}
+          known = {...item,key:'comment-'+(result.items.length+1),parent_key:remap.get(item.parent_key) || null};
+          result.items.push(known); seen.set(identity(item),known);
+        } else { const key=known.key,parent=known.parent_key; Object.assign(known,item,{key,parent_key:remap.get(item.parent_key) || parent}); }
+        remap.set(item.key,known.key);
+      }
+      result.captured_count=result.items.length; result.complete=false;
+      result.identity_method='platform_id_or_content_fingerprint';result.identity_uncertain=result.items.some(item=>!item.comment_id);
+      result.loaded_count=Math.max(previous.loaded_count || 0,current.loaded_count || 0,result.items.length);
+      result.omitted_count=Math.max(previous.omitted_count || 0,current.omitted_count || 0);
+      result.more_available=current.more_available; result.truncated ||= current.truncated;
+      return result;
+    }
+    async enrich(s, alive, signal) {
+      const e=s.enrichment, now=this.r.now();
+      const queueNote = () => {
+        if(e.note_queued)return;
+        const comments=e.record.extra.comments;
+        if(comments){
+          while(JSON.stringify(e.record).length>55000 && comments.items.length){comments.items.pop();comments.truncated=true;comments.omitted_count=(comments.omitted_count||0)+1;}
+          comments.captured_count=comments.items.length;
+          C.validate(e.record);s.outbox.push({request:this.r.uuid(),parent:e.parent,kind:'note',record:JSON.parse(JSON.stringify(e.record))});
+        }
+        e.note_queued=true;
+      };
+      const finish = () => {queueNote();s.enrichment=null;s.phase='search_done';s.note_url=null;s.note_id=null;s.loaded_at=null;s.notes_in_session++;s.next_at=now+30000;};
+      if (Date.parse(s.task?.lease_until || '') < now+60000) e.stage='done';
+      if (e.stage==='comments') {
+        const page=await this.r.probe('note');alive();
+        if(page.gate)throw new Error(page.gate);
+        if(!page.ready || page.record.standard.note_id!==e.record.standard.note_id){e.stage='done';}
+        else {
+          for(const key of ['like_count','collect_count','comment_count','view_count','captured_at']) {
+            if(key in page.record.standard)e.record.standard[key]=page.record.standard[key];
+          }
+          e.record.extra.field_observations=page.record.extra.field_observations;
+          e.record.extra.metric_labels=page.record.extra.metric_labels;
+          e.record.extra.comments=this.mergeComments(e.record.extra.comments,page.record.extra.comments);
+          // Keep the immutable base text/title; only supplement visible observations.
+          const comments=e.record.extra.comments;
+          const signature=JSON.stringify(comments?.items.map(item=>[item.comment_id,item.text]) || []);
+          if(e.last!==null){e.stalls=signature===e.last?e.stalls+1:0;e.last=null;}
+          const empty=page.record.standard.comment_count===0 && !comments?.items.length && !comments?.more_available;
+          if(!comments || comments.truncated || empty || e.rounds>=4 || e.stalls >= (comments.more_available?2:1)) {
+            queueNote();
+            e.stage='profile';s.next_at=now+30000;
+          } else {
+            if(!await this.admit(s,'comment',alive,signal))return;
+            e.last=signature;e.rounds++;s.next_at=this.r.now()+30000;await this.save(s);alive();
+            const progress=await this.r.probe('comments');alive();if(progress.gate)throw new Error(progress.gate);
+          }
+        }
+      } else if(e.stage==='profile') {
+        if(!s.profiles || !e.record.extra.author?.id){finish();return;}
+        const grant=await this.api.rpc('profile_claim',{p_parent:e.parent},signal);alive();
+        if(!grant || typeof grant.allowed!=='boolean')throw new Error('invalid_receipt');
+        if(!grant.allowed){finish();return;} // Optional work never holds the base task through cooldown/cache/quota.
+        const p=C.profileURL(grant.url);
+        if(p.id!==e.record.extra.author.id)throw new Error('wrong_note');
+        e.stage='profile_read';e.deadline=now+120000;e.profile_grant=grant.token;s.next_at=now+30000;await this.save(s);alive();
+        await this.r.open(p.url);alive();
+      } else if(e.stage==='profile_read') {
+        if(!s.profiles){finish();return;}
+        const page=await this.r.probe('profile');alive();if(page.gate)throw new Error(page.gate);
+        if(page.ready && page.profile?.author_id===e.record.extra.author.id){
+          s.outbox.push({request:this.r.uuid(),parent:e.parent,kind:'profile',record:{...page.profile,grant:e.profile_grant}});finish();
+        } else if(now>=e.deadline)finish();else s.next_at=now+30000;
+      } else finish();
     }
     checkPage(page, s, now) {
       if (page.gate) throw new Error(page.gate);

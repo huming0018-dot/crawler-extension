@@ -1,7 +1,7 @@
 /* One contract for desktop and native containers. No page receives credentials. */
 (function (root) {
   'use strict';
-  const VERSION = '4.0.8', CONSENT = 'crowd-public-v4';
+  const VERSION = '4.1.0', CONSENT = 'crowd-public-v4';
   const HOST = 'https://www.xiaohongshu.com';
   const publicOrigin = u => u.protocol === 'https:' && ['www.xiaohongshu.com', 'm.xiaohongshu.com'].includes(u.hostname) && !u.username && !u.password && !u.port;
   function noteURL(value) {
@@ -11,9 +11,14 @@
     if (!match) throw new Error('invalid_note_url');
     return {id: match[1].toLowerCase(), url: HOST + '/explore/' + match[1].toLowerCase(), navigation: u.href};
   }
+  function profileURL(value) {
+    const u = new URL(value, HOST), match = u.pathname.match(/^\/user\/profile\/([a-f0-9]{24})\/?$/i);
+    if (!publicOrigin(u) || !match) throw new Error('invalid_profile_url');
+    return {id: match[1].toLowerCase(), url: HOST + '/user/profile/' + match[1].toLowerCase(), navigation: u.href};
+  }
   function navigationURL(value) {
     const u = new URL(value);
-    if (!publicOrigin(u) || !(/^\/search_result\/?$/.test(u.pathname) || /^\/(explore|discovery\/item|search_result)\/[a-f0-9]{24}\/?$/i.test(u.pathname)))
+    if (!publicOrigin(u) || !(/^\/user\/profile\/[a-f0-9]{24}\/?$/i.test(u.pathname) || /^\/search_result\/?$/.test(u.pathname) || /^\/(explore|discovery\/item|search_result)\/[a-f0-9]{24}\/?$/i.test(u.pathname)))
       throw new Error('unsupported_navigation');
     return u.href;
   }
@@ -25,7 +30,7 @@
     const s = record.standard, e = record.evidence;
     if (!s || s.platform !== 'xiaohongshu' || noteURL(s.url).id !== s.note_id) throw new Error('invalid_identity');
     if (s.url !== noteURL(s.url).url) throw new Error('noncanonical_url');
-    if (typeof s.title !== 'string' || s.title.length > 300 || typeof e?.text !== 'string' || e.text.length < 8 || e.text.length > 24000)
+    if (typeof s.title !== 'string' || s.title.length > 300 || typeof e?.text !== 'string' || e.text.length > 24000 || (!e.text.length && !s.title.length && record.extra?.media_present !== true))
       throw new Error('invalid_content');
     if (!Number.isFinite(Date.parse(s.captured_at))) throw new Error('invalid_timestamp');
     for (const key of ['published_at', 'author_display', 'like_count', 'collect_count', 'comment_count']) {
@@ -77,5 +82,5 @@
     async function keyFor(key) { return key === 'agent' ? 'agent:' + ((await raw.get('session'))?.user?.id || 'signed-out') : key; }
     return {async get(key) { return raw.get(await keyFor(key)); }, async set(key, value) { return raw.set(await keyFor(key), value); }};
   }
-  root.CrowdCore = {VERSION, CONSENT, HOST, noteURL, navigationURL, between, initial, validate, receipt, quotaRetry, accountStorage};
+  root.CrowdCore = {VERSION, CONSENT, HOST, profileURL, noteURL, navigationURL, between, initial, validate, receipt, quotaRetry, accountStorage};
 })(globalThis);
