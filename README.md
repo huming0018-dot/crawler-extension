@@ -5,6 +5,8 @@ use their **own account, device and network** to collect **public**
 Xiaohongshu (RED) notes and taste ratings for a crowd-sourced food guide,
 under server-issued safety limits. Open source and auditable by design.
 
+> 2026-10-08: the isolated v4.0.6 candidate lives in [v4/](v4/README.md). The root manifest is the historical v1.0 baseline, not the 3.4.14 production artifact. Do not mix their identity/API/update channels.
+
 ## Architecture
 
 One sentence: the extension talks only to **Supabase security-definer

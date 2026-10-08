@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://*.supabase.co; form-action 'none'; base-uri 'none'"><title>众包公开笔记采集</title><link rel="stylesheet" href="controller.css"></head>
+<body><main><h1>众包公开笔记采集</h1>
+<p>自愿参与内部研究。启动后自动领取任务、搜索与采集公开笔记。遇到验证码、登录失效或限流会暂停，请在工作页面处理后重新启动。</p>
+<p>评论每篇最多尝试加载4轮、保存50条，单条最多2000字；回传会标注采集范围和截断。页面未公开或未读到的阅读量、互动数留空。</p>
+<p id="welcome">请从邀请链接打开。确认参与后自动接入，无需注册中台账号或等待审核。</p>
+<details id="invitation"><summary>重新打开邀请</summary><form id="invite_form"><label>邀请链接<input id="invite_value" type="text" autocomplete="off" required></label><button>接续邀请</button></form></details>
+<section><label><input id="agree" type="checkbox">我自愿参加，并同意自动访问公开网页及回传笔记正文、公开互动数量、评论及回复、字段和采集证据。小红书登录凭据留在本机。按核验通过且去重后的笔记累计，每 100 条奖励 ¥0.10；不足 100 条继续累计。我了解后台运行受系统限制，可随时停止。</label><button id="consent">同意并开始</button></section>
+<nav><button id="open_login">登录小红书 / 处理验证</button><button id="start">继续采集</button><button id="stop">停止</button></nav>
+<section id="diagnostics_section"><label><input id="diagnostics" type="checkbox">发送运行诊断，帮助排查故障（可随时关闭）</label><p>只发送阶段、错误码、队列数量和页面加载状态、主页面网络错误码和元素数量，不发送账号密码、Cookie、完整网址、截图或网页正文。云端只保留最近一份状态；关闭或退出时尝试清除。离线时须同一参与身份下次联网重试，退出后不再发送。</p><p id="diagnostics_status" role="status"></p><button id="inspect_work_page">查看采集页面</button></section>
+<p id="message" role="status" aria-live="polite"></p><details><summary>查看进度与高级账户选项</summary><dl id="status"></dl><button id="refresh">刷新状态</button><button id="logout">退出参与身份</button><button id="export">导出未回传证据</button><form id="login"><label>已有中台账户邮箱<input id="email" type="email" autocomplete="username" required></label><label>密码<input id="password" type="password" autocomplete="current-password" minlength="8" required></label><button>登录</button><button type="button" id="signup">注册</button></form></details>
+<p>桌面浏览器保持运行即可在后台工作标签页采集，参与页面可关闭、窗口可最小化。Mac 睡眠时暂停，唤醒或浏览器重启后自动续做尚未停止的任务；重启或长时间挂起后重新计时，配额与冷却照常保留。手动停止、验证码或限流暂停后，需要本人点击继续。手机后台批次仍由系统安排。不会自动破解验证。</p>
+</main><script src="config.js"></script><script src="core.js"></script><script src="api.js"></script><script src="agent.js"></script><script src="join.js"></script><script src="native-runtime.js"></script><script src="controller.js"></script></body></html>
