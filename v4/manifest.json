@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "120",
   "name": "众包公开笔记采集",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "description": "自愿参与、自动任务与公开网页采集，验证与奖励分账，遇到验证或限流立即暂停。",
   "permissions": [
     "storage",

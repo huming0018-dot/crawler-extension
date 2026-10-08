@@ -7,7 +7,7 @@ const chrome={webNavigation:Object.fromEntries(['onBeforeNavigate','onCommitted'
  storage:{local:{get:async key=>({[key]:structuredClone(data[key])}),set:async value=>Object.assign(data,structuredClone(value)),setAccessLevel:async value=>accesses.push(value.accessLevel)}},
  alarms:{get:async name=>name==='crowd_diagnostics'?diagnosticAlarm:alarm,create:async(name,info)=>{if(name==='crowd_diagnostics')diagnosticAlarm={name,...info};else alarm={name,...info,scheduledTime:info.when??Date.now()+30000};},clear:async name=>{if(name==='crowd_diagnostics')diagnosticAlarm=null;else alarm=null;},onAlarm:{addListener:fn=>alarmListener=fn}},
  windows:{getAll:async()=>windows,update:async(id,info)=>{createdWindows.push({id,...info});},create:async info=>{createdWindows.push(info);return {tabs:[{id:77}]};}},
- tabs:{onRemoved:{addListener:()=>{}},get:async()=>tabInfo,create:async info=>{createdTabs.push(info);return {id:77};},update:async(id,info)=>{createdTabs.push({id,...info});return {windowId:1};},sendMessage:async()=>{if(probeReply instanceof Error)throw probeReply;return await (typeof probeReply === 'function' ? probeReply() : probeReply);},remove:async()=>{}}};
+ tabs:{onRemoved:{addListener:()=>{}},get:async()=>tabInfo,create:async info=>{createdTabs.push(info);return {id:77};},update:async(id,info)=>{createdTabs.push({id,...info});return {windowId:1};},sendMessage:async()=>{if(probeReply instanceof Error)throw probeReply;return await (typeof probeReply === 'function' ? probeReply() : probeReply);},remove:async()=>{context.removed=(context.removed||0)+1;}}};
 const context=vm.createContext({chrome,console,URL,Date,Math,AbortController,crypto:require('node:crypto').webcrypto,setTimeout,clearTimeout,
  fetch:async(url,options)=>{fetches.push({url,options});if(url.endsWith('crowd_v4_guard'))return {ok:true,json:async()=>({version:1,ttl_ms:600000,paused:false,allowed:true,reason:null,wait_ms:0,gap_ms:30000,caps:{search:30,detail:60,comment:120,scroll:120},counts:{search:0,detail:0,comment:0,scroll:0},session_count:0})};if(url.endsWith('crowd_v4_diagnostics')){if(diagnosticsOffline)throw new Error('offline');return {ok:true,json:async()=>({saved_at:new Date().toISOString()})};}return {ok:true,json:async()=>({participant:{status:'approved'}})};}});
 context.importScripts=(...names)=>{for(const name of names){if(name==='config.js')context.CROWD_CONFIG={url:'https://test.supabase.co',key:'sb_publishable_test'};else vm.runInContext(fs.readFileSync(path.join(src,name),'utf8'),context);}};
@@ -62,6 +62,19 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
   const before=fetches.length;await startup();assert.equal(fetches.length,before);assert.equal(alarm,null);assert.equal(data['agent:one'].last_error,reason);
  }
  const command=message=>new Promise(resolve=>listener(message,{id:chrome.runtime.id,url:chrome.runtime.getURL('src/controller.html')},resolve));
+ // Login help must preserve the actual verification page, queue and cooldown.
+ data.work_tab=77;tabInfo={status:'complete',url:url+'?xsec_token=local-only',windowId:1};
+ data['agent:one']={...context.CrowdCore.initial(),consent:context.CrowdCore.CONSENT,enabled:false,last_error:'captcha',next_at:deadline,outbox:[{request:'pending'}]};
+ const removed=context.removed||0;
+ assert.equal((await command({type:'open_login'})).ok,true);
+ assert.equal(context.removed||0,removed);assert.equal(data.work_tab,77);
+ assert.equal(createdTabs.at(-1).url,undefined,'focus original page without navigating away');
+ assert.equal(data['agent:one'].last_error,'user_login');assert.equal(data['agent:one'].enabled,false);
+ assert.equal(data['agent:one'].next_at,deadline);assert.equal(data['agent:one'].outbox.length,1);
+ tabInfo={status:'complete',url:'https://example.test/personal',windowId:1};
+ assert.equal((await command({type:'open_login'})).ok,true);
+ assert.equal(createdTabs.at(-1).url,context.CrowdCore.HOST,'stale foreign tab is not reused');
+ data['agent:one']={...context.CrowdCore.initial(),enabled:false,last_error:'logged_out'};
  const navEvent={tabId:77,frameId:0,url:url+'?xsec_token=PRIVATE_URL_TOKEN',timeStamp:Date.now()};
  const nav=async(name,extra={})=>{navListeners[name]({...navEvent,...extra});await vm.runInContext('navigationQueue',context);};
  await nav('onErrorOccurred',{error:'net::ERR_NAME_NOT_RESOLVED'});

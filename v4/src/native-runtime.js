@@ -64,7 +64,7 @@
           case 'start': { const generation = agent.generation; await call('begin', {baseline: (await agent.read()).notes_in_session}); collectionAllowed = true; try { if (generation !== agent.generation) throw new Error('cancelled'); await agent.start(); } catch (e) { await call('end'); throw e; } break; }
           case 'stop': await agent.stop(); await call('end'); break;
           case 'logout': await agent.stop('logged_out'); await call('end'); await api.logout(); break;
-          case 'open_login': await agent.stop('login_required'); await call('showBrowser'); break;
+          case 'open_login': await agent.stop('user_login', {keepPage: true}); await call('showBrowser'); break;
           case 'export': { const s = await agent.read(); data = {outbox: s.outbox, rejected: s.rejected}; break; }
           default: throw new Error('unknown_command');
         }

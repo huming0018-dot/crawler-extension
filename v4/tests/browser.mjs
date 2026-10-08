@@ -94,6 +94,24 @@ try {
  const identified=await limits.evaluate(()=>CrowdPage.probe('note').record);
  assert.equal(identified.extra.author.id,'b'.repeat(24));assert.equal(identified.extra.author.url.includes('?'),false);
  assert.equal(identified.standard.author_display,'作者甲');assert.equal(identified.extra.field_observations.like_count.status,'approximate');
+ // Reproduce nested layout and recommendation contamination: selector lists
+ // must prefer explicit detail IDs, not the first .title in DOM order.
+ await limits.locator('.note-container').evaluate(el=>{
+  el.insertAdjacentHTML('afterbegin','<section class="note-item"><span class="title">不相关的推荐店</span></section><div class="title">页面标题</div>');
+  el.insertAdjacentHTML('beforeend','<div class="note-detail"><div class="note-scroller">滚动区域</div></div>');
+ });
+ let scopedDetail=await limits.evaluate(()=>CrowdPage.probe('note').record);
+ assert.equal(scopedDetail.standard.title,'测试餐厅清蒸鱼');assert.ok(scopedDetail.evidence.text.startsWith('推荐'));
+ assert.equal(scopedDetail.standard.author_display,'作者甲');
+ await limits.locator('body').evaluate(el=>el.insertAdjacentHTML('beforeend','<div role="dialog"><div class="note-container"><h1 id="detail-title">当前浮层笔记</h1><div id="detail-desc">当前浮层正文</div></div></div>'));
+ const overlayDetail=await limits.evaluate(()=>CrowdPage.probe('note').record);
+ assert.equal(overlayDetail.standard.title,'当前浮层笔记');assert.equal(overlayDetail.evidence.text,'当前浮层正文');
+ await limits.locator('[role="dialog"]').evaluate(el=>el.remove());
+ await limits.locator('.note-detail').evaluate(el=>el.remove());
+ await limits.locator('#detail-desc').evaluate(el=>{el.removeAttribute('id');el.className='desc';});
+ scopedDetail=await limits.evaluate(()=>CrowdPage.probe('note').record);
+ assert.ok(scopedDetail.evidence.text.startsWith('推荐'),'flat .note-container > .desc is still a detail body');
+ await limits.locator('.note-container > .desc').evaluate(el=>{el.id='detail-desc';});
  await limits.locator('#detail-desc').evaluate(el=>el.innerText='好吃');
  assert.equal((await limits.evaluate(()=>CrowdPage.probe('note'))).ready,true,'short text is not a load timeout');
  const profilePage=await browser.newPage();
@@ -141,7 +159,7 @@ try {
   create function auth.uid() returns uuid language sql as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;
   create function auth.role() returns text language sql as $$select current_setting('request.jwt.claim.role',true)$$;
   grant usage on schema auth to authenticated;grant execute on function auth.uid(),auth.role() to authenticated;`);
- for(const suffix of ['20261006145016_crowd_v4.sql','_crowd_v4_diagnostics.sql','_crowd_v4_navigation_diagnostics.sql','_crowd_v4_view_count.sql','_crowd_v4_safety.sql','_crowd_v4_receipt_recovery.sql','_crowd_v4_task_scheduling.sql','_crowd_v4_observations.sql','_crowd_v4_relevance_aliases.sql']) await db.exec(fs.readFileSync(path.join(migrations,fs.readdirSync(migrations).find(n=>n.endsWith(suffix))),'utf8'));
+ for(const suffix of ['20261006145016_crowd_v4.sql','_crowd_v4_diagnostics.sql','_crowd_v4_navigation_diagnostics.sql','_crowd_v4_view_count.sql','_crowd_v4_safety.sql','_crowd_v4_receipt_recovery.sql','_crowd_v4_task_scheduling.sql','_crowd_v4_observations.sql','_crowd_v4_relevance_aliases.sql','_crowd_v4_login_diagnostics.sql']) await db.exec(fs.readFileSync(path.join(migrations,fs.readdirSync(migrations).find(n=>n.endsWith(suffix))),'utf8'));
  await db.query('insert into auth.users values($1)',[user]);
  await db.query("insert into crowd_v4.participants(user_id,status,consent,quota_day) values($1,'approved','crowd-public-v4',2)",[user]);
  await db.exec(`insert into crowd_v4.tasks(source_key,query,store_name,anchor_terms,target) values('fixture','测试餐厅','测试餐厅','["测试餐厅"]',1)`);
@@ -192,7 +210,7 @@ try {
   globalThis.commands=[];let enabled=false,session=true;
   globalThis.chrome={runtime:{sendMessage:async message=>{
    commands.push(message);
-   if(message.type==='state')return {ok:true,data:{session,invited:true,agent:{enabled:false,phase:'idle',outbox:[],rejected:[{reason:'unrelated_note',record:{evidence:{text:'PRIVATE_EVIDENCE_MUST_NOT_APPEAR'}}}],last_error:'page_timeout'},status:{participant:{status:'approved'}},diagnostics:{enabled,sent_at:enabled?Date.now():null}}};
+   if(message.type==='state')return {ok:true,data:{session,invited:true,agent:{enabled:false,phase:'idle',outbox:[],rejected:[{reason:'unrelated_note',record:{evidence:{text:'PRIVATE_EVIDENCE_MUST_NOT_APPEAR'}}}],last_error:globalThis.fixtureAgentError || 'page_timeout'},status:{participant:{status:'approved'},error:globalThis.fixtureStatusError},diagnostics:{enabled,sent_at:enabled?Date.now():null}}};
    if(message.type==='diagnostics'){await new Promise(r=>setTimeout(r,50));enabled=message.enabled;}
    if(message.type==='logout')session=false;
    return {ok:true,data:{}};
@@ -211,6 +229,11 @@ try {
  await controller.locator('#diagnostics').uncheck();
  await controller.waitForFunction(()=>document.getElementById('diagnostics_status').textContent==='诊断未开启。');
  assert.equal(await controller.evaluate(()=>commands.some(c=>c.type==='start')),false,'diagnostics controls never start collection');
+ await controller.evaluate(async()=>{globalThis.fixtureStatusError='backend_login_required';await refresh();});
+ assert.ok((await controller.locator('#welcome').textContent()).includes('中台参与身份已失效'));
+ assert.ok((await controller.locator('#status').textContent()).includes('登录已失效'));
+ await controller.evaluate(async()=>{globalThis.fixtureStatusError=null;globalThis.fixtureAgentError='user_login';await refresh();});
+ assert.ok((await controller.locator('#welcome').textContent()).includes('回到这里点击「继续采集」'));
  await controller.waitForFunction(()=>!document.getElementById('consent').disabled);
  assert.equal(await controller.locator('#consent').textContent(),'同意并继续');
  await controller.locator('#agree').check();await controller.locator('#consent').click();

@@ -60,12 +60,12 @@
       // Continuing never clears a durable deadline or a pending risk report.
       await this.save(s); await this.r.schedule(this.r.now() + 1000);
     }
-    async stop(reason = 'user_stopped') {
+    async stop(reason = 'user_stopped', {keepPage = false} = {}) {
       this.generation++; this.controller?.abort();
       // Wait for the single writer before persisting the stop; prevent stale saves.
       await this.active?.catch(() => {});
       const s = await this.read(); s.enabled = false; s.last_error = reason;
-      await this.save(s); await this.r.cancel(); await this.r.close();
+      await this.save(s); await this.r.cancel(); if (!keepPage) await this.r.close();
     }
     async tick(recover = false) {
       this.recover ||= recover;
@@ -284,7 +284,7 @@
           try { await this.control(s, err.message, alive, signal); } catch (_) { alive(); }
         }
         s.failure_kind = ['captcha','rate_limit'].includes(err.message) ? 'platform_gate' :
-          err.message === 'login_required' ? 'login' :
+          err.message === 'login_required' ? 'platform_login' :
           ['page_loading','probe_timeout'].includes(err.message) ? 'page_transport' :
           ['page_timeout','content_unavailable','wrong_note','invalid_content','invalid_comments','invalid_count','page_mismatch'].includes(err.message) ? 'page_contract' : 'backend';
         const pageFailure = ['page_timeout', 'page_loading', 'content_unavailable', 'probe_timeout', 'wrong_note', 'invalid_content', 'invalid_comments', 'invalid_count'].includes(err.message);
@@ -294,7 +294,7 @@
             s.enabled = false; await this.save(s); await this.r.cancel(); return;
           }
         }
-        if (['captcha', 'rate_limit', 'login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections'].includes(err.message) || err.status === 401 || err.status === 403) {
+        if (['captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections'].includes(err.message) || err.status === 401 || err.status === 403) {
           s.enabled = false; await this.save(s); await this.r.cancel(); return;
         }
         if (pageFailure || err.message === 'wrong_note') {

@@ -64,7 +64,7 @@ const runtime = {
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
 let diagnosticReport;
 const diagnosticKey = (id, suffix) => 'diagnostics:' + id + ':' + suffix;
-const diagnosticErrors = ['page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt'];
+const diagnosticErrors = ['page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','backend_login_required','user_login','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt'];
 const navigationErrors = ['ERR_NAME_NOT_RESOLVED','ERR_INTERNET_DISCONNECTED','ERR_CONNECTION_TIMED_OUT','ERR_TIMED_OUT','ERR_CONNECTION_RESET','ERR_CONNECTION_REFUSED','ERR_CONNECTION_CLOSED','ERR_ADDRESS_UNREACHABLE','ERR_NETWORK_CHANGED','ERR_TUNNEL_CONNECTION_FAILED','ERR_PROXY_CONNECTION_FAILED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID','ERR_SSL_PROTOCOL_ERROR','ERR_BLOCKED_BY_CLIENT','ERR_BLOCKED_BY_ADMINISTRATOR','ERR_ABORTED'];
 let navigationQueue = Promise.resolve();
 async function clearNavigation() {
@@ -167,7 +167,7 @@ async function reportDiagnostics() {
 }
 async function setDiagnostics(enabled) {
   await diagnosticReport;
-  const settings = await diagnosticSettings(); if (!settings.id) throw new Error('login_required');
+  const settings = await diagnosticSettings(); if (!settings.id) throw new Error('backend_login_required');
   // Server revisions reject delayed reports/control requests after opt-out.
   await storage.set(diagnosticKey(settings.id, 'revision'), Math.max(Date.now(), settings.revision + 1));
   await storage.set(diagnosticKey(settings.id, 'enabled'), enabled);
@@ -224,7 +224,23 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         await api.logout(); await repairDiagnostics(); return {};
       }
       case 'export': { const s = await agent.read(); return {outbox: s.outbox, rejected: s.rejected}; }
-      case 'open_login': await agent.stop('login_required'); await chrome.tabs.create({url: CrowdCore.HOST, active: true}); return {};
+      case 'open_login': {
+        // Keep the actual challenge/note page. Opening help is a user action,
+        // not evidence that either platform or backend authentication failed.
+        await agent.stop('user_login', {keepPage: true});
+        const id = await storage.get('work_tab');
+        if (id) {
+          try {
+            const tab = await chrome.tabs.get(id), url = new URL(tab.pendingUrl || tab.url);
+            if (url.protocol === 'https:' && !url.username && !url.password && !url.port && ['www.xiaohongshu.com','m.xiaohongshu.com'].includes(url.hostname)) {
+              await chrome.tabs.update(id, {active: true});
+              await chrome.windows.update(tab.windowId, {focused: true}); return {};
+            }
+          } catch (_) {}
+        }
+        const tab = await chrome.tabs.create({url: CrowdCore.HOST, active: true});
+        await storage.set('work_tab', tab.id); return {};
+      }
       default: throw new Error('unknown_command');
     }
   })().then(data => reply({ok: true, data}), e => reply({ok: false, error: e.message}));

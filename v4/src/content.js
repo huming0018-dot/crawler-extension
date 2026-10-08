@@ -5,8 +5,17 @@
   const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden';
   const first = selectors => [...document.querySelectorAll(selectors)].find(visible);
   const text = el => el?.innerText?.trim() || '';
-  const postFirst = selectors => [...noteScope().querySelectorAll(selectors)].find(el => visible(el) && !el.closest('.comments-container, .comments-list, .comment-list, .comment-item'));
-  const noteBody = () => postFirst('#detail-desc, .note-detail .note-text, .note-container .note-text, .note-scroller .desc, .note-content .desc');
+  const ownPost = el => visible(el) && !el.closest('.comments-container, .comments-list, .comment-list, .comment-item, .note-item');
+  // A comma-separated query returns DOM order, not selector priority. Prefer
+  // explicit detail fields before fallbacks, excluding recommendations/comments.
+  const postFirst = selectors => {
+    const scope = noteScope();
+    for (const selector of selectors.split(',')) {
+      const node = [...scope.querySelectorAll(selector.trim())].find(ownPost);
+      if (node) return node;
+    }
+  };
+  const noteBody = () => postFirst('#detail-desc, .note-detail .note-text, .note-container .note-text, .note-scroller .desc, .note-content .desc, .note-container .desc, #noteContainer .desc');
   const noteLinks = () => {
     // Prefer each result card's own links (crawler-extension v1.0.0 pattern).
     const cards = [...document.querySelectorAll('section.note-item, div.note-item')];
@@ -59,9 +68,16 @@
       captured_at:new Date().toISOString(),source:'rendered_public_dom',parser_version:C.VERSION}};
   }
   const noteScope = () => {
-    const scopes = [...document.querySelectorAll('#noteContainer, .note-detail, .note-container')].filter(visible);
+    const scopes = [...document.querySelectorAll('#noteContainer, .note-detail, .note-container')].filter(ownPost);
+    const overlay = scopes.find(el => el.closest('[role="dialog"], .note-detail-mask'));
+    if (overlay) return overlay;
+    const anchor = [...document.querySelectorAll('#detail-desc, #detail-title')].find(ownPost);
+    if (anchor) {
+      const owner = scopes.find(el => el.contains(anchor));
+      if (owner) return owner;
+    }
     // Prefer the visible overlay. Do not fall through to recommendation cards.
-    return scopes.find(el => el.closest('[role="dialog"], .note-detail-mask')) || scopes.at(-1) || document;
+    return scopes.at(-1) || document;
   };
   const commentPanel = () => [...noteScope().querySelectorAll('.comments-container, .comments-list, .comment-list')].find(visible);
   function expandControl(panel) {
@@ -116,7 +132,7 @@
     try { identity = C.noteURL(location.href); } catch (_) { return {ready: false}; }
     const body = noteBody();
     const original = text(body);
-    const title = text(postFirst('#detail-title, .title')).slice(0, 300);
+    const title = text(postFirst('#detail-title, .note-content .title, .note-detail .title, .note-container .title, #noteContainer .title')).slice(0, 300);
     const media = [...noteScope().querySelectorAll('.note-slider img, .note-content img, .note-video video, video')].some(visible);
     if (!original && !title && !media) return {ready: false};
     const raw = original.slice(0, 24000);
@@ -133,7 +149,7 @@
       let node = postFirst(selectors);
       if (!node) {
         // Some layouts render one detached interaction bar beside the detail.
-        const detached = [...document.querySelectorAll(selectors)].filter(el => visible(el) && !el.closest('.comment-item, .comments-container, .note-item'));
+        const detached = [...document.querySelectorAll(selectors)].filter(el => visible(el) && !el.closest('.comment-item, .comments-container, .note-item, .note-detail, .note-container, #noteContainer'));
         if (detached.length === 1) node = detached[0];
       }
       return [key, text(node).slice(0, 80) || null];
@@ -144,7 +160,7 @@
     const record = {schema_version: 4,
       standard: {platform: 'xiaohongshu', note_id: identity.id, url: identity.url, title,
         captured_at: new Date().toISOString(), published_at: dateISO ? dateISO[1] : null,
-        author_display: text(postFirst('.author-wrapper .username, .note-detail .author .name')).slice(0, 100) || null,
+        author_display: text(postFirst('.author-wrapper .username, .author-wrapper .name, .author .name, .author .username')).slice(0, 100) || null,
         ...Object.fromEntries(Object.entries(metricLabels).map(([key, label]) => [key, parseCount(label || '')]))},
       extra: {author, media_present: media, field_observations: Object.fromEntries(Object.entries(metricLabels).map(([key,label]) => [key, metric(label)])), hashtags, published_label: date, metric_labels: metricLabels, author_opinion_quotes: raw.split(/\n+/).filter(x => /好吃|难吃|推荐|踩雷|鲜|咸|甜|辣|油腻|服务|排队|价格/.test(x)).slice(0, 30)},
       evidence: {text: raw, original_length: original.length, truncated: original.length > raw.length,

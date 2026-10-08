@@ -98,7 +98,7 @@ async function agentChecks() {
  // Authentication failures in refresh cannot leak an anon bearer into RPCs.
  const fetches=[];const st={get:async()=>({refresh_token:'refresh',expires_at:0}),set:async()=>{}};
  const client=new CrowdAPI({url:'https://test.supabase.co',key:'sb_publishable_test'},st,async(url,options)=>{fetches.push({url,options});return {ok:false,status:401,json:async()=>({message:'expired'})};});
- await assert.rejects(client.rpc('claim'),/expired/);assert.equal(fetches.length,1);assert.equal(fetches[0].options.headers.Authorization,undefined);
+ await assert.rejects(client.rpc('claim'),e=>e.message==='backend_login_required'&&e.status===401);assert.equal(fetches.length,1);assert.equal(fetches[0].options.headers.Authorization,undefined);
  const scoped=C.accountStorage(storage); state.session={user:{id:'a'}};await scoped.set('agent',{secret:'a'});state.session={user:{id:'b'}};assert.equal(await scoped.get('agent'),undefined);state.session={user:{id:'a'}};assert.equal((await scoped.get('agent')).secret,'a');
   assert.throws(()=>C.noteURL('https://www.xiaohongshu.com.evil.test/explore/'+id));
   assert.equal(C.noteURL('https://m.xiaohongshu.com/discovery/item/'+id+'?xsec_token=local-only').url,C.HOST+'/explore/'+id);
