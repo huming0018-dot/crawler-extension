@@ -145,12 +145,20 @@
           if (claimed.error === 'daily_quota') { s.next_at = C.quotaRetry(claimed, now); s.last_error = 'daily_quota'; await this.save(s); await this.r.schedule(s.next_at); return; }
           if (claimed.error) throw new Error(claimed.error);
           if (!claimed.task) { s.task = null; s.phase = 'idle'; s.next_at = now + 300000; }
-          else { if (s.task?.id !== claimed.task.id) { s.phase = 'idle'; s.seen = []; s.candidates = []; } s.task = claimed.task; }
+          else {
+            if (s.task?.id !== claimed.task.id || s.task?.lease_token !== claimed.task.lease_token) {
+              s.phase = 'idle'; s.seen = []; s.candidates = []; s.search_round = 0;
+              s.note_url = null; s.note_id = null;
+            }
+            s.task = claimed.task;
+          }
         }
         if (!s.task) { await this.save(s); await this.r.schedule(s.next_at); return; }
         if (s.task.received >= s.task.target || (s.phase === 'search_done' && !s.candidates.length)) {
           const finished = await this.api.rpc('finish', {p_task: s.task.id, p_lease: s.task.lease_token}, signal); alive();
-          if (finished.error) s.last_error = finished.error;
+          if (!finished || (finished.error && finished.error !== 'lease_lost') ||
+            (!finished.error && (!['open','complete','exhausted','closed'].includes(finished.status) || !Number.isSafeInteger(finished.received) || finished.received < 0))) throw new Error('backend_unavailable');
+          s.last_error = finished.error || null;
           s.task = null; s.phase = 'idle'; s.next_at = now + 60000;
         } else if (s.task.remaining_today === 0) {
           s.next_at = now + 3600000;
@@ -164,8 +172,9 @@
           if ('keyword' in page && normalize(page.keyword) !== normalize(s.task.query)) throw new Error('page_mismatch');
           this.checkPage(page, s, now);
           if (page.ready) {
-            const found = new Map(s.candidates.map(url => [C.noteURL(url).id, url]));
-            for (const url of page.links) { try { const note = C.noteURL(url); if (!s.seen.includes(note.id) && !s.history.includes(note.id)) found.set(note.id, note.navigation); } catch (_) {} }
+            const known = new Set(Array.isArray(s.task.known_note_ids) ? s.task.known_note_ids : []);
+            const found = new Map(s.candidates.map(url => [C.noteURL(url).id, url]).filter(([id]) => !known.has(id)));
+            for (const url of page.links) { try { const note = C.noteURL(url); if (!known.has(note.id) && !s.seen.includes(note.id) && !s.history.includes(note.id)) found.set(note.id, note.navigation); } catch (_) {} }
             s.candidates = [...found.values()].slice(0, 80);
             s.search_round = (s.search_round || 0) + 1;
             if (s.search_round < 3) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } await this.r.probe('scroll'); alive(); s.next_at = now + C.between(30000, 45000, this.r.random); }
@@ -242,7 +251,7 @@
           s.enabled = false; await this.save(s); await this.r.cancel(); return;
         }
         if (pageFailure || err.message === 'wrong_note') {
-          s.phase = 'idle'; s.candidates = []; s.task = null;
+          s.phase = 'idle'; s.search_round = 0; s.candidates = []; s.note_url = null; s.note_id = null;
         }
         s.next_at = Math.max(s.next_at, now + (pageFailure ? 60000 * 2 ** (s.page_failures - 1) : 60000));
         if (s.outbox.length) { const item = s.outbox[0]; item.retries = (item.retries || 0) + 1; item.retry_at = now + Math.min(900000, 60000 * 2 ** Math.min(item.retries - 1, 4)); s.next_at = item.retry_at; }
