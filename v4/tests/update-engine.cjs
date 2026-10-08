@@ -3,6 +3,9 @@
 const fs=require('fs'),path=require('path'),assert=require('node:assert/strict');
 const puppeteer=require(process.env.CROWD_PUPPETEER_MODULE);
 const root=path.resolve(process.env.CROWD_UPDATE_FIXTURE),fixture=JSON.parse(fs.readFileSync(path.join(root,'fixture.json'))),profile=path.join(root,'browser-profile');
+const targetVersion=JSON.parse(require('child_process').execFileSync('/usr/bin/unzip',['-p',fixture.new,'manifest.json'])).version;
+const targetWorker='background_v'+targetVersion.replaceAll('.','_')+'.js';
+const badVersion=targetVersion.replace(/\d+$/,n=>String(Number(n)+1));
 const manifest=JSON.parse(fs.readFileSync(path.join(fixture.directory,'manifest.json'))),host='com.crowd.v4.updater';
 fs.mkdirSync(path.join(profile,'NativeMessagingHosts'),{recursive:true});fs.writeFileSync(path.join(profile,'NativeMessagingHosts',host+'.json'),JSON.stringify({name:host,description:'isolated updater test',path:path.join(fixture.helper,'crowd-v4-updater'),type:'stdio',allowed_origins:['chrome-extension://licijehcpohikchlnkbpjdjdfkcocndg/']}));
 let browser;const result={scope:'Real installed extension and native host; synthetic local identity/evidence; signed fixture channel',started_at:new Date().toISOString()};
@@ -17,26 +20,26 @@ let browser;const result={scope:'Real installed extension and native host; synth
  const saved=await worker.evaluate(()=>chrome.storage.local.get(['session','pending_invite','agent:fixture-participant']));
  await worker.evaluate(()=>updater.check()).catch(e=>{if(!/Target closed|context|Session closed|Protocol error/i.test(e.message))throw e;});
  const until=Date.now()+25000;let next;
- while(Date.now()<until){const target=browser.targets().find(t=>t.type()==='service_worker'&&t.url().endsWith('background_v4_2_1.js'));if(target){try{next=await target.worker();if(await next.evaluate(()=>CrowdCore.VERSION)==='4.2.1')break;}catch{}}await new Promise(r=>setTimeout(r,200));}
+ while(Date.now()<until){const target=browser.targets().find(t=>t.type()==='service_worker'&&t.url().endsWith(targetWorker));if(target){try{next=await target.worker();if(await next.evaluate(()=>CrowdCore.VERSION)===targetVersion)break;}catch{}}await new Promise(r=>setTimeout(r,200));}
  assert.ok(next,'new worker did not load');
  const stateFile=path.join(fixture.helper,'state.json');
- while(Date.now()<until && JSON.parse(fs.readFileSync(stateFile)).loaded_version!=='4.2.1')await new Promise(r=>setTimeout(r,200));
- result.nativeState=JSON.parse(fs.readFileSync(stateFile));assert.equal(result.nativeState.loaded_version,'4.2.1');assert.equal(result.nativeState.status,'applied');
+ while(Date.now()<until && JSON.parse(fs.readFileSync(stateFile)).loaded_version!==targetVersion)await new Promise(r=>setTimeout(r,200));
+ result.nativeState=JSON.parse(fs.readFileSync(stateFile));assert.equal(result.nativeState.loaded_version,targetVersion);assert.equal(result.nativeState.status,'applied');
  const after=await next.evaluate(()=>chrome.storage.local.get(['session','pending_invite','agent:fixture-participant']));assert.deepEqual(after,saved,'identity and evidence must survive byte-for-byte');assert.equal(browser.process().pid,pid);assert.equal(await tab.title(),'Preserve this tab');
  result.loadedVersion=await next.evaluate(()=>CrowdCore.VERSION);
  const cp=require('child_process'),broken=path.join(root,'broken.zip');
  cp.execFileSync('python3',['-c',`import json,zipfile,hashlib,sys
 with zipfile.ZipFile(sys.argv[1]) as z:files={n:z.read(n) for n in z.namelist()}
-m=json.loads(files['manifest.json']);old=m['background']['service_worker'];new=old.replace('4_2_1','4_2_2');m['version']='4.2.2';m['background']['service_worker']=new;files['manifest.json']=json.dumps(m).encode();files[new]=files.pop(old).replace(b'4.2.1',b'4.2.2');files['src/background.js']=b'this is deliberately invalid javascript {'
-r=json.loads(files.pop('release.json'));r['version']='4.2.2';r['worker']=new;r['files']={n:hashlib.sha256(b).hexdigest() for n,b in files.items()};files['release.json']=json.dumps(r).encode()
+m=json.loads(files['manifest.json']);old=m['background']['service_worker'];new=old.replace(sys.argv[3].replace('.','_'),sys.argv[4].replace('.','_'));m['version']=sys.argv[4];m['background']['service_worker']=new;files['manifest.json']=json.dumps(m).encode();files[new]=files.pop(old).replace(sys.argv[3].encode(),sys.argv[4].encode());files['src/background.js']=b'this is deliberately invalid javascript {'
+r=json.loads(files.pop('release.json'));r['version']=sys.argv[4];r['worker']=new;r['files']={n:hashlib.sha256(b).hexdigest() for n,b in files.items()};files['release.json']=json.dumps(r).encode()
 with zipfile.ZipFile(sys.argv[2],'w',zipfile.ZIP_DEFLATED) as z:
  for n,b in files.items():
   i=zipfile.ZipInfo(n);i.create_system=3;i.external_attr=0o100644<<16;i.compress_type=zipfile.ZIP_DEFLATED;z.writestr(i,b)
-`,fixture.new,broken]);
+`,fixture.new,broken,targetVersion,badVersion]);
  cp.execFileSync(process.execPath,['v4/updater/publish.cjs',fixture.private_key,broken,require('url').pathToFileURL(broken).href,'5',fixture.channel]);
  await next.evaluate(()=>updater.check()).catch(()=>{});
  const rollbackUntil=Date.now()+20000;let rollbackWorker;
- while(Date.now()<rollbackUntil){const state=JSON.parse(fs.readFileSync(stateFile));if(state.status==='rolled_back'&&state.failed_sequence===5){for(const t of browser.targets().filter(t=>t.type()==='service_worker'&&t.url().endsWith('background_v4_2_1.js'))){try{const w=await t.worker();if(await w.evaluate(()=>CrowdCore.VERSION)==='4.2.1')rollbackWorker=w;}catch{}}if(rollbackWorker)break;}await new Promise(r=>setTimeout(r,200));}
+ while(Date.now()<rollbackUntil){const state=JSON.parse(fs.readFileSync(stateFile));if(state.status==='rolled_back'&&state.failed_sequence===5){for(const t of browser.targets().filter(t=>t.type()==='service_worker'&&t.url().endsWith(targetWorker))){try{const w=await t.worker();if(await w.evaluate(()=>CrowdCore.VERSION)===targetVersion)rollbackWorker=w;}catch{}}if(rollbackWorker)break;}await new Promise(r=>setTimeout(r,200));}
  assert.ok(rollbackWorker,'broken release did not roll back and reload old worker');
  assert.deepEqual(await rollbackWorker.evaluate(()=>chrome.storage.local.get(['session','pending_invite','agent:fixture-participant'])),saved);
  assert.equal(browser.process().pid,pid);assert.equal(await tab.title(),'Preserve this tab');

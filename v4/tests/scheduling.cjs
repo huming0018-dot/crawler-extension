@@ -12,6 +12,25 @@ for(const file of ['core','agent'])vm.runInThisContext(fs.readFileSync('v4/src/'
  const api={rpc:async(name,p)=>{requests.push([name,p]);if(name==='guard')return policy;if(name==='claim')return {task:structuredClone(task)};if(name==='finish')return finishReply;throw Error(name);}};
  reset({phase:'search',search_round:2});probeReply={ready:true,links:[url(id),url(other)]};await new CrowdAgent(runtime,api).tick();
  assert.deepEqual(state.candidates,[url(other)],'known notes are filtered before detail/guard roundtrips');
+ // A bounded task should not spend two extra scroll admissions once enough
+ // distinct, unknown candidates exist. Duplicates and known IDs cannot count.
+ reset({phase:'search',task:{...task,target:2,known_note_ids:[id]}});
+ probeReply={ready:true,links:[url(id),url(other),url(other),url('c'.repeat(24))]};requests=[];
+ await new CrowdAgent(runtime,api).tick();assert.equal(state.phase,'search_done');
+ assert.equal(state.candidates.length,2);assert.ok(!requests.some(([n,p])=>n==='guard'&&p.p_action==='scroll'));
+ reset({phase:'search',task:{...task,target:2,known_note_ids:[id]}});
+ probeReply={ready:true,links:[url(id),url(other),url(other)]};requests=[];
+ await new CrowdAgent(runtime,api).tick();assert.equal(state.phase,'search');
+ assert.ok(requests.some(([n,p])=>n==='guard'&&p.p_action==='scroll'),'insufficient candidates still expand within the existing budget');
+ reset({phase:'search',task:{...task,target:1,anchor_terms:['测试餐厅'],known_note_ids:[]}});
+ probeReply={ready:true,links:[url(other)],cards:[{url:url(other),title:'其他餐厅'}]};requests=[];
+ await new CrowdAgent(runtime,api).tick();assert.equal(state.phase,'search','unrelated titles do not satisfy the early-stop target');
+ reset({task:{...task,platform:'not-installed'}});const openCount=opened.length;requests=[];
+ await new CrowdAgent(runtime,api).tick();assert.equal(state.enabled,false);assert.equal(state.last_error,'unsupported_platform');assert.equal(opened.length,openCount);
+ assert.ok(!requests.some(([n,p])=>n==='guard'&&p.p_action==='search'),'unknown platform must stop before charging or opening a search');
+ assert.equal(CrowdCore.taskPlatform(task).id,'xiaohongshu');
+ assert.throws(()=>CrowdCore.taskPlatform({...task,platform:null}),/unsupported_platform/);
+ const special='鱼 & 虾/#';assert.equal(new URL(CrowdCore.platform().searchURL(special)).searchParams.get('keyword'),special);
  // Finishing must retain the lease on a malformed response; otherwise we might lose the retry.
  reset({phase:'search_done'});await new CrowdAgent(runtime,api).tick();assert.equal(state.task.id,1);assert.equal(state.last_error,'backend_unavailable');
  now=state.next_at+1;finishReply={status:'open',received:0};await new CrowdAgent(runtime,api).tick();assert.equal(state.task,null);

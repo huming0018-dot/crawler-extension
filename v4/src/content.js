@@ -1,7 +1,7 @@
 /* Only rendered public content. Never intercept private APIs, cookies or network. */
 (function (root) {
   'use strict';
-  const C = root.CrowdCore;
+  const C = root.CrowdCore, platform = C.platform('xiaohongshu');
   const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden';
   const first = selectors => [...document.querySelectorAll(selectors)].find(visible);
   const text = el => el?.innerText?.trim() || '';
@@ -23,7 +23,7 @@
     const links = cards.length ? cards.flatMap(card => [...card.querySelectorAll(selectors)]) : [...document.querySelectorAll(selectors)];
     return links.filter(a => {
     if (!visible(a)) return false;
-    try { C.noteURL(a.href); return true; } catch (_) { return false; }
+    try { platform.noteURL(a.href); return true; } catch (_) { return false; }
     });
   };
   function gate() {
@@ -52,7 +52,7 @@
     });
   }
   function profile() {
-    let p; try { p = C.profileURL(location.href); } catch (_) { return {ready:false}; }
+    let p; try { p = platform.profileURL(location.href); } catch (_) { return {ready:false}; }
     const scope = first('.user-info, .user-page .info-part, .user-profile, [data-profile-header]');
     if (!scope) return {ready:false};
     const own = selector => [...scope.querySelectorAll(selector)].find(visible);
@@ -64,7 +64,7 @@
       metrics[key] = metric(text(row?.querySelector('.count, .number, [data-value]')) || null);
     }
     return {ready:true, profile:{author_id:p.id,url:p.url,nickname,public_handle:text(own('.user-redId, .red-id')).replace(/^小红书号[：:\s]*/, '').slice(0,100) || null,
-      metrics, notes:cards().slice(0,12).map(card => ({note_id:C.noteURL(card.url).id,title:card.title})),
+      metrics, notes:cards().slice(0,12).map(card => ({note_id:platform.noteURL(card.url).id,title:card.title})),
       captured_at:new Date().toISOString(),source:'rendered_public_dom',parser_version:C.VERSION}};
   }
   const noteScope = () => {
@@ -129,7 +129,7 @@
   }
   function note() {
     let identity;
-    try { identity = C.noteURL(location.href); } catch (_) { return {ready: false}; }
+    try { identity = platform.noteURL(location.href); } catch (_) { return {ready: false}; }
     const body = noteBody();
     const original = text(body);
     const title = text(postFirst('#detail-title, .note-content .title, .note-detail .title, .note-container .title, #noteContainer .title')).slice(0, 300);
@@ -156,9 +156,9 @@
     }));
     const authorLink = postFirst('.author-wrapper a[href*="/user/profile/"], .author a[href*="/user/profile/"]');
     let author = null;
-    try { const p = C.profileURL(authorLink?.href); author = {id: p.id, url: p.url}; } catch (_) {}
+    try { const p = platform.profileURL(authorLink?.href); author = {id: p.id, url: p.url}; } catch (_) {}
     const record = {schema_version: 4,
-      standard: {platform: 'xiaohongshu', note_id: identity.id, url: identity.url, title,
+      standard: {platform: platform.id, note_id: identity.id, url: identity.url, title,
         captured_at: new Date().toISOString(), published_at: dateISO ? dateISO[1] : null,
         author_display: text(postFirst('.author-wrapper .username, .author-wrapper .name, .author .name, .author .username')).slice(0, 100) || null,
         ...Object.fromEntries(Object.entries(metricLabels).map(([key, label]) => [key, parseCount(label || '')]))},
@@ -180,7 +180,7 @@
     const blocked = gate(); if (blocked) return {ready: false, gate: blocked};
     if (action === 'profile') return profile();
     if (action === 'comments') {
-      try { C.noteURL(location.href); } catch (_) { return {ready: false}; }
+      try { platform.noteURL(location.href); } catch (_) { return {ready: false}; }
       const panel = commentPanel(), expand = expandControl(panel);
       if (expand) { expand.scrollIntoView({block: 'center'}); expand.click(); }
       else if (panel) {
@@ -205,7 +205,8 @@
     }
     return note();
   }
-  root.CrowdPage = {probe};
+  // The browser/native transport only needs this uniform page-probe contract.
+  root.CrowdPage = {platform: platform.id, capabilities: platform.capabilities, probe};
   if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
     chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (sender.id !== chrome.runtime.id || message.type !== 'crowd_probe') return;

@@ -58,31 +58,51 @@
       if (s.enrichment) s.enrichment.stage='done';
       if (s.phase === 'note') s.phase = 'reopen_note';
       if (s.phase === 'search') { s.phase = 'idle'; s.search_round = 0; }
-      s.enabled = true; s.last_error = null; s.page_failures = 0; s.control_checked = 0; s.last_tick = this.r.now();
+      s.enabled = true; s.delivery_enabled = true; s.delivery_error = null; s.last_error = null; s.page_failures = 0; s.control_checked = 0; s.last_tick = this.r.now();
       // Continuing never clears a durable deadline or a pending risk report.
       await this.save(s); await this.r.schedule(this.r.now() + 1000);
     }
-    async stop(reason = 'user_stopped', {keepPage = false} = {}) {
+    async stop(reason = 'user_stopped', {keepPage = false, drain = false} = {}) {
       this.generation++; this.controller?.abort();
       // Wait for the single writer before persisting the stop; prevent stale saves.
       await this.active?.catch(() => {});
-      const s = await this.read(); s.enabled = false; s.last_error = reason;
-      await this.save(s); await this.r.cancel(); if (!keepPage) await this.r.close();
+      const s = await this.read(); s.enabled = false; s.delivery_enabled = drain; s.last_error = reason;
+      await this.save(s); await this.r.cancel(); if (!keepPage) await this.r.close(); await this.repairDelivery();
     }
-    async tick(recover = false) {
+    async tick(recover = false, deliveryOnly = false) {
       if (this.maintenance) return;
       this.recover ||= recover;
       if (this.active) return this.active;
       this.controller = new AbortController();
       const gen = this.generation;
       const alive = () => { if (gen !== this.generation || this.controller.signal.aborted) throw new Error('cancelled'); };
-      this.active = this.step(alive, this.controller.signal).finally(() => { this.active = null; });
+      this.active = this.step(alive, this.controller.signal, deliveryOnly).finally(() => { this.active = null; });
       return this.active;
     }
-    async step(alive, signal) {
+    async step(alive, signal, deliveryOnly = false) {
       let s = await this.read(); const recover = this.recover; this.recover = false;
-      if (!s.enabled) return;
-      if (s.consent !== C.CONSENT) { s.enabled = false; s.last_error = 'consent_required'; await this.save(s); await this.r.cancel(); return; }
+      if (!s.enabled && !(deliveryOnly && s.delivery_enabled && s.outbox.length)) return;
+      if (s.consent !== C.CONSENT) { s.enabled = false; s.delivery_enabled = false; s.last_error = 'consent_required'; await this.save(s); await this.r.cancel(); await this.r.cancelDelivery?.(); return; }
+      if (deliveryOnly) {
+        const stoppedReason = !s.enabled ? s.last_error : null;
+        try {
+          alive();
+          if (s.outbox.length) { await this.flushOutbox(s, alive, signal); s.delivery_error = null; await this.save(s); }
+        } catch (error) {
+          alive();
+          const auth = error.status === 401 || error.status === 403;
+          s.delivery_error = auth ? 'backend_login_required' : error.message === 'review_local_rejections' ? error.message : 'backend_unavailable';
+          if (auth || error.message === 'review_local_rejections') { s.delivery_enabled = false; s.enabled = false; await this.r.cancel(); }
+          if (s.outbox.length) {
+            const item = s.outbox[0]; item.retries = (item.retries || 0) + 1;
+            item.retry_at = this.r.now() + Math.min(900000, 60000 * 2 ** Math.min(item.retries - 1, 4));
+          }
+          await this.save(s);
+        }
+        if (stoppedReason) { s.last_error = stoppedReason; await this.save(s); }
+        await this.repairDelivery(); return;
+      }
+      await this.repairDelivery();
       const now = this.r.now();
       const day = new Date(now + 8 * 3600000).toISOString().slice(0, 10);
       if (s.day !== day) { s.day = day; s.visits = 0; }
@@ -114,46 +134,7 @@
           s.outbox.push(item);await this.save(s);alive();
         }
         // Delivery runs even during collection cooldown. One stable UUID per record.
-        if (s.outbox.length) {
-          const item = s.outbox[0];
-          if ((item.retry_at || 0) > now) { await this.r.schedule(item.retry_at); return; }
-          if (item.kind) {
-            const receipt = await this.api.rpc('observe', {p_request:item.request,p_parent:item.parent,p_kind:item.kind,p_data:item.record}, signal); alive();
-            if (!receipt || receipt.request !== item.request || !['observed','rejected'].includes(receipt.gate)) throw new Error('invalid_receipt');
-            if (receipt.gate === 'rejected') s.rejected.push({...item,reason:receipt.error || 'invalid_record'});
-            s.outbox.shift(); if(s.rejected.length>=20)throw new Error('review_local_rejections'); await this.save(s); await this.r.schedule(now+30000); return;
-          }
-          const receipt = C.receipt(await this.api.rpc('submit', {p_request: item.request, p_task: item.task,
-            p_lease: item.lease, p_record: item.record}, signal), item.request);
-          alive();
-          if (receipt.error === 'daily_quota') {
-            item.retry_at = C.quotaRetry(receipt, now); s.last_error = 'daily_quota'; await this.save(s); await this.r.schedule(item.retry_at); return;
-          } else if (receipt.error === 'lease_expired') {
-            const renewed = await this.api.rpc('claim', {p_task: item.task}, signal); alive();
-            if (renewed.error === 'daily_quota') {
-              item.retry_at = C.quotaRetry(renewed, now); s.last_error = 'daily_quota';
-              await this.save(s); await this.r.schedule(item.retry_at); return;
-            }
-            if (renewed.error) throw new Error(renewed.error);
-            if (renewed.task?.id === item.task) { item.lease = renewed.task.lease_token; s.task = renewed.task; }
-            else { s.rejected.push({...item, reason: 'lease_lost'}); s.outbox.shift(); s.task = null; s.phase = 'idle'; }
-          } else {
-            s.outbox.shift();
-            if (receipt.error) {
-              s.rejected.push({...item, reason: receipt.error,relevance_revision:s.control?.relevance_revision || 0});
-              if (s.enrichment?.parent === item.request) { s.enrichment = null; s.phase = 'search_done'; }
-            }
-            else {
-              s.last_error = null;
-              s.received += receipt.inserted ? 1 : 0;
-              s.history = [...new Set([...s.history, item.record.standard.note_id])].slice(-2000);
-              if (s.task?.id === item.task) { s.task.received = receipt.task_received; if (receipt.inserted && s.task.remaining_today != null) s.task.remaining_today--; }
-            }
-          }
-          // Failed records remain exportable; bounded by stopping, never by deleting evidence.
-          if (s.rejected.length >= 20) throw new Error('review_local_rejections');
-          await this.save(s); await this.r.schedule(now + 30000); return;
-        }
+        if (s.outbox.length) { await this.flushOutbox(s, alive, signal); return; }
         if (s.pending_risk || !s.control || this.r.now() >= s.control_expires || this.r.now() < s.control_checked) {
           s.last_error = 'control_unavailable'; await this.save(s); return;
         }
@@ -179,12 +160,13 @@
           }
         }
         if (!s.task) { await this.save(s); await this.r.schedule(s.next_at); return; }
+        const platform = C.taskPlatform(s.task);
         if (s.task.received >= s.task.target || (s.phase === 'search_done' && !s.candidates.length)) {
           const finished = await this.api.rpc('finish', {p_task: s.task.id, p_lease: s.task.lease_token}, signal); alive();
           if (!finished || (finished.error && finished.error !== 'lease_lost') ||
             (!finished.error && (!['open','complete','exhausted','closed'].includes(finished.status) || !Number.isSafeInteger(finished.received) || finished.received < 0))) throw new Error('backend_unavailable');
           s.last_error = finished.error || null;
-          s.task = null; s.phase = 'idle'; s.next_at = now + 60000;
+          s.task = null; s.phase = 'idle'; s.next_at = now + 60000; await this.r.close();
         } else if (s.task.remaining_today === 0) {
           s.next_at = now + 3600000;
         } else if (s.phase === 'idle') {
@@ -193,7 +175,7 @@
           // Persist before navigation: a worker restart after tabs.update must
           // resume probing instead of opening/charging the same search again.
           await this.save(s); alive();
-          await this.r.open(C.HOST + '/search_result?keyword=' + encodeURIComponent(s.task.query) + '&source=web_search_result_notes'); alive();
+          await this.r.open(platform.searchURL(s.task.query)); alive();
         } else if (s.phase === 'search') {
           const page = await this.r.probe('search'); alive();
           const normalize = value => String(value || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -201,20 +183,24 @@
           this.checkPage(page, s, now);
           if (page.ready) {
             const known = new Set(Array.isArray(s.task.known_note_ids) ? s.task.known_note_ids : []);
-            const found = new Map(s.candidates.map(url => [C.noteURL(url).id, url]).filter(([id]) => !known.has(id)));
-            for (const url of page.links) { try { const note = C.noteURL(url); if (!known.has(note.id) && !s.seen.includes(note.id) && !s.history.includes(note.id)) found.set(note.id, note.navigation); } catch (_) {} }
+            const found = new Map(s.candidates.map(url => [platform.noteURL(url).id, url]).filter(([id]) => !known.has(id)));
+            for (const url of page.links) { try { const note = platform.noteURL(url); if (!known.has(note.id) && !s.seen.includes(note.id) && !s.history.includes(note.id)) found.set(note.id, note.navigation); } catch (_) {} }
             s.card_meta ||= {};
-            for (const card of page.cards || []) { try { s.card_meta[C.noteURL(card.url).id] = {title:card.title,author_display:card.author_display}; } catch (_) {} }
+            for (const card of page.cards || []) { try { s.card_meta[platform.noteURL(card.url).id] = {title:card.title,author_display:card.author_display}; } catch (_) {} }
             const normalizeTerm = value => String(value || '').normalize('NFKC').toLowerCase().replace(/[\s\p{P}]/gu,'');
-            const score = url => (s.task.anchor_terms || []).filter(term => normalizeTerm(s.card_meta[C.noteURL(url).id]?.title).includes(normalizeTerm(term))).length;
+            const score = url => (s.task.anchor_terms || []).filter(term => normalizeTerm(s.card_meta[platform.noteURL(url).id]?.title).includes(normalizeTerm(term))).length;
             s.candidates = [...found.values()].sort((a,b) => score(b)-score(a)).slice(0, 80);
-            s.card_meta = Object.fromEntries(s.candidates.map(url => {const id=C.noteURL(url).id;return [id,s.card_meta[id] || {}];}));
+            s.card_meta = Object.fromEntries(s.candidates.map(url => {const id=platform.noteURL(url).id;return [id,s.card_meta[id] || {}];}));
             s.search_round = (s.search_round || 0) + 1;
-            if (s.search_round < 3) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } await this.r.probe('scroll'); alive(); s.next_at = now + C.between(30000, 45000, this.r.random); }
+            // Stop expanding once enough unseen candidates exist for this task.
+            // This saves page actions for small trials without changing server gaps.
+            const needed = Math.max(1, s.task.target - s.task.received);
+            const matching = s.task.anchor_terms?.length ? s.candidates.filter(url => score(url) > 0).length : s.candidates.length;
+            if (s.search_round < 3 && matching < needed) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } await this.r.probe('scroll'); alive(); s.next_at = now + C.between(30000, 45000, this.r.random); }
             else { s.search_round = 0; s.phase = 'search_done'; s.next_at = now + 30000; }
           }
         } else if (s.phase === 'search_done') {
-          const url = s.candidates[0]; const id = C.noteURL(url).id;
+          const url = s.candidates[0]; const id = platform.noteURL(url).id;
           if (!await this.admit(s, 'detail', alive, signal, id)) {
             if (['known_note','note_busy'].includes(s.last_error)) { s.candidates.shift(); s.seen.push(id); await this.save(s); }
             return;
@@ -301,7 +287,7 @@
           }
         }
         if (err.message==='navigation_uncommitted') await this.r.trace?.('navigation_timeout');
-        if (['navigation_failed', 'navigation_uncommitted', 'captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections'].includes(err.message) || err.status === 401 || err.status === 403) {
+        if (['navigation_failed', 'navigation_uncommitted', 'captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections', 'unsupported_platform'].includes(err.message) || err.status === 401 || err.status === 403) {
           s.enabled = false; await this.save(s); await this.r.cancel(); return;
         }
         if (pageFailure || err.message === 'wrong_note') {
@@ -311,6 +297,82 @@
         if (s.outbox.length) { const item = s.outbox[0]; item.retries = (item.retries || 0) + 1; item.retry_at = now + Math.min(900000, 60000 * 2 ** Math.min(item.retries - 1, 4)); s.next_at = item.retry_at; }
         await this.save(s); await this.r.schedule(s.next_at);
       }
+    }
+    async scheduleReceipt(s, at) {
+      if (s.enabled) await this.r.schedule(at);
+      else await this.r.scheduleDelivery?.();
+    }
+    async queueRating(proof, score, reason) {
+      if (this.maintenance) throw new Error('update_in_progress');
+      if (!Number.isSafeInteger(proof) || proof < 1 || !Number.isInteger(score) || score < 1 || score > 5 ||
+        typeof reason !== 'string' || reason.length > 200 || reason.replace(/[\s\p{P}\p{S}]/gu,'').length < 8) throw new Error('invalid_rating');
+      const generation = this.generation;
+      await this.active?.catch(()=>{});
+      if (generation !== this.generation) throw new Error('cancelled');
+      if (this.maintenance) throw new Error('update_in_progress');
+      if (this.active) return this.queueRating(proof, score, reason);
+      this.active = (async()=>{
+        const s=await this.read(); if(s.consent!==C.CONSENT)throw new Error('consent_required');
+        if(s.outbox.some(i=>i.kind==='rating'&&i.proof===proof))throw new Error('rating_queued');
+        if(s.outbox.length>=100)throw new Error('queue_full');
+        s.outbox.push({kind:'rating',request:this.r.uuid(),proof,score,rating_reason:reason});
+        s.delivery_enabled=true;await this.save(s);await this.repairDelivery();
+      })().finally(()=>{this.active=null;});
+      return this.active;
+    }
+    async repairDelivery() {
+      const s = await this.read();
+      if (s.consent === C.CONSENT && (s.enabled || s.delivery_enabled) && s.outbox.length) await this.r.scheduleDelivery?.();
+      else await this.r.cancelDelivery?.();
+    }
+    async flushOutbox(s, alive, signal) {
+      const now = this.r.now();
+      const item = s.outbox[0];
+      if ((item.retry_at || 0) > now) { await this.scheduleReceipt(s, item.retry_at); return; }
+      if (item.kind === 'rating') {
+        const receipt=await this.api.rpc('rating',{p_request:item.request,p_proof:item.proof,p_score:item.score,p_reason:item.rating_reason},signal);alive();
+        if(receipt?.request!==item.request || !['rated','rejected'].includes(receipt.gate) ||
+          (receipt.gate==='rated' && typeof receipt.inserted!=='boolean') ||
+          (receipt.gate==='rejected' && !['invalid_rating','invalid_anchor','already_rated','request_reused'].includes(receipt.error)))throw new Error('invalid_receipt');
+        if(receipt.gate==='rejected')s.rejected.push({...item,reason:receipt.error});
+        s.outbox.shift();if(s.rejected.length>=20)throw new Error('review_local_rejections');await this.save(s);await this.scheduleReceipt(s,now+30000);return;
+      }
+      if (item.kind) {
+        const receipt = await this.api.rpc('observe', {p_request:item.request,p_parent:item.parent,p_kind:item.kind,p_data:item.record}, signal); alive();
+        if (!receipt || receipt.request !== item.request || !['observed','rejected'].includes(receipt.gate)) throw new Error('invalid_receipt');
+        if (receipt.gate === 'rejected') s.rejected.push({...item,reason:receipt.error || 'invalid_record'});
+        s.outbox.shift(); if(s.rejected.length>=20)throw new Error('review_local_rejections'); await this.save(s); await this.scheduleReceipt(s, now+30000); return;
+      }
+      const receipt = C.receipt(await this.api.rpc('submit', {p_request: item.request, p_task: item.task,
+        p_lease: item.lease, p_record: item.record}, signal), item.request);
+      alive();
+      if (receipt.error === 'daily_quota') {
+        item.retry_at = C.quotaRetry(receipt, now); s.last_error = 'daily_quota'; await this.save(s); await this.scheduleReceipt(s, item.retry_at); return;
+      } else if (receipt.error === 'lease_expired') {
+        const renewed = await this.api.rpc('claim', {p_task: item.task}, signal); alive();
+        if (renewed.error === 'daily_quota') {
+          item.retry_at = C.quotaRetry(renewed, now); s.last_error = 'daily_quota';
+          await this.save(s); await this.scheduleReceipt(s, item.retry_at); return;
+        }
+        if (renewed.error) throw new Error(renewed.error);
+        if (renewed.task?.id === item.task) { item.lease = renewed.task.lease_token; s.task = renewed.task; }
+        else { s.rejected.push({...item, reason: 'lease_lost'}); s.outbox.shift(); s.task = null; s.phase = 'idle'; }
+      } else {
+        s.outbox.shift();
+        if (receipt.error) {
+          s.rejected.push({...item, reason: receipt.error,relevance_revision:s.control?.relevance_revision || 0});
+          if (s.enrichment?.parent === item.request) { s.enrichment = null; s.phase = 'search_done'; }
+        }
+        else {
+          s.last_error = null;
+          s.received += receipt.inserted ? 1 : 0;
+          s.history = [...new Set([...s.history, item.record.standard.note_id])].slice(-2000);
+          if (s.task?.id === item.task) { s.task.received = receipt.task_received; if (receipt.inserted && s.task.remaining_today != null) s.task.remaining_today--; }
+        }
+      }
+      // Failed records remain exportable; bounded by stopping, never by deleting evidence.
+      if (s.rejected.length >= 20) throw new Error('review_local_rejections');
+      await this.save(s); await this.scheduleReceipt(s, now + 30000); return;
     }
     mergeComments(previous, current) {
       if (!current) return previous;
@@ -336,7 +398,7 @@
       return result;
     }
     async enrich(s, alive, signal) {
-      const e=s.enrichment, now=this.r.now();
+      const e=s.enrichment, now=this.r.now(), platform=C.platform(e.record.standard.platform);
       const queueNote = () => {
         if(e.note_queued)return;
         const comments=e.record.extra.comments;
@@ -379,10 +441,10 @@
         const grant=await this.api.rpc('profile_claim',{p_parent:e.parent},signal);alive();
         if(!grant || typeof grant.allowed!=='boolean')throw new Error('invalid_receipt');
         if(!grant.allowed){finish();return;} // Optional work never holds the base task through cooldown/cache/quota.
-        const p=C.profileURL(grant.url);
+        const p=platform.profileURL(grant.url);
         if(p.id!==e.record.extra.author.id)throw new Error('wrong_note');
         e.stage='profile_read';e.deadline=now+120000;e.profile_grant=grant.token;s.next_at=now+30000;await this.save(s);alive();
-        const destination=e.author_navigation && C.profileURL(e.author_navigation).id===p.id ? e.author_navigation : p.url;
+        const destination=e.author_navigation && platform.profileURL(e.author_navigation).id===p.id ? e.author_navigation : p.url;
         await this.r.open(destination);alive();
       } else if(e.stage==='profile_read') {
         if(!s.profiles){finish();return;}

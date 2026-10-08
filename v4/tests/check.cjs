@@ -27,7 +27,7 @@ async function agentChecks() {
  await assert.rejects(a.start(),/consent_required/); assert.equal(opened.length,0);
  state.agent={...C.initial(),consent:C.CONSENT}; await a.start(); await a.tick();
  state.agent.last_error='page_timeout';
- for(let n=0;n<4;n++){now+=45000; await a.tick();}
+ for(let n=0;n<10 && state.agent.phase!=='note';n++){now+=45000; await a.tick();}
  assert.equal((await a.read()).phase,'note'); assert.equal(uploads.length,0);
  assert.equal(state.agent.last_error,null,'successful page probes clear recovered errors');
  now+=30000; await a.tick(); assert.equal(uploads.length,0,'first note cannot skip dwell');

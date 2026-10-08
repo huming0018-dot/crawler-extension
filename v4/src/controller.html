@@ -7,9 +7,12 @@
 <details id="invitation"><summary>重新打开邀请</summary><form id="invite_form"><label>邀请链接<input id="invite_value" type="text" autocomplete="off" required></label><button>接续邀请</button></form></details>
 <section><label><input id="agree" type="checkbox">我自愿参加，并同意自动访问公开网页及回传笔记正文、公开互动数量、评论及回复、字段和采集证据。小红书登录凭据留在本机。按核验通过且去重后的笔记累计，每 100 条奖励 ¥0.10；不足 100 条继续累计。我了解后台运行受系统限制，可随时停止。</label><button id="consent">同意并开始</button></section>
 <section id="profiles_section"><label><input id="profiles" type="checkbox">另行同意采集公开作者主页：昵称、账号 ID、粉丝数、公开笔记数与当前可见笔记列表。可随时关闭，不访问关注/粉丝名单。</label><p>更改此项会停止当前运行；确认后点击继续采集。主页访问与笔记共享预算，同一作者最多每天尝试一次，每个参与身份每天最多2次。</p></section>
-<nav><button id="open_login">登录小红书 / 处理验证</button><button id="start">继续采集</button><button id="stop">停止</button></nav>
+<nav><button id="open_login">登录小红书 / 处理验证</button><button id="start">继续采集</button><button id="stop">停止采集</button></nav>
+<p>停止采集后，不再打开或读取新页面，已有待回传记录会继续发送；退出参与身份则同时停止回传。</p>
 <section id="diagnostics_section"><label><input id="diagnostics" type="checkbox">发送运行诊断，帮助排查故障（可随时关闭）</label><p>只发送阶段、错误码、队列数量和页面加载状态、主页面网络错误码和元素数量，不发送账号密码、Cookie、完整网址、截图或网页正文。增加最近24个动作节点、随机关联编号及时间，帮助串起导航与回传；本机最多保留24小时，云端只保留最近一份状态；关闭或退出时尝试清除。离线时须同一参与身份下次联网重试，退出后不再发送。</p><p id="diagnostics_status" role="status"></p><button id="inspect_work_page">查看采集页面</button></section>
 <section id="updater_section"><label><input id="auto_update" type="checkbox">自动安装已验证的插件更新</label><p>需要在原设备接通一次更新助手。以后保留身份和待回传记录，只重载本插件，不关闭浏览器。可随时关闭。</p><p id="updater_status" role="status"></p><button id="update_check">检查更新</button></section>
 <p id="message" role="status" aria-live="polite"></p><details><summary>查看进度与高级账户选项</summary><dl id="status"></dl><button id="refresh">刷新状态</button><button id="logout">退出参与身份</button><button id="export">导出未回传证据</button><form id="login"><label>已有中台账户邮箱<input id="email" type="email" autocomplete="username" required></label><label>密码<input id="password" type="password" autocomplete="current-password" minlength="8" required></label><button>登录</button><button type="button" id="signup">注册</button></form></details>
+<details id="task_progress" hidden><summary>各任务进度</summary><ul id="task_list"></ul></details>
+<details id="ratings_section" hidden><summary>给已采集门店打分（可选）</summary><p>只填写你本人的用餐评价，1–5星并说明理由（至少8个字）。每个任务可提交一次，关联一篇已收到的笔记。评分和笔记核验、采集奖励分别记录。</p><div id="ratings_list"></div></details>
 <p>桌面浏览器保持运行即可在后台工作标签页采集，参与页面可关闭、窗口可最小化。Mac 睡眠时暂停，唤醒或浏览器重启后自动续做尚未停止的任务；重启或长时间挂起后重新计时，配额与冷却照常保留。手动停止、验证码或限流暂停后，需要本人点击继续。手机后台批次仍由系统安排。不会自动破解验证。</p>
 </main><script src="config.js"></script><script src="core.js"></script><script src="api.js"></script><script src="agent.js"></script><script src="join.js"></script><script src="native-runtime.js"></script><script src="controller.js"></script></body></html>

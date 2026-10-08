@@ -50,6 +50,10 @@ const runtime = {
       await chrome.alarms.create('crowd_tick', {when: at, periodInMinutes: .5});
   },
   cancel: () => chrome.alarms.clear('crowd_tick'),
+  async scheduleDelivery() {
+    if (!await chrome.alarms.get('crowd_upload')) await chrome.alarms.create('crowd_upload', {periodInMinutes: 1});
+  },
+  cancelDelivery: () => chrome.alarms.clear('crowd_upload'),
   async open(url) {
     CrowdCore.navigationURL(url);
     await trace.event('open_requested');
@@ -103,7 +107,10 @@ const runtime = {
   },
   async close() {
     const id = await storage.get('work_tab');
-    if (id) { try { await chrome.tabs.remove(id); } catch (_) {} await storage.set('work_tab', null); }
+    if (id) {
+      try { const tab=await chrome.tabs.get(id); CrowdCore.navigationURL(tab.url); await chrome.tabs.remove(id); } catch (_) {}
+      await storage.set('work_tab', null);
+    }
   }
 };
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
@@ -111,7 +118,7 @@ const trace = new CrowdTrace({storage,settings:diagnosticSettings,uuid:()=>crypt
 const originalRPC=api.rpc.bind(api);
 api.rpc=async(name,params={},...rest)=>{
   const admission=name==='guard' && ['search','detail','comment','scroll'].includes(params.p_action);
-  const submit=['submit','observe'].includes(name),options=submit?{id:params.p_request}:{};
+  const submit=['submit','observe','rating'].includes(name),options=submit?{id:params.p_request}:{};
   if(admission)await trace.event('admission_requested',{start:true});
   if(submit)await trace.event('submit_requested',options);
   try {const result=await originalRPC(name,params,...rest);
@@ -272,7 +279,8 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     switch (message.type) {
       case 'update_settings': await updater.setEnabled(message.enabled); return {};
       case 'update_check': await updater.check(); return {};
-      case 'state': { const settings = await diagnosticSettings(); return {updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message}))}; }
+      case 'state': { const settings = await diagnosticSettings(); return {updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message})), progress:await api.rpc('progress').catch(()=>null)}; }
+      case 'rating': await agent.queueRating(message.proof, message.score, message.reason); agent.tick(false,true).catch(console.error); return {};
       case 'profiles': {
         if(typeof message.enabled !== 'boolean')throw new Error('invalid_request');
         await agent.stop();
@@ -303,7 +311,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         const s = await agent.read(); s.consent = CrowdCore.CONSENT; await agent.save(s); return {};
       }
       case 'start': await agent.start(); return {};
-      case 'stop': await agent.stop(); return {};
+      case 'stop': await agent.stop('user_stopped', {drain:true}); return {};
       case 'logout': {
         await agent.stop('logged_out');
         const settings = await diagnosticSettings();
@@ -346,9 +354,10 @@ chrome.runtime.onMessageExternal?.addListener((message, sender, reply) => {
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === 'crowd_update') updater.check().catch(console.error);
   if (alarm.name === 'crowd_tick') agent.tick().catch(console.error);
+  if (alarm.name === 'crowd_upload') agent.tick(false, true).catch(console.error);
   if (alarm.name === 'crowd_diagnostics') reportDiagnostics().catch(console.error);
 });
-chrome.runtime.onStartup.addListener(async () => { await agent.tick(true); await repairDiagnostics(); await reportDiagnostics(); });
+chrome.runtime.onStartup.addListener(async () => { await agent.repairDelivery(); await agent.tick(true); await repairDiagnostics(); await reportDiagnostics(); });
 chrome.runtime.onInstalled.addListener((details = {reason: 'install'}) => {
   (async () => {
     // Also hand off a trial when replacing an unjoined development copy.
@@ -365,4 +374,4 @@ chrome.tabs.onRemoved.addListener(id => {
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable
 // running state on every load; initial installation and user stops remain idle.
-updater.bootstrap().then(()=>trace.event('worker_started')).then(()=>agent.tick()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);
+updater.bootstrap().then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);
