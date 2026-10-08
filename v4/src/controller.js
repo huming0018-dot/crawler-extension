@@ -4,6 +4,7 @@ let current, viewTicket = 0, actions = 0;
 const labels = {idle: '等待任务', search: '自动搜索', search_done: '选择下一篇笔记', note: '浏览与采集', reopen_note: '恢复笔记浏览', enrich:'补充评论与作者资料'};
 // Desktop extension diagnostics are explicit and separate from collection consent.
 $('diagnostics_section').hidden = !!globalThis.CrowdNative;
+$('updater_section').hidden = !!globalThis.CrowdNative;
 $('profiles_section').hidden = !!globalThis.CrowdNative;
 const errors = {invalid_invite: '邀请无效，请重新打开邀请链接', invite_expired: '邀请已过期，请联系邀请人', invite_full: '本批参与名额已满', installation_already_joined: '本设备已加入另一批邀请，请继续原参与身份', portal_not_configured: '安装包尚未接通参与入口', release_not_ready: '此设备的正式安装渠道尚未开放', backend_unavailable: '暂时连接不上，请稍后重试，已有进度会保留', consent_required: '请先确认自愿参与', approval_required: '账户尚未获得中台审核批准', login_required: '请在下方或工作页面登录小红书后继续', captcha: '遇到验证，请在工作页面处理', rate_limit: '平台已限流，已暂停', user_stopped: '已停止', logged_out: '已退出', system_suspended: '系统暂停或本次批次结束，进度已保存，可重新启动', lease_lost: '任务已由其他设备领取，证据保留待审'};
 Object.assign(errors, {
@@ -21,6 +22,7 @@ async function send(type, extra = {}) {
   const reply = globalThis.CrowdNative ? await CrowdNative.command(type, extra) : await chrome.runtime.sendMessage({type, ...extra});
   if (!reply.ok) throw new Error(reply.error); return reply.data;
 }
+errors.update_in_progress = '插件正在更新，完成后会自动恢复原状态。你仍可停止采集。';
 errors.navigation_failed = '浏览器未能执行搜索或详情跳转，已停止。原工作页与证据保留，请查看采集页面；不会自动重试消耗访问次数。';
 errors.navigation_uncommitted = '工作页仍为空白，跳转在等待期限内未完成，已停止。原页面与证据保留；不会自动重试消耗访问次数。';
 errors.page_timeout = '采集页面准备超时。连续失败三次会暂停，请查看采集页面并保持运行诊断开启。';
@@ -44,6 +46,10 @@ async function refresh() {
   const data = await send('state'), s = data.agent, p = data.status;
   if (ticket !== viewTicket) return;
   current = data;
+  const updates={ready:'更新助手已接通',applied:'新版已加载',current:'已是当前发布版本',checking:'正在检查和验证更新',pending_reload:'文件已更新，等待插件重载',helper_unavailable:'尚未接通本机更新助手',error:'本次更新未完成，原记录保留',rolled_back:'更新失败，已恢复原文件'};
+  $('auto_update').checked=data.updater?.enabled!==false;
+  $('auto_update').disabled=!!data.updater?.busy;
+  $('updater_status').textContent=(updates[data.updater?.state]||'更新状态尚未确认')+(data.updater?.error?'（'+data.updater.error+'）':'');
   $('profiles').checked=s.profiles===true;
   $('profiles').disabled=!data.session || actions>0;
   $('welcome').textContent = errors[p.error] || errors[s.last_error] || (s.enabled ? (s.phase === 'idle' ? '自动任务已开启，正在等待下一步。' : '自动任务执行中，你可以随时停止。') : data.session ? '参与身份已就绪，可点击继续；无需再次报名。' : data.invited ? '邀请已接续，请确认是否参与。' : '请从邀请链接打开，无需注册中台账号。');
@@ -66,6 +72,8 @@ $('invite_form').onsubmit = e => { e.preventDefault(); action(async () => { awai
 for (const type of ['start', 'stop', 'logout', 'open_login']) $(type).onclick = () => action(() => send(type));
 $('export').onclick = () => action(async () => { const data = await send('export'), text = JSON.stringify(data, null, 2); if (globalThis.CrowdNative) { await CrowdNative.download(text); return; } const blob = new Blob([text], {type: 'application/json'}); const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = 'crowd-pending-evidence.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); });
 $('refresh').onclick = () => action(refresh);
+$('auto_update').onchange = () => action(()=>send('update_settings',{enabled:$('auto_update').checked}));
+$('update_check').onclick = () => action(()=>send('update_check'));
 $('diagnostics').onchange = () => action(() => send('diagnostics', {enabled: $('diagnostics').checked}));
 $('profiles').onchange = () => action(() => send('profiles',{enabled:$('profiles').checked}));
 $('inspect_work_page').onclick = () => action(() => send('inspect_work_page'));

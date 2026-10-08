@@ -39,8 +39,10 @@
       s.last_error = null; await this.save(s); alive(); return true;
     }
     async start() {
+      if (this.maintenance) throw new Error('update_in_progress');
       const generation = this.generation;
       await this.active?.catch(() => {});
+      if (this.maintenance) throw new Error('update_in_progress');
       if (generation !== this.generation) throw new Error('cancelled');
       // Hold the same single-writer lock while status IO is pending.
       if (this.active) return this.start();
@@ -68,6 +70,7 @@
       await this.save(s); await this.r.cancel(); if (!keepPage) await this.r.close();
     }
     async tick(recover = false) {
+      if (this.maintenance) return;
       this.recover ||= recover;
       if (this.active) return this.active;
       this.controller = new AbortController();
@@ -297,6 +300,7 @@
             s.enabled = false; await this.save(s); await this.r.cancel(); return;
           }
         }
+        if (err.message==='navigation_uncommitted') await this.r.trace?.('navigation_timeout');
         if (['navigation_failed', 'navigation_uncommitted', 'captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections'].includes(err.message) || err.status === 401 || err.status === 403) {
           s.enabled = false; await this.save(s); await this.r.cancel(); return;
         }

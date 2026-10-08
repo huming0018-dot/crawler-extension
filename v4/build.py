@@ -13,7 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 FILES = ['manifest.json', 'icons/icon128.png'] + ['src/'+name for name in (
     'core.js','api.js','agent.js','background.js','content.js','config.js','join.js',
-    'controller.js','controller.html','controller.css','native-runtime.js')]
+    'controller.js','controller.html','controller.css','native-runtime.js','updater.js','trace.js')]
 
 
 def build(output):
@@ -37,7 +37,8 @@ def build(output):
     for name in files:
         if name.endswith('.js'):subprocess.run(['node','--check',str(ROOT/name)],check=True,capture_output=True)
     entry='src/background_v'+version.replace('.','_')+'.js'
-    files[entry]=files.pop('src/background.js')
+    # A syntax/import failure can request a rollback without loading broken business code.
+    files[entry]=("try { importScripts('background.js'); } catch (_) { chrome.runtime.sendNativeMessage('com.crowd.v4.updater', {action:'rollback',version:'"+version+"'}).then(r=>{if(r.status==='rolled_back')chrome.runtime.reload();}).catch(()=>{}); }\n").encode()
     manifest['background']={'service_worker':entry}
     manifest.pop('browser_specific_settings',None)
     manifest['host_permissions']=['https://www.xiaohongshu.com/*','https://m.xiaohongshu.com/*',conf['url']+'/*',conf['portal']+'/*']

@@ -1,5 +1,5 @@
 /* Windows/macOS Chrome & Edge MV3. No automatic start on installation. */
-if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'join.js');
+if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'join.js', 'updater.js', 'trace.js');
 const storage = CrowdCore.accountStorage({
   async get(key) { return (await chrome.storage.local.get(key))[key]; },
   async set(key, value) { await chrome.storage.local.set({[key]: value}); }
@@ -36,6 +36,7 @@ async function navigationDocument(id, tab) {
 }
 const runtime = {
   splitCapture: true,
+  trace:(stage,options)=>trace.event(stage,options),
   storage, now: Date.now, random: Math.random, uuid: () => crypto.randomUUID(),
   // Align the next wake with the durable deadline, not an unrelated 30s grid.
   // Keep a repeating fallback for worker crashes; poll waits at least once/minute
@@ -50,6 +51,7 @@ const runtime = {
   cancel: () => chrome.alarms.clear('crowd_tick'),
   async open(url) {
     CrowdCore.navigationURL(url);
+    await trace.event('open_requested');
     await clearNavigation(true);
     const id = await storage.get('work_tab');
     let reusable = false;
@@ -62,8 +64,9 @@ const runtime = {
     // A failed mutation is not a stale tab: never issue a second navigation
     // under one search admission, and keep the original work page for diagnosis.
     if (reusable) {
-      try { await chrome.tabs.update(id, {url, active:false}); }
-      catch (_) { throw new Error('navigation_failed'); }
+      await trace.event('tab_reused');
+      try { await chrome.tabs.update(id, {url, active:false}); await trace.event('update_accepted'); }
+      catch (_) { await trace.event('update_failed'); throw new Error('navigation_failed'); }
       return;
     }
     // Register ownership before starting a navigation. Otherwise fast commit /
@@ -73,8 +76,10 @@ const runtime = {
       const tab = window ? await chrome.tabs.create({url: 'about:blank', windowId: window.id, active: false}) :
         (await chrome.windows.create({url: 'about:blank', type: 'normal', state: 'minimized', focused: false})).tabs[0];
       await storage.set('work_tab', tab.id);
+      await trace.event('tab_created');
       await chrome.tabs.update(tab.id, {url, active: false});
-    } catch (_) { throw new Error('navigation_failed'); }
+      await trace.event('update_accepted');
+    } catch (_) { await trace.event('update_failed'); throw new Error('navigation_failed'); }
   },
   async probe(action) {
     const id = await storage.get('work_tab');
@@ -84,6 +89,7 @@ const runtime = {
       if (tab.discarded) return {ready: false, reopen: true};
       // Rendered DOM can be ready while images/iframes keep the tab loading.
       const probe = await probeTab(id, action);
+      await trace.event(probe.response?.ready?'probe_ready':probe.status==='timed_out'?'probe_timeout':'probe_missing');
       if (!probe.response && (await navigationDocument(id, tab)).document_kind === 'blank')
         return {ready:false, reason:'navigation_uncommitted'};
       return probe.response || {ready: false, reason: probe.status === 'timed_out' ? 'probe_timeout' : tab.status === 'loading' ? 'page_loading' : 'content_unavailable'};
@@ -95,6 +101,24 @@ const runtime = {
   }
 };
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
+const trace = new CrowdTrace({storage,settings:diagnosticSettings,uuid:()=>crypto.randomUUID()});
+const originalRPC=api.rpc.bind(api);
+api.rpc=async(name,params={},...rest)=>{
+  const admission=name==='guard' && ['search','detail','comment','scroll'].includes(params.p_action);
+  const submit=['submit','observe'].includes(name),options=submit?{id:params.p_request}:{};
+  if(admission)await trace.event('admission_requested',{start:true});
+  if(submit)await trace.event('submit_requested',options);
+  try {const result=await originalRPC(name,params,...rest);
+    if(admission)await trace.event(result.allowed?'admission_allowed':'admission_denied');
+    if(submit)await trace.event(result.error||result.gate==='rejected'?'submit_rejected':'submit_accepted',options);
+    return result;
+  }catch(e){if(submit)await trace.event('submit_failed',options);throw e;}
+};
+let pendingCommands=0;
+const updater = new CrowdUpdater({chrome,storage,agent,isBusy:()=>pendingCommands>0,version:CrowdCore.VERSION,releaseHash:async()=>{
+  const data=await (await fetch(chrome.runtime.getURL('release.json'))).arrayBuffer();
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(b=>b.toString(16).padStart(2,'0')).join('');
+}});
 let diagnosticReport;
 const diagnosticKey = (id, suffix) => 'diagnostics:' + id + ':' + suffix;
 const diagnosticErrors = ['navigation_failed','navigation_uncommitted','page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','backend_login_required','user_login','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt'];
@@ -124,6 +148,7 @@ for (const [event, stage] of Object.entries({onBeforeNavigate:'started',onCommit
       if (!Number.isFinite(details.timeStamp) || (previous?.at > details.timeStamp)) return;
       const current = await diagnosticSettings();
       if (!current.enabled || current.id !== settings.id || current.revision !== settings.revision) return;
+      await trace.event('nav_'+stage);
       await storage.set(key, {stage, error: stage === 'failed' ? (navigationErrors.includes(code) ? code : 'OTHER') : null,
         at: details.timeStamp, revision: settings.revision, tab: details.tabId});
     }).catch(console.error);
@@ -183,6 +208,7 @@ async function reportDiagnostics() {
           const previous = savedPrevious?.revision === settings.revision ? savedPrevious : null;
           const age = at => Number.isFinite(at) ? Math.min(86400, Math.max(0, Math.floor((Date.now() - at) / 1000))) : null;
           snapshot = {version: CrowdCore.VERSION, enabled: s.enabled === true,
+            trace:await trace.snapshot(),update_state:(await updater.status()).state||'unknown',
             document_kind:navDocument.document_kind, pending_kind:navDocument.pending_kind,
             nav_stage: navigation?.stage || 'unknown', nav_error: navigation?.error || null,
             nav_age_s: age(navigation?.at),
@@ -218,6 +244,7 @@ async function setDiagnostics(enabled) {
   // Server revisions reject delayed reports/control requests after opt-out.
   await storage.set(diagnosticKey(settings.id, 'revision'), Math.max(Date.now(), settings.revision + 1));
   await storage.set(diagnosticKey(settings.id, 'enabled'), enabled);
+  await trace.clear(settings.id);
   await clearNavigation();
   await storage.set(diagnosticKey(settings.id, 'enable'), enabled);
   await storage.set(diagnosticKey(settings.id, 'clear'), !enabled);
@@ -230,9 +257,14 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   }
   const allowed = [chrome.runtime.getURL('src/controller.html')];
   if (!allowed.includes(sender.url) || sender.tab?.url?.startsWith(CrowdCore.HOST)) return;
+  const mutating=!['state','stop','export','update_check','update_settings'].includes(message.type);
+  if(mutating)pendingCommands++;
   (async () => {
+    if (agent.maintenance && !['state','stop','export'].includes(message.type)) throw new Error('update_in_progress');
     switch (message.type) {
-      case 'state': { const settings = await diagnosticSettings(); return {agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message}))}; }
+      case 'update_settings': await updater.setEnabled(message.enabled); return {};
+      case 'update_check': await updater.check(); return {};
+      case 'state': { const settings = await diagnosticSettings(); return {updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message}))}; }
       case 'profiles': {
         if(typeof message.enabled !== 'boolean')throw new Error('invalid_request');
         await agent.stop();
@@ -290,7 +322,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       }
       default: throw new Error('unknown_command');
     }
-  })().then(data => reply({ok: true, data}), e => reply({ok: false, error: e.message}));
+  })().finally(()=>{if(mutating)pendingCommands--;}).then(data => reply({ok: true, data}), e => reply({ok: false, error: e.message}));
   return true;
 });
 chrome.runtime.onMessageExternal?.addListener((message, sender, reply) => {
@@ -304,6 +336,7 @@ chrome.runtime.onMessageExternal?.addListener((message, sender, reply) => {
   } catch (_) { return; }
 });
 chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === 'crowd_update') updater.check().catch(console.error);
   if (alarm.name === 'crowd_tick') agent.tick().catch(console.error);
   if (alarm.name === 'crowd_diagnostics') reportDiagnostics().catch(console.error);
 });
@@ -315,7 +348,7 @@ chrome.runtime.onInstalled.addListener((details = {reason: 'install'}) => {
     const handoff = /^[a-f0-9]{64}$/.test(CROWD_CONFIG.trialInvite || '') && !await storage.get('pending_invite') && !await storage.get('session');
     if (handoff) await storage.set('pending_invite', CROWD_CONFIG.trialInvite);
     if (details.reason === 'install' || handoff) await chrome.runtime.openOptionsPage?.();
-    await agent.tick(true);
+    await agent.tick(details.reason !== 'update');
     await repairDiagnostics();
   })().catch(console.error);
 });
@@ -324,4 +357,4 @@ chrome.tabs.onRemoved.addListener(id => {
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable
 // running state on every load; initial installation and user stops remain idle.
-agent.tick().then(repairDiagnostics).then(reportDiagnostics).catch(console.error);
+updater.bootstrap().then(()=>trace.event('worker_started')).then(()=>agent.tick()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);
