@@ -15,6 +15,9 @@ let browser;const result={scope:'Real installed extension and native host; synth
  result.developerMode=await developerPage.evaluate(()=>{const manager=document.querySelector('extensions-manager');const toolbar=manager.shadowRoot.querySelector('extensions-toolbar');const toggle=toolbar.shadowRoot.querySelector('cr-toggle');if(!toggle.checked)toggle.click();return toggle.checked;});assert.equal(result.developerMode,true);await developerPage.close();
  const pid=browser.process().pid,tab=await browser.newPage();await tab.goto('data:text/html,<title>Preserve this tab</title>browser stays open');
  const worker=await(await browser.waitForTarget(t=>t.type()==='service_worker'&&t.url().endsWith(manifest.background.service_worker))).worker();
+ // Startup sends its own native ACK. Do not race that exclusive host lock with
+ // this harness's direct status call (the participant does not send this call).
+ await worker.evaluate(async()=>{const until=Date.now()+10000;while(Date.now()<until){if((await chrome.storage.local.get('updater_status')).updater_status)return;await new Promise(r=>setTimeout(r,100));}throw Error('startup handshake timeout');});
  result.native=await worker.evaluate(()=>chrome.runtime.sendNativeMessage('com.crowd.v4.updater',{action:'status',version:CrowdCore.VERSION}));assert.ok(['ready','rolled_back'].includes(result.native.status));
  await worker.evaluate(async()=>{await chrome.alarms.clear('crowd_update');await chrome.storage.local.set({session:{user:{id:'fixture-participant'}},pending_invite:'fixture-kept','agent:fixture-participant':{...CrowdCore.initial(),enabled:false,consent:CrowdCore.CONSENT,outbox:[{request:'original-evidence',record:{unchanged:true}}],rejected:[{request:'old-rejection',reason:'unrelated_note'}],next_at:Date.now()+600000}});});
  const saved=await worker.evaluate(()=>chrome.storage.local.get(['session','pending_invite','agent:fixture-participant']));
