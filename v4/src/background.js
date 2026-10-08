@@ -16,6 +16,24 @@ async function probeTab(id, action) {
   } catch (e) { return {response: null, status: e.message === 'probe_timeout' ? 'timed_out' : 'no_receiver'}; }
   finally { clearTimeout(timer); }
 }
+// Only fixed categories leave this helper. Never retain or report a frame URL.
+async function navigationDocument(id, tab) {
+  const kind = value => {
+    if (!value) return 'unavailable';
+    if (value === 'about:blank') return 'blank';
+    try { const u = new URL(value); return u.protocol === 'https:' && ['www.xiaohongshu.com','m.xiaohongshu.com'].includes(u.hostname) ? 'platform' : 'other'; }
+    catch (_) { return 'other'; }
+  };
+  let current = tab?.url, timer;
+  if (!current && chrome.webNavigation?.getFrame) {
+    try {
+      const frame = await Promise.race([chrome.webNavigation.getFrame({tabId:id, frameId:0}),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), 500); })]);
+      current = frame?.url;
+    } catch (_) {} finally { clearTimeout(timer); }
+  }
+  return {document_kind:kind(current), pending_kind:tab?.pendingUrl ? kind(tab.pendingUrl) : 'none'};
+}
 const runtime = {
   splitCapture: true,
   storage, now: Date.now, random: Math.random, uuid: () => crypto.randomUUID(),
@@ -34,19 +52,29 @@ const runtime = {
     CrowdCore.navigationURL(url);
     await clearNavigation(true);
     const id = await storage.get('work_tab');
+    let reusable = false;
     if (id) { try {
       const tab = await chrome.tabs.get(id);
       // Persisted IDs can point at another tab after a browser restart.
       CrowdCore.navigationURL(tab.pendingUrl || tab.url);
-      await chrome.tabs.update(id, {url, active: false}); return;
+      reusable = true;
     } catch (_) {} }
-    const [window] = await chrome.windows.getAll({windowTypes: ['normal']});
+    // A failed mutation is not a stale tab: never issue a second navigation
+    // under one search admission, and keep the original work page for diagnosis.
+    if (reusable) {
+      try { await chrome.tabs.update(id, {url, active:false}); }
+      catch (_) { throw new Error('navigation_failed'); }
+      return;
+    }
     // Register ownership before starting a navigation. Otherwise fast commit /
     // error events can arrive before work_tab exists and disappear from telemetry.
-    const tab = window ? await chrome.tabs.create({url: 'about:blank', windowId: window.id, active: false}) :
-      (await chrome.windows.create({url: 'about:blank', type: 'normal', state: 'minimized', focused: false})).tabs[0];
-    await storage.set('work_tab', tab.id);
-    await chrome.tabs.update(tab.id, {url, active: false});
+    try {
+      const [window] = await chrome.windows.getAll({windowTypes: ['normal']});
+      const tab = window ? await chrome.tabs.create({url: 'about:blank', windowId: window.id, active: false}) :
+        (await chrome.windows.create({url: 'about:blank', type: 'normal', state: 'minimized', focused: false})).tabs[0];
+      await storage.set('work_tab', tab.id);
+      await chrome.tabs.update(tab.id, {url, active: false});
+    } catch (_) { throw new Error('navigation_failed'); }
   },
   async probe(action) {
     const id = await storage.get('work_tab');
@@ -56,6 +84,8 @@ const runtime = {
       if (tab.discarded) return {ready: false, reopen: true};
       // Rendered DOM can be ready while images/iframes keep the tab loading.
       const probe = await probeTab(id, action);
+      if (!probe.response && (await navigationDocument(id, tab)).document_kind === 'blank')
+        return {ready:false, reason:'navigation_uncommitted'};
       return probe.response || {ready: false, reason: probe.status === 'timed_out' ? 'probe_timeout' : tab.status === 'loading' ? 'page_loading' : 'content_unavailable'};
     } catch (_) { return {ready: false, reopen: true}; }
   },
@@ -67,7 +97,7 @@ const runtime = {
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
 let diagnosticReport;
 const diagnosticKey = (id, suffix) => 'diagnostics:' + id + ':' + suffix;
-const diagnosticErrors = ['page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','backend_login_required','user_login','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt'];
+const diagnosticErrors = ['navigation_failed','navigation_uncommitted','page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','backend_login_required','user_login','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt'];
 const navigationErrors = ['ERR_NAME_NOT_RESOLVED','ERR_INTERNET_DISCONNECTED','ERR_CONNECTION_TIMED_OUT','ERR_TIMED_OUT','ERR_CONNECTION_RESET','ERR_CONNECTION_REFUSED','ERR_CONNECTION_CLOSED','ERR_ADDRESS_UNREACHABLE','ERR_NETWORK_CHANGED','ERR_TUNNEL_CONNECTION_FAILED','ERR_PROXY_CONNECTION_FAILED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID','ERR_SSL_PROTOCOL_ERROR','ERR_BLOCKED_BY_CLIENT','ERR_BLOCKED_BY_ADMINISTRATOR','ERR_ABORTED'];
 let navigationQueue = Promise.resolve();
 async function clearNavigation(restart = false) {
@@ -130,10 +160,11 @@ async function reportDiagnostics() {
         let snapshot = null;
         if (settings.enabled) {
           const s = await agent.read(), id = await storage.get('work_tab');
-          let tab = null, page = null, tabStatus = 'missing', probeStatus = 'unknown';
+          let tab = null, page = null, tabStatus = 'missing', probeStatus = 'unknown', navDocument = {document_kind:'unavailable',pending_kind:'none'};
           try {
             if (id) {
               tab = await chrome.tabs.get(id);
+              navDocument = await navigationDocument(id, tab);
               tabStatus = tab.discarded ? 'discarded' : tab.status === 'loading' ? 'loading' : 'complete';
               if (tabStatus !== 'discarded') {
                 // A disconnected content script is recorded, never fixed by bypassing policy.
@@ -152,6 +183,7 @@ async function reportDiagnostics() {
           const previous = savedPrevious?.revision === settings.revision ? savedPrevious : null;
           const age = at => Number.isFinite(at) ? Math.min(86400, Math.max(0, Math.floor((Date.now() - at) / 1000))) : null;
           snapshot = {version: CrowdCore.VERSION, enabled: s.enabled === true,
+            document_kind:navDocument.document_kind, pending_kind:navDocument.pending_kind,
             nav_stage: navigation?.stage || 'unknown', nav_error: navigation?.error || null,
             nav_age_s: age(navigation?.at),
             prev_nav_stage: previous?.stage || 'unknown', prev_nav_error: previous?.error || null, prev_nav_age_s: age(previous?.at),

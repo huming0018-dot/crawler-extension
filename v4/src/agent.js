@@ -288,7 +288,7 @@
         }
         s.failure_kind = ['captcha','rate_limit'].includes(err.message) ? 'platform_gate' :
           err.message === 'login_required' ? 'platform_login' :
-          ['page_loading','probe_timeout'].includes(err.message) ? 'page_transport' :
+          ['navigation_failed','navigation_uncommitted','page_loading','probe_timeout'].includes(err.message) ? 'page_transport' :
           ['page_timeout','content_unavailable','wrong_note','invalid_content','invalid_comments','invalid_count','page_mismatch'].includes(err.message) ? 'page_contract' : 'backend';
         const pageFailure = ['page_timeout', 'page_loading', 'content_unavailable', 'probe_timeout', 'wrong_note', 'invalid_content', 'invalid_comments', 'invalid_count'].includes(err.message);
         if (pageFailure) {
@@ -297,7 +297,7 @@
             s.enabled = false; await this.save(s); await this.r.cancel(); return;
           }
         }
-        if (['captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections'].includes(err.message) || err.status === 401 || err.status === 403) {
+        if (['navigation_failed', 'navigation_uncommitted', 'captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections'].includes(err.message) || err.status === 401 || err.status === 403) {
           s.enabled = false; await this.save(s); await this.r.cancel(); return;
         }
         if (pageFailure || err.message === 'wrong_note') {
@@ -392,7 +392,7 @@
       if (page.gate) throw new Error(page.gate);
       if (page.ready) s.last_error = null;
       if (page.reopen) { s.phase = s.phase === 'note' ? 'reopen_note' : 'idle'; s.search_round = 0; s.next_at = now + 30000; return; }
-      if (!page.ready) { if (now > s.page_deadline) throw new Error(['page_loading','content_unavailable','probe_timeout'].includes(page.reason) ? page.reason : 'page_timeout'); s.next_at = now + 30000; }
+      if (!page.ready) { if (now > s.page_deadline) throw new Error(['navigation_uncommitted','page_loading','content_unavailable','probe_timeout'].includes(page.reason) ? page.reason : 'page_timeout'); s.next_at = now + 30000; }
     }
   }
   root.CrowdAgent = CrowdAgent;

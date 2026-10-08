@@ -21,6 +21,8 @@ async function send(type, extra = {}) {
   const reply = globalThis.CrowdNative ? await CrowdNative.command(type, extra) : await chrome.runtime.sendMessage({type, ...extra});
   if (!reply.ok) throw new Error(reply.error); return reply.data;
 }
+errors.navigation_failed = '浏览器未能执行搜索或详情跳转，已停止。原工作页与证据保留，请查看采集页面；不会自动重试消耗访问次数。';
+errors.navigation_uncommitted = '工作页仍为空白，跳转在等待期限内未完成，已停止。原页面与证据保留；不会自动重试消耗访问次数。';
 errors.page_timeout = '采集页面准备超时。连续失败三次会暂停，请查看采集页面并保持运行诊断开启。';
 errors.page_loading = '采集页面尚未就绪，未取得可读取内容。连续失败三次会暂停；诊断开启时由中台排查。';
 errors.content_unavailable = '页面已结束加载，但采集脚本未响应。请检查浏览器是否允许此插件访问小红书。';
@@ -48,7 +50,7 @@ async function refresh() {
   $('start').hidden = !data.session;
   $('consent').textContent = data.session ? '同意并继续' : '同意并开始';
   const fields = {'插件版本': CrowdCore.VERSION, '中台账户': p.error === 'backend_login_required' ? '登录已失效' : data.session ? '已登录' : '未登录', '参与状态': p.participant?.status || p.error || '尚未报名', '自动执行': s.enabled ? '已开启' : '已停止', '当前阶段': s.phase === 'idle' && s.task ? '准备执行任务' : labels[s.phase] || s.phase,
-    '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': s.outbox.length + ' / ' + s.rejected.length, '最近待处理原因': s.rejected.length ? (errors[s.rejected.at(-1).reason] || s.rejected.at(-1).reason) : '无', '最早下一步': s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
+    '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': s.outbox.length + ' / ' + s.rejected.length, '最近待处理原因': s.rejected.length ? (errors[s.rejected.at(-1).reason] || s.rejected.at(-1).reason) : '无', '最早下一步': !s.enabled ? '已停止，不会自动执行' : s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
   $('status').replaceChildren();
   for (const [name, value] of Object.entries(fields)) { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = String(value); $('status').append(dt, dd); }
   $('agree').checked = s.consent === CrowdCore.CONSENT;
