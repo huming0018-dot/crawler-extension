@@ -1,3 +1,5 @@
+> 历史 v1/v3 变更记录，不是当前交付状态。当前迭代见 [v4/README.md](v4/README.md)。
+
 # Changelog
 
 All notable changes to this project are documented here. This project was

@@ -2,3 +2,8 @@ key.pem
 dist-release/
 node_modules/
 .DS_Store
+
+# v4 development outputs (never distribute trial invitations)
+__pycache__/
+*.pyc
+v4/dist/
