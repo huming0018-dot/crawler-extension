@@ -29,6 +29,7 @@
       return value;
     }
     async admit(s, action, alive, signal, note = null) {
+      await this.r.sourceHealth?.(s.task?.platform||'xiaohongshu');alive();
       const value = await this.control(s, action, alive, signal, note);
       if (!value.allowed || value.paused) {
         s.last_error = value.reason || 'control_unavailable';
@@ -52,6 +53,7 @@
     async activate(generation) {
       const s = await this.read();
       if (s.consent !== C.CONSENT) throw new Error('consent_required');
+      await this.r.sourceHealth?.(s.task?.platform||'xiaohongshu');if(generation!==this.generation)throw new Error('cancelled');
       const status = await this.api.rpc('status');
       if (generation !== this.generation) throw new Error('cancelled');
       if (status.participant?.status !== 'approved') throw new Error('approval_required');
@@ -62,12 +64,17 @@
       // Continuing never clears a durable deadline or a pending risk report.
       await this.save(s); await this.r.schedule(this.r.now() + 1000);
     }
-    async stop(reason = 'user_stopped', {keepPage = false, drain = false} = {}) {
+    async stop(reason = 'user_stopped', {keepPage = false, drain = false, expectedOwner = null} = {}) {
+      if(expectedOwner&&expectedOwner!==(await this.r.storage.get('session'))?.user?.id)return;
       this.generation++; this.controller?.abort();
       // Wait for the single writer before persisting the stop; prevent stale saves.
       await this.active?.catch(() => {});
-      const s = await this.read(); s.enabled = false; s.delivery_enabled = drain; s.last_error = reason;
-      await this.save(s); await this.r.cancel(); if (!keepPage) await this.r.close(); await this.repairDelivery();
+      if(expectedOwner&&expectedOwner!==(await this.r.storage.get('session'))?.user?.id)return;
+      const s = expectedOwner?{...C.initial(),...await this.r.storage.get('agent:'+expectedOwner)}:await this.read(); s.enabled = false; s.delivery_enabled = drain; s.last_error = reason;
+      if(['captcha','rate_limit'].includes(reason)){s.pending_risk=reason;s.next_at=Math.max(s.next_at,this.r.now()+(reason==='rate_limit'?86400000:1800000));}
+      if(expectedOwner)await this.r.storage.set('agent:'+expectedOwner,s);else await this.save(s);
+      if(expectedOwner&&expectedOwner!==(await this.r.storage.get('session'))?.user?.id)return;
+      await this.r.cancel(); if (!keepPage) await this.r.close(); await this.repairDelivery();
     }
     async tick(recover = false, deliveryOnly = false) {
       if (this.maintenance) return;
@@ -113,7 +120,8 @@
         if (recover || (s.last_tick != null && now - s.last_tick > 120000)) {
           if (s.enrichment) { s.enrichment.stage = 'done'; }
           if (s.phase === 'note') { s.phase = 'reopen_note'; s.loaded_at = null; s.scrolls = 0; }
-          else if (s.phase === 'search') { s.phase = 'idle'; s.search_round = 0; }
+          // An admitted search survives suspension. Probe its existing page and
+          // original deadline; resetting to idle would charge and navigate again.
           // Keep persisted cooldowns, quota waits and evidence retry deadlines.
         }
         s.last_tick = now; await this.save(s); alive();
@@ -222,7 +230,7 @@
             s.page_deadline = now + 180000; s.next_at = now + 30000;
           }
         } else if (s.phase === 'note') {
-          const page = await this.r.probe('note'); alive(); this.checkPage(page, s, now);
+          const page = await this.r.probe('note'); alive(); this.checkPage(page, s, now);await this.r.sourceHealth?.(s.task?.platform||'xiaohongshu');alive();
           if (page.ready) {
             if (page.record.standard.note_id !== s.note_id) throw new Error('wrong_note');
             if (s.loaded_at === null) s.loaded_at = now;
@@ -276,7 +284,7 @@
           try { await this.control(s, err.message, alive, signal); } catch (_) { alive(); }
         }
         s.failure_kind = ['captcha','rate_limit'].includes(err.message) ? 'platform_gate' :
-          err.message === 'login_required' ? 'platform_login' :
+          ['login_required','identity_verification_required','platform_identity_changed'].includes(err.message) ? 'platform_login' :
           ['navigation_failed','navigation_uncommitted','page_loading','probe_timeout'].includes(err.message) ? 'page_transport' :
           ['page_timeout','content_unavailable','wrong_note','invalid_content','invalid_comments','invalid_count','page_mismatch'].includes(err.message) ? 'page_contract' : 'backend';
         const pageFailure = ['page_timeout', 'page_loading', 'content_unavailable', 'probe_timeout', 'wrong_note', 'invalid_content', 'invalid_comments', 'invalid_count'].includes(err.message);
@@ -287,7 +295,7 @@
           }
         }
         if (err.message==='navigation_uncommitted') await this.r.trace?.('navigation_timeout');
-        if (['navigation_failed', 'navigation_uncommitted', 'captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections', 'unsupported_platform'].includes(err.message) || err.status === 401 || err.status === 403) {
+        if (['identity_verification_required','platform_identity_changed','navigation_failed', 'navigation_uncommitted', 'page_loading', 'page_timeout', 'content_unavailable', 'probe_timeout', 'captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections', 'unsupported_platform'].includes(err.message) || err.status === 401 || err.status === 403) {
           s.enabled = false; await this.save(s); await this.r.cancel(); return;
         }
         if (pageFailure || err.message === 'wrong_note') {
@@ -438,6 +446,7 @@
         }
       } else if(e.stage==='profile') {
         if(!s.profiles || !e.record.extra.author?.id){finish();return;}
+        await this.r.sourceHealth?.(e.record.standard.platform);alive();
         const grant=await this.api.rpc('profile_claim',{p_parent:e.parent},signal);alive();
         if(!grant || typeof grant.allowed!=='boolean')throw new Error('invalid_receipt');
         if(!grant.allowed){finish();return;} // Optional work never holds the base task through cooldown/cache/quota.
@@ -457,7 +466,10 @@
     checkPage(page, s, now) {
       if (page.gate) throw new Error(page.gate);
       if (page.ready) s.last_error = null;
-      if (page.reopen) { s.phase = s.phase === 'note' ? 'reopen_note' : 'idle'; s.search_round = 0; s.next_at = now + 30000; return; }
+      if (page.reopen) {
+        if (s.phase === 'search') throw new Error('navigation_failed');
+        s.phase = 'reopen_note'; s.search_round = 0; s.next_at = now + 30000; return;
+      }
       if (!page.ready) { if (now > s.page_deadline) throw new Error(['navigation_uncommitted','page_loading','content_unavailable','probe_timeout'].includes(page.reason) ? page.reason : 'page_timeout'); s.next_at = now + 30000; }
     }
   }

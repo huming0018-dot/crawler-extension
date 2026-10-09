@@ -73,15 +73,16 @@ async function agentChecks() {
  assert.equal(quotaState.agent.outbox.length,1,'quota during renewal must not reject recoverable evidence');
  assert.equal(quotaState.agent.outbox[0].request,receipt);assert.equal(quotaState.agent.rejected.length,0);
  assert.ok(quotaState.agent.outbox[0].retry_at>now);
- // Repeated unavailable pages must eventually pause instead of retrying forever.
+ // An unavailable page stops after its first expired deadline, without re-searching.
  let brokenState={agent:{...C.initial(),enabled:true,consent:C.CONSENT}};
  const brokenRuntime={...runtime,storage:{get:async k=>structuredClone(brokenState[k]),set:async(k,v)=>brokenState[k]=structuredClone(v)},probe:async()=>({ready:false})};
  const broken=new CrowdAgent(brokenRuntime,api);
  for(let attempt=0;attempt<3;attempt++){
   brokenState.agent.next_at=0;await broken.tick(); // Opens a fresh search.
   brokenState.agent.next_at=0;brokenState.agent.page_deadline=now-1;await broken.tick();
+  assert.equal(brokenState.agent.enabled,false);assert.equal(brokenState.agent.page_failures,1);
  }
- assert.equal(brokenState.agent.enabled,false,'three page failures pause automatic navigation');
+ assert.equal(brokenState.agent.enabled,false,'first page deadline pauses automatic navigation');
  assert.equal(brokenState.agent.last_error,'page_timeout');
  const brokenOpens=opened.length;await broken.tick(true);assert.equal(opened.length,brokenOpens);
  await broken.start();assert.equal(brokenState.agent.page_failures,0,'explicit resume resets the failure budget');
@@ -94,7 +95,7 @@ async function agentChecks() {
  brokenState.agent.phase='idle';
  await broken.start();brokenState.agent.next_at=0;await broken.tick();brokenState.agent.next_at=0;await broken.tick();
  assert.equal(brokenState.agent.enabled,false);assert.equal(brokenState.agent.last_error,'page_mismatch');assert.equal(brokenState.agent.outbox.length,0);
- console.log('PASS lifecycle failure paths: quota retains evidence; repeated page failures pause until explicit resume');
+ console.log('PASS lifecycle failure paths: quota retains evidence; first page deadline pauses until explicit resume');
  // Authentication failures in refresh cannot leak an anon bearer into RPCs.
  const fetches=[];const st={get:async()=>({refresh_token:'refresh',expires_at:0}),set:async()=>{}};
  const client=new CrowdAPI({url:'https://test.supabase.co',key:'sb_publishable_test'},st,async(url,options)=>{fetches.push({url,options});return {ok:false,status:401,json:async()=>({message:'expired'})};});

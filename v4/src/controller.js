@@ -7,6 +7,7 @@ const labels = {idle: '等待任务', search: '自动搜索', search_done: '选�
 $('diagnostics_section').hidden = !!globalThis.CrowdNative;
 $('updater_section').hidden = !!globalThis.CrowdNative;
 $('profiles_section').hidden = !!globalThis.CrowdNative;
+$('platform_health_section').hidden = !!globalThis.CrowdNative;
 const errors = {invalid_invite: '邀请无效，请重新打开邀请链接', invite_expired: '邀请已过期，请联系邀请人', invite_full: '本批参与名额已满', installation_already_joined: '本设备已加入另一批邀请，请继续原参与身份', portal_not_configured: '安装包尚未接通参与入口', release_not_ready: '此设备的正式安装渠道尚未开放', backend_unavailable: '暂时连接不上，请稍后重试，已有进度会保留', consent_required: '请先确认自愿参与', approval_required: '账户尚未获得中台审核批准', login_required: '请在下方或工作页面登录小红书后继续', captcha: '遇到验证，请在工作页面处理', rate_limit: '平台已限流，已暂停', user_stopped: '已停止', logged_out: '已退出', system_suspended: '系统暂停或本次批次结束，进度已保存，可重新启动', lease_lost: '任务已由其他设备领取，证据保留待审'};
 Object.assign(errors, {
   user_login: '已暂停并打开小红书工作页；处理完成后，回到这里点击「继续采集」。',
@@ -23,13 +24,17 @@ async function send(type, extra = {}) {
   const reply = globalThis.CrowdNative ? await CrowdNative.command(type, extra) : await chrome.runtime.sendMessage({type, ...extra});
   if (!reply.ok) throw new Error(reply.error); return reply.data;
 }
+errors.identity_verification_required='平台登录主体暂无法从已有页面核验，已暂停。请打开平台页登录并重新检查。';
+errors.platform_identity_changed='平台账号已变化，已暂停。请在KOL账号区域明确核对新账号后再继续；原参与身份和证据保留。';
+const healthLabels={authenticated:'已从本人导航确认登录',logged_out:'平台已登出，请本人登录',account_changed:'检测到另一账号，须明确重新绑定',challenge:'平台要求验证或限流',unknown:'页面未提供明确登录证据',no_page:'没有可检查的平台页面',not_checked:'尚未检查'};
+function renderHealth(data){const list=$('platform_health');list.replaceChildren();for(const platform of ['xiaohongshu','bilibili']){const state=data?.[platform]||{},dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=platform==='xiaohongshu'?'小红书登录':'B站登录';dd.textContent=(healthLabels[state.status]||healthLabels.not_checked)+(state.recovered&&!state.reason&&!current?.agent?.enabled?'；账号已恢复，仍需本人点击继续':'')+(state.checked_at?'（检查于 '+new Date(state.checked_at).toLocaleTimeString('zh-CN')+'）':'');list.append(dt,dd);}}
 errors.update_in_progress = '插件正在更新，完成后会自动恢复原状态。你仍可停止采集。';
 errors.navigation_failed = '浏览器未能执行搜索或详情跳转，已停止。原工作页与证据保留，请查看采集页面；不会自动重试消耗访问次数。';
 errors.navigation_uncommitted = '工作页仍为空白，跳转在等待期限内未完成，已停止。原页面与证据保留；不会自动重试消耗访问次数。';
-errors.page_timeout = '采集页面准备超时。连续失败三次会暂停，请查看采集页面并保持运行诊断开启。';
-errors.page_loading = '采集页面尚未就绪，未取得可读取内容。连续失败三次会暂停；诊断开启时由中台排查。';
-errors.content_unavailable = '页面已结束加载，但采集脚本未响应。请检查浏览器是否允许此插件访问小红书。';
-errors.probe_timeout = '采集页面没有及时响应，可能卡住；连续失败三次会暂停。';
+errors.page_timeout = '采集页面准备超时，已停止新访问并保留工作页；不会自动重新搜索。';
+errors.page_loading = '采集页在等待期限内仍未就绪，已停止新访问并保留工作页。不会自动重新搜索；诊断开启时由中台排查。';
+errors.content_unavailable = '页面已结束加载，但采集脚本未响应，已停止新访问。请检查浏览器是否允许此插件访问小红书。';
+errors.probe_timeout = '采集页面没有及时响应，已停止新访问并保留工作页；不会自动重新搜索。';
 errors.page_mismatch = '当前页面搜索词与任务不一致，已暂停。点击继续会重新打开任务页面。';
 errors.daily_quota = '今日配额已满，已有证据保留，稍后自动重试。';
 errors.unsupported_platform = '此任务的平台尚未接入当前版本，已暂停，请等待平台支持更新。';
@@ -53,6 +58,7 @@ async function refresh() {
   $('auto_update').checked=data.updater?.enabled!==false;
   $('auto_update').disabled=!!data.updater?.busy;
   $('updater_status').textContent=(updates[data.updater?.state]||'更新状态尚未确认')+(data.updater?.error?'（'+data.updater.error+'）':'')+(data.updater?.system_ota?'；系统定时 OTA 已接通':'；系统定时 OTA 尚未接通');
+  renderHealth(data.platform_health);
   $('profiles').checked=s.profiles===true;
   $('profiles').disabled=!data.session || actions>0;
   $('welcome').textContent = errors[p.error] || errors[s.last_error] || (s.enabled ? (s.phase === 'idle' ? '自动任务已开启，正在等待下一步。' : '自动任务执行中，你可以随时停止。') : data.session ? '参与身份已就绪，可点击继续；无需再次报名。' : data.invited ? '邀请已接续，请确认是否参与。' : '请从邀请链接打开，无需注册中台账号。');
@@ -100,6 +106,7 @@ $('consent').onclick = () => action(async () => { if (!$('agree').checked) throw
 $('invite_form').onsubmit = e => { e.preventDefault(); action(async () => { await send('receive_invite', {invite: $('invite_value').value}); $('invite_value').value = ''; $('invitation').open = false; }); };
 for (const type of ['start', 'stop', 'logout', 'open_login']) $(type).onclick = () => action(() => send(type));
 $('export').onclick = () => action(async () => { const data = await send('export'), text = JSON.stringify(data, null, 2); if (globalThis.CrowdNative) { await CrowdNative.download(text); return; } const blob = new Blob([text], {type: 'application/json'}); const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = 'crowd-pending-evidence.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); });
+$('platform_health_check').onclick=()=>action(async()=>{await send('platform_health_check');});
 $('refresh').onclick = () => action(refresh);
 $('auto_update').onchange = () => action(()=>send('update_settings',{enabled:$('auto_update').checked}));
 $('update_check').onclick = () => action(()=>send('update_check'));

@@ -5,6 +5,7 @@ for(const file of ['core','agent'])vm.runInThisContext(fs.readFileSync('v4/src/'
  let now=Date.now(),state={...CrowdCore.initial(),enabled:true,delivery_enabled:true,consent:CrowdCore.CONSENT},alarm=false,requests=[],offline=true;
  const runtime={storage:{get:async()=>structuredClone(state),set:async(_,v)=>state=structuredClone(v)},now:()=>now,uuid:crypto.randomUUID,
   schedule:async()=>{},cancel:async()=>{},close:async()=>{},scheduleDelivery:async()=>{alarm=true;},cancelDelivery:async()=>{alarm=false;},
+  sourceHealth:async()=>{throw Error('login_required');},
   open:async()=>{throw Error('stopped collection opened a page');},probe:async()=>{throw Error('stopped collection read a page');}};
  const api={rpc:async(name,p)=>{requests.push([name,p]);assert.ok(['submit','rating'].includes(name),'delivery cannot request control/tasks');
   if(offline)throw Error('offline');if(name==='rating')return {request:p.p_request,gate:'rated',inserted:true};
@@ -25,5 +26,7 @@ for(const file of ['core','agent'])vm.runInThisContext(fs.readFileSync('v4/src/'
  await agent.tick(false,true);assert.equal(requests.length,before);assert.equal(state.outbox.length,1);assert.equal(alarm,false);
  state.delivery_enabled=true;state.consent=null;alarm=true;await agent.tick(false,true);
  assert.equal(requests.length,before);assert.equal(state.delivery_enabled,false);assert.equal(alarm,false,'consent withdrawal also cancels delivery');
+ state.consent=CrowdCore.CONSENT;await assert.rejects(()=>agent.start(),/login_required/);assert.equal(state.enabled,false);
+ await agent.stop('rate_limit',{keepPage:true,drain:true});assert.equal(state.pending_risk,'rate_limit');assert.ok(state.next_at>=now+86400000,'observed rate limit is reported before later source actions');
  console.log('PASS Kimi parity: stop only collection, offline queue survives worker restart, retry UUID stable, optional rating queued, logout stops delivery');
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -18,12 +18,12 @@ let browser;
  await w.evaluate(id=>chrome.tabs.update(id,{url:'https://www.xiaohongshu.com/search_result?keyword=test',active:false}),id);await requested;
  result.before=await w.evaluate(async()=>({probe:await runtime.probe('search'),frame:typeof navigationDocument==='function'?await navigationDocument(await storage.get('work_tab'),await chrome.tabs.get(await storage.get('work_tab'))):null}));
  result.documentUrl=page.url();
- await w.evaluate(async()=>{const now=Date.now();await agent.save({...CrowdCore.initial(),enabled:true,consent:CrowdCore.CONSENT,phase:'search',last_tick:now,page_deadline:now-1,
+ await w.evaluate(async()=>{const now=Date.now();await agent.save({...CrowdCore.initial(),enabled:true,consent:CrowdCore.CONSENT,phase:'search',last_tick:now-121000,page_deadline:now-1,
   control:{version:1,paused:false,allowed:true,reason:null,wait_ms:0},control_checked:now,control_expires:now+600000,
-  task:{id:1,query:'test',lease_until:new Date(now+1200000).toISOString(),received:0,target:2},rejected:[{request:'original-proof',reason:'unrelated_note'}]});await agent.tick();});
- result.after=await w.evaluate(async()=>{const s=await agent.read();return {enabled:s.enabled,error:s.last_error,phase:s.phase,retained:s.rejected[0]?.request,alarm:!!await chrome.alarms.get('crowd_tick'),tab:await storage.get('work_tab')};});
- assert.equal(result.documentUrl,'about:blank');assert.equal(result.before.probe.reason,'navigation_uncommitted');assert.equal(result.before.frame.document_kind,'blank');assert.equal(result.before.frame.pending_kind,'platform');
- assert.equal(result.after.enabled,false);assert.equal(result.after.error,'navigation_uncommitted');assert.equal(result.after.retained,'original-proof');assert.equal(result.after.alarm,false);assert.equal(result.after.tab,id);
+  task:{id:1,query:'test',lease_until:new Date(now+1200000).toISOString(),received:0,target:2},rejected:[{request:'original-proof',reason:'unrelated_note'}]});globalThis.reopens=0;globalThis.searchAdmissions=0;runtime.open=async()=>{reopens++;throw Error('unexpected_reopen');};api.rpc=async(name,p)=>{if(name==='guard'&&p.p_action==='search')searchAdmissions++;throw Error('unexpected_backend_call');};await agent.tick(true);});
+ result.after=await w.evaluate(async()=>{const s=await agent.read();return {reopens,searchAdmissions,enabled:s.enabled,error:s.last_error,phase:s.phase,retained:s.rejected[0]?.request,alarm:!!await chrome.alarms.get('crowd_tick'),tab:await storage.get('work_tab')};});
+ assert.equal(result.documentUrl,'about:blank');assert.ok(['navigation_uncommitted','page_loading'].includes(result.before.probe.reason));assert.ok(['blank','unavailable'].includes(result.before.frame.document_kind));assert.equal(result.before.frame.pending_kind,'platform');
+ assert.equal(result.after.enabled,false);assert.equal(result.after.error,result.before.probe.reason);assert.equal(result.after.reopens,0);assert.equal(result.after.searchAdmissions,0);assert.equal(result.after.retained,'original-proof');assert.equal(result.after.alarm,false);assert.equal(result.after.tab,id);
  await held.respond({status:200,contentType:'text/html',body:'<html><body><a href="/explore/abcdef0123456789abcdef01">test</a></body></html>'});await page.waitForSelector('a');
  result.released=await w.evaluate(async()=>({probe:await runtime.probe('search'),enabled:(await agent.read()).enabled}));assert.equal(result.released.probe.ready,true);assert.equal(result.released.enabled,false,'late document must not auto-resume');
  result.result='PASS';

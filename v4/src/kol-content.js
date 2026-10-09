@@ -61,7 +61,7 @@
       if(item.is_reply&&(!task.include_replies||!item.parent_key||!kept.some(p=>p.key===item.parent_key)))continue;
       kept.push({...item,author_display:null});
     }
-    record.extra.comments={...comments,items:kept,captured_count:kept.length,complete:false,coverage:'visible_loaded_only',truncated:comments.truncated||kept.length<(comments.items||[]).length};
+    record.extra.comments={...comments,items:kept,captured_count:kept.length,...(Number.isInteger(comments.loaded_count)&&comments.loaded_count>=0?{omitted_count:Math.max(0,comments.loaded_count-kept.length)}:{}),complete:false,coverage:'visible_loaded_only',truncated:comments.truncated||kept.length<(comments.items||[]).length};
     record.extra.comment_status='visible_sample';record.extra.replies_status=task.include_replies?'visible_loaded_only':'not_requested';
   }
   function principal(platform){
@@ -75,6 +75,18 @@
       try{const p=K.targetURL(a.href);if(p.platform===platform&&p.kind==='creator')ids.add(p.id);}catch(_){}
     }
     return ids.size===1?{ready:true,platform,principal_id:[...ids][0],verification:'rendered_account_navigation'}:{ready:false,platform,reason:'identity_verification_required'};
+  }
+  function sessionHealth(platform){
+    const host=location.hostname;
+    if(!(platform==='xiaohongshu'?['www.xiaohongshu.com','m.xiaohongshu.com']:platform==='bilibili'?['www.bilibili.com','space.bilibili.com']:[]).includes(host))return {platform,status:'unknown'};
+    const blocked=gate()||root.CrowdPage?.probe('diagnostics')?.page?.gate;
+    if(blocked)return {platform,status:blocked==='login_required'?'logged_out':'challenge',reason:blocked};
+    const own=principal(platform);
+    const selectors=platform==='xiaohongshu'?'.side-bar .login-btn, .sidebar .login-btn, .channel-list .login-btn, nav button, [role="navigation"] button':'.bili-header .header-login-entry, .international-header .header-login-entry, .bili-header .header-avatar-wrap';
+    const loggedOut=[...document.querySelectorAll(selectors)].some(el=>visible(el)&&/^(登录|立即登录|登录\/注册|登录注册|未登录)$/.test(text(el)));
+    if(loggedOut&&own.ready)return {platform,status:'unknown'};
+    if(loggedOut)return {platform,status:'logged_out',reason:'login_required'};
+    return own.ready?{...own,status:'authenticated'}:{platform,status:'unknown'};
   }
   function pagination(kind){
     const scope=kind==='comments'?first('.comments-container, .comments-list, .comment-list, .reply-list, .reply-container'):first('.feeds-container, .note-list, .video-list, .space-content, #page-video');
@@ -150,6 +162,7 @@
     return {ready:true,record};
   }
   function probe(input){
+    if(input?.action==='session_health')return sessionHealth(input.platform);
     const blocked=gate();if(blocked)return {ready:false,gate:blocked};
     const xhsGate=root.CrowdPage?.probe('diagnostics')?.page?.gate;if(xhsGate)return {ready:false,gate:xhsGate};
     if(input?.action==='principal')return principal(input.platform);

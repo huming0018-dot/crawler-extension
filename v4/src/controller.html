@@ -8,6 +8,8 @@
 <section><label><input id="agree" type="checkbox">我自愿参加，并同意自动访问公开网页及回传笔记正文、公开互动数量、评论及回复、字段和采集证据。小红书登录凭据留在本机。按核验通过且去重后的笔记累计，每 100 条奖励 ¥0.10；不足 100 条继续累计。我了解后台运行受系统限制，可随时停止。</label><button id="consent">同意并开始</button></section>
 <section id="profiles_section"><label><input id="profiles" type="checkbox">另行同意采集公开作者主页：昵称、账号 ID、粉丝数、公开笔记数与当前可见笔记列表。可随时关闭，不访问关注/粉丝名单。</label><p>更改此项会停止当前运行；确认后点击继续采集。主页访问与笔记共享预算，同一作者最多每天尝试一次，每个参与身份每天最多2次。</p></section>
 <nav><button id="open_login">登录小红书 / 处理验证</button><button id="start">继续采集</button><button id="stop">停止采集</button></nav>
+<section id="platform_health_section"><h2>平台登录健康</h2><p>平台登录与中台参与身份相互独立。每分钟检查已有平台页面，不会为检查打开网页。恢复登录后仍由你点击继续；换号必须重新核对。</p><dl id="platform_health" aria-live="polite"></dl><button id="platform_health_check">重新检查已有平台页面</button></section>
+<section><h2>多平台采集工作台</h2><p>先在本机打开随包“多平台采集/打开工作台.command”，再进入工作台。使用独立浏览器由本人登录，不读取原浏览器凭据；机器采集不计真人奖励。</p><a href="http://127.0.0.1:45937" target="_blank" rel="noopener noreferrer">打开本机多平台采集工作台</a></section>
 <p>停止采集后，不再打开或读取新页面，已有待回传记录会继续发送；退出参与身份则同时停止回传。</p>
 <section id="diagnostics_section"><label><input id="diagnostics" type="checkbox">发送运行诊断，帮助排查故障（可随时关闭）</label><p>只发送阶段、错误码、队列数量和页面加载状态、主页面网络错误码和元素数量，不发送账号密码、Cookie、完整网址、截图或网页正文。增加最近24个动作节点、随机关联编号及时间，帮助串起导航与回传；本机最多保留24小时，云端只保留最近一份状态；关闭或退出时尝试清除。离线时须同一参与身份下次联网重试，退出后不再发送。</p><p id="diagnostics_status" role="status"></p><button id="inspect_work_page">查看采集页面</button></section>
 <section id="updater_section"><label><input id="auto_update" type="checkbox">自动安装已验证的插件更新</label><p>需要在原设备接通一次更新助手。以后保留身份和待回传记录，只重载本插件，不关闭浏览器。可随时关闭。</p><p id="updater_status" role="status"></p><button id="update_check">检查更新</button></section>

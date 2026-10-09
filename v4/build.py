@@ -13,7 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 FILES = ['manifest.json', 'icons/icon128.png'] + ['src/'+name for name in (
     'core.js','api.js','agent.js','background.js','content.js','config.js','join.js',
-    'controller.js','controller.html','controller.css','native-runtime.js','updater.js','trace.js','kol.js','kol-content.js','kol-ui.js','kol-controller.js')]
+    'controller.js','controller.html','controller.css','native-runtime.js','updater.js','trace.js','kol.js','kol-content.js','kol-ui.js','kol-controller.js','session-health.js')]
 
 
 def build(output):

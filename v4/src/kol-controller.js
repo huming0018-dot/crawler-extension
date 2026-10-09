@@ -38,6 +38,7 @@
     el('status').replaceChildren();
     const fields={'执行':local.enabled?'已开启':'已停止','阶段':phaseNames[local.phase]||local.phase||'等待任务','本地待回传':Number(local.outbox)||0,'待处理':Number(local.rejected)||0,'最近显示的已收实体':remote.contents?.length||0,'账号核对':local.principal_bound?'已绑定本次任务身份':'普通公开采集；未绑定已核对身份','最近提示':errors[local.last_error]||local.last_error||'无','下一次调度':local.enabled?local.next_at?time(local.next_at):'等待调度':'需本人继续'};
     for(const [k,v]of Object.entries(fields))el('status').append(node('dt',k),node('dd',v));
+    const loginNames={authenticated:'本人导航已确认登录',logged_out:'已登出，需本人登录',account_changed:'账号已变化，需重新核对绑定',challenge:'验证或限流，已暂停',unknown:'当前页面无法明确核验',no_page:'没有可检查的平台页面',not_checked:'尚未检查'};for(const [platform,h]of Object.entries(local.platform_health||{}))el('status').append(node('dt',platform==='xiaohongshu'?'小红书登录':'B站登录'),node('dd',(loginNames[h.status]||'尚未检查')+(h.recovered&&!h.reason&&!local.enabled?'；恢复后需本人继续':'')));
     if(local.outbox)el('status').append(button('重试待回传（最多3次）',()=>cmd('kol_retry_delivery')));
     for(const platform of local.parser_paused||[])el('status').append(button('解析器修复后恢复 '+platform,async()=>{if(confirm('确认已修复 '+platform+' 的解析问题？恢复只清解析暂停，不清访问预算；仍需点击继续任务。'))await cmd('kol_resume_parser',{platform});}));
     el('status').append(button('停止并安全释放给另一设备',async()=>{await cmd('kol_release');message('原设备已释放。只有检查点与全部回执确认后，其他设备才能恢复。');}));
@@ -116,7 +117,7 @@
   el('refresh').onclick=()=>act(refresh);el('stop').onclick=async()=>{try{await cmd('kol_stop');await refresh();message('已停止新访问，保留合法待回传记录。');}catch(e){message(errors[e.message]||e.message);}};
   el('continue').onclick=()=>act(()=>cmd('kol_start'));
   el('open_session').onclick=()=>act(()=>cmd('kol_open_session',{platform:el('account_platform').value}));
-  el('session').onclick=()=>act(async()=>{await cmd('kol_session_changed',{platform:el('account_platform').value});message('已核对平台账号导航并取消旧任务。请从名单创建新任务；待回传记录保留。');});
+  el('session').onclick=()=>act(async()=>{const result=await cmd('kol_session_changed',{platform:el('account_platform').value});message(result.same_platform_account?'已核对为同一平台账号。原任务和检查点保留，请点击继续已有任务；不会自动开始。':'已明确绑定新账号，旧任务已失效。请从名单创建新任务；待回传记录保留。');});
   el('sort').onchange=renderContents;
   el('evidence_file').onchange=()=>act(async()=>{
     const file=el('evidence_file').files[0];if(!file)return;if(file.size>200000)throw Error('证据文件上限200KB');

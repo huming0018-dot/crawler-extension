@@ -41,7 +41,7 @@ for(const file of ['core','agent'])vm.runInThisContext(fs.readFileSync('v4/src/'
  task.lease_token=crypto.randomUUID();await new CrowdAgent(runtime,api).tick();assert.equal(state.search_round,0);assert.deepEqual(state.seen,[]);assert.equal(state.note_url,null);
  // A transient navigation failure must not forget previously visited notes or search-round count reset.
  reset({phase:'search',search_round:2,seen:[id],page_deadline:now-1});probeReply={ready:false,reason:'page_loading'};
- await new CrowdAgent(runtime,api).tick();assert.equal(state.phase,'idle');assert.equal(state.search_round,0);assert.deepEqual(state.seen,[id]);assert.equal(state.task.id,1);
+ await new CrowdAgent(runtime,api).tick();assert.equal(state.enabled,false);assert.equal(state.phase,'search');assert.equal(state.search_round,2);assert.deepEqual(state.seen,[id]);assert.equal(state.task.id,1);
  // Waiting for task retry does not send new page requests, and Stop remains authoritative.
  const agent=new CrowdAgent(runtime,api);await agent.stop();const count=requests.length;now+=1e6;await agent.tick(true);assert.equal(requests.length,count);
  console.log('PASS scheduling client: known-note prefilter, malformed finish retains lease, same lease preserves progress, new token resets stale page, transport retry retains seen notes, Stop survives wake');

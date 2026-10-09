@@ -85,16 +85,21 @@
       const alive=async()=>{if(generation!==this.generation||signal.aborted||owner!==await this.owner())throw new Error('cancelled');};
       const s=await this.read(owner);if(s.outbox.length && s.last_error==='backend_login_required')throw new Error('pending_identity_delivery');
       if(s.pending_risk){await this.rpc('finish',s.pending_risk,signal);await alive();s.pending_risk=null;s.task=null;s.phase='idle';s.candidates=[];}
-      if(payload?.target_id)await this.rpc('start',payload,signal);
+      let platform=s.task?.platform;
+      if(payload?.target_id){const created=await this.rpc('start',payload,signal);platform=created.task?.platform||platform;}
+      if(platform)await this.r.sourceHealth?.(platform);
       await alive();s.enabled=true;s.delivery_enabled=true;s.last_error=null;await this.save(s,owner);await alive();await this.r.schedule();
     }
-    async stop(reason='user_stopped',drain=true,{keepPage=false}={}) {
+    async stop(reason='user_stopped',drain=true,{keepPage=false,expectedOwner=null}={}) {
+      if(expectedOwner&&expectedOwner!==await this.owner())return;
       this.generation++;this.controller?.abort();await this.active?.catch(()=>{});
-      const owner=await this.owner();if(!owner)return;const s=await this.read(owner);s.enabled=false;s.delivery_enabled=drain;s.last_error=reason;
+      const owner=await this.owner();if(!owner||expectedOwner&&owner!==expectedOwner)return;const s=await this.read(owner);s.enabled=false;s.delivery_enabled=drain;s.last_error=reason;
       if(s.pending_record)this.queueRecord(s);
+      else if(keepPage){/* Keep the admitted page and cursor for explicit same-account continuation. */}
       else if(s.phase==='detail')s.phase='resume_detail';
       else if(['discover','discovery_scroll'].includes(s.phase))s.phase='resume_listing';
-      await this.save(s,owner);if(drain&&s.outbox.length)await this.r.schedule();else await this.r.cancel();if(!keepPage)await this.r.close();
+      if(s.task&&['captcha','rate_limit'].includes(reason))s.pending_risk={task:s.task.id,lease:s.task.lease_token,...(s.task.execution_protocol===1?{executor_id:await this.executor()}:{}),reason:'risk_paused',risk_type:reason};
+      await this.save(s,owner);if(expectedOwner&&owner!==await this.owner())return;if(drain&&s.outbox.length)await this.r.schedule();else await this.r.cancel();if(!keepPage)await this.r.close();
     }
     async tick() {
       if(this.active)return this.active;
@@ -113,8 +118,9 @@
         await call('action_settle',{task:s.task.id,lease:s.task.lease_token,executor_id,admission_id:entry.admission_id,outcome,...(failure_reason?{failure_reason}:{})});s.unsettled=s.unsettled.filter(x=>x.admission_id!==entry.admission_id);await save();
       }};
       const checkpoint=async()=>{if(!protocol())return;s.pending_checkpoint||=this.checkpointPayload(s,executor_id);await save();const r=await call('checkpoint',s.pending_checkpoint);s.checkpoint_revision=r.checkpoint?.revision??r.revision;if(!Number.isInteger(s.checkpoint_revision))throw new Error('invalid_checkpoint');s.pending_checkpoint=null;await save();};
-      const verifyPrincipal=async()=>{if(s.task.principal_ref){if(!this.r.verifyPrincipal)throw new Error('identity_verification_required');await this.r.verifyPrincipal(s.task);await alive();}};
+      const verifyPrincipal=async()=>{await this.r.sourceHealth?.(s.task.platform);await alive();if(s.task.principal_ref){if(!this.r.verifyPrincipal)throw new Error('identity_verification_required');await this.r.verifyPrincipal(s.task);await alive();}};
       const admit=async(action,content_id)=>{
+        await this.r.sourceHealth?.(s.task.platform);await alive();
         if(s.parser_failures?.[s.task.platform]?.paused)throw new Error('parser_paused');
         await verifyPrincipal();
         if(protocol()&&(s.unsettled||[]).length&&!s.pending_record)throw new Error('source_outcome_unknown');

@@ -1,5 +1,5 @@
 /* Windows/macOS Chrome & Edge MV3. No automatic start on installation. */
-if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'join.js', 'updater.js', 'trace.js', 'kol.js');
+if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'join.js', 'updater.js', 'trace.js', 'kol.js', 'session-health.js');
 const storage = CrowdCore.accountStorage({
   async get(key) { return (await chrome.storage.local.get(key))[key]; },
   async set(key, value) { await chrome.storage.local.set({[key]: value}); }
@@ -39,6 +39,7 @@ const runtime = {
   splitCapture: true,
   trace:(stage,options)=>trace.event(stage,options),
   storage, now: Date.now, random: Math.random, uuid: () => crypto.randomUUID(),
+  sourceHealth:platform=>platformHealth.require(platform),
   // Align the next wake with the durable deadline, not an unrelated 30s grid.
   // Keep a repeating fallback for worker crashes; poll waits at least once/minute
   // so sleep detection and independent control refresh keep their semantics.
@@ -83,7 +84,7 @@ const runtime = {
     try {
       pendingTabCreation = (async () => {
         const [window] = await chrome.windows.getAll({windowTypes: ['normal']});
-        const tab = window ? await chrome.tabs.create({url, windowId: window.id, active: false}) :
+        const tab = window ? await chrome.tabs.create({url, active: false}) :
           (await chrome.windows.create({url, type: 'normal', state: 'minimized', focused: false})).tabs[0];
         await storage.set('work_tab', tab.id);
         await trace.event('tab_created');
@@ -118,6 +119,7 @@ const runtime = {
 };
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
 const kol = new CrowdKOL.Agent({storage,now:Date.now,uuid:()=>crypto.randomUUID(),
+  sourceHealth:platform=>platformHealth.require(platform),
   verifyPrincipal:task=>verifyKOLPrincipal(task),
   schedule:async()=>{if(!await chrome.alarms.get('crowd_kol'))await chrome.alarms.create('crowd_kol',{periodInMinutes:.5});},
   cancel:()=>chrome.alarms.clear('crowd_kol'),open:url=>runtime.open(url,true),close:()=>runtime.close(),
@@ -135,6 +137,45 @@ const kol = new CrowdKOL.Agent({storage,now:Date.now,uuid:()=>crypto.randomUUID(
     }catch(_){return {ready:false,reason:'content_unavailable'};}finally{clearTimeout(timer);}
   }
 },api);
+const platformHealth=new CrowdPlatformHealth({storage,owner:()=>kol.owner(),now:Date.now,probe:probePlatformSessions});
+async function principalHash(owner,platform,id){
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(owner+'\n'+platform+'\n'+id));
+  return [...new Uint8Array(digest)].map(n=>n.toString(16).padStart(2,'0')).join('');
+}
+async function probePlatformSessions(){
+  const owner=await kol.owner(),result={},work=await storage.get('work_tab');if(!owner)return result;
+  for(const platform of ['xiaohongshu','bilibili']){
+    const urls=platform==='xiaohongshu'?['https://www.xiaohongshu.com/*','https://m.xiaohongshu.com/*']:['https://www.bilibili.com/*','https://space.bilibili.com/*'];
+    const owned=await storage.get('kol-session-tab:'+owner+':'+platform);
+    const tabs=(await chrome.tabs.query({url:urls})).filter(tab=>!tab.discarded).sort((a,b)=>Number(b.id===work||b.id===owned)-Number(a.id===work||a.id===owned)||(b.lastAccessed||0)-(a.lastAccessed||0)).slice(0,6);
+    const observations=[];
+    for(const tab of tabs){let timer;try{
+      const page=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'crowd_kol_probe',input:{action:'session_health',platform}}),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),1500);})]);
+      if(page?.platform!==platform)continue;
+      if(page.status==='authenticated'&&page.verification==='rendered_account_navigation'&&(platform==='xiaohongshu'?/^[a-f0-9]{24}$/:/^\d{1,20}$/).test(page.principal_id||''))observations.push({status:'authenticated',principal_ref:await principalHash(owner,platform,page.principal_id)});
+      else if(['logged_out','challenge','unknown'].includes(page.status))observations.push({status:page.status,reason:page.reason});
+    }catch(_){}finally{clearTimeout(timer);}}
+    const loggedOut=observations.find(p=>p.status==='logged_out'),challenge=observations.find(p=>p.status==='challenge'),authenticated=observations.filter(p=>p.status==='authenticated');
+    result[platform]=(loggedOut&&authenticated.length||new Set(authenticated.map(p=>p.principal_ref)).size>1)?{status:'unknown'}:challenge||loggedOut||authenticated[0]||{status:tabs.length?'unknown':'no_page'};
+  }
+  return result;
+}
+let healthMonitorActive=null;
+async function monitorPlatformHealth(force=false){
+  if(healthMonitorActive)return healthMonitorActive;
+  healthMonitorActive=(async()=>{
+    const owner=await kol.owner(),state=await platformHealth.check(force);if(owner!==await kol.owner())return;
+    const legacy=await agent.read(),local=await kol.read(owner);
+    if(legacy.enabled&&state.xiaohongshu?.reason)await agent.stop(state.xiaohongshu.reason,{keepPage:true,drain:true,expectedOwner:owner});
+    if(owner!==await kol.owner())return;
+    if(local.enabled&&local.task&&state[local.task.platform]?.reason)await kol.stop(state[local.task.platform].reason,true,{keepPage:true,expectedOwner:owner});
+    const entries=Object.values(await platformHealth.publicState()),blocked=entries.find(p=>p.reason),backend=!owner||legacy.last_error==='backend_login_required'||local.last_error==='backend_login_required';
+    const label=backend?'身份':blocked?blocked.reason==='login_required'?'登录':blocked.reason==='platform_identity_changed'?'换号':'核对':!legacy.enabled&&!local.enabled&&entries.some(p=>p.recovered)?'就绪':'';
+    await chrome.action?.setBadgeText({text:label});await chrome.action?.setBadgeBackgroundColor({color:backend||blocked?'#b54708':'#23704c'});
+    await chrome.action?.setTitle({title:backend?'中台参与身份未就绪；原证据保留':blocked?'平台登录或身份需处理；新采集已暂停，已有证据保留':label?'平台账号已恢复；请在控制台明确继续采集':'众包公开笔记采集'});
+  })().finally(()=>{healthMonitorActive=null;});return healthMonitorActive;
+}
+async function repairPlatformHealth(){if(!await chrome.alarms.get('crowd_platform_health'))await chrome.alarms.create('crowd_platform_health',{periodInMinutes:1});}
 async function kolUpsert(payload){
   const owner=await kol.owner();if(!owner)throw new Error('backend_login_required');
   const parsed=CrowdKOL.targetURL(payload?.url);
@@ -145,6 +186,7 @@ async function kolUpsert(payload){
   locators[result.target.id]=parsed.navigation;await storage.set(key,locators);return result;
 }
 async function kolSessionChanged(payload={}){
+  await agent.stop('session_changed',{drain:true,keepPage:true});
   await kol.stop('session_changed',true,{keepPage:true});
   while(kol.active)await kol.active.catch(()=>{});
   const generation=kol.generation;kol.controller=new AbortController();const signal=kol.controller.signal;
@@ -154,28 +196,36 @@ async function kolSessionChanged(payload={}){
     try{
       if(!['xiaohongshu','bilibili'].includes(payload.platform))throw new Error('identity_verification_required');
       const principal_ref=await readKOLPrincipal(payload.platform,owner,true);await alive();
+      const prior=await storage.get('kol-principal:'+owner+':'+payload.platform);await alive();
+      const known=await platformHealth.read(owner);await alive();
+      if(payload.platform==='xiaohongshu'&&known.xiaohongshu?.expected_ref&&known.xiaohongshu.expected_ref!==principal_ref){await releaseLegacyTask();await alive();}
       const result=await kol.rpc('session_changed',{platform:payload.platform,principal_ref,verification:'rendered_account_navigation'},signal);await alive();
-      await storage.set('kol-principal:'+owner+':'+payload.platform,{principal_ref,verified_at:new Date().toISOString()});await alive();
-      const s=await kol.read(owner);await alive();s.task=null;s.phase='idle';s.candidates=[];s.current=null;s.current_id=null;
+      await storage.set('kol-principal:'+owner+':'+payload.platform,{principal_ref,verified_at:new Date().toISOString()});await alive();await platformHealth.confirm(payload.platform,principal_ref);await alive();
+      const s=await kol.read(owner);await alive();const same=prior?.principal_ref===principal_ref&&(!s.task||s.task.principal_ref===principal_ref);
+      if(!same){s.task=null;s.phase='idle';s.candidates=[];s.current=null;s.current_id=null;}s.last_error=null;
       await kol.save(s,owner);await alive();
       // Access locators may belong to the previous platform account. Evidence is unchanged.
-      await storage.set('kol-locators:'+owner,{});return result;
+      if(!same)await storage.set('kol-locators:'+owner,{});return {...result,same_platform_account:same,collection_requires_manual_continue:true};
     }catch(error){await alive();const s=await kol.read(owner);await alive();s.last_error=error.message;await kol.save(s,owner);throw error;}
   })().finally(()=>{kol.active=null;});
   return kol.active;
 }
-async function readKOLPrincipal(platform,owner,ownedOnly=false){
-  const work=ownedOnly?null:await storage.get('work_tab'),session=await storage.get('kol-session-tab:'+owner+':'+platform);
-  for(const id of [...new Set([work,session].filter(Boolean))]){
+async function readKOLPrincipal(platform,owner,preferSession=false){
+  const work=await storage.get('work_tab'),session=await storage.get('kol-session-tab:'+owner+':'+platform);
+  for(const id of [...new Set((preferSession?[session,work]:[work,session]).filter(Boolean))]){
     let page;try{page=await chrome.tabs.sendMessage(id,{type:'crowd_kol_probe',input:{action:'principal',platform}});}catch(_){continue;}
     if(page?.gate)throw new Error(page.gate);
-    if(page?.platform===platform&&!page.ready)throw new Error('identity_verification_required');
     if(!page?.ready||page.platform!==platform||page.verification!=='rendered_account_navigation')continue;
     if(!(platform==='xiaohongshu'?/^[0-9a-f]{24}$/:/^\d{1,20}$/).test(page.principal_id||''))continue;
     if(owner!==await kol.owner())throw new Error('cancelled');
     const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(owner+'\n'+platform+'\n'+page.principal_id));
     return [...new Uint8Array(digest)].map(n=>n.toString(16).padStart(2,'0')).join('');
   }
+  // The user may have closed our account page and logged in on another existing tab.
+  const observed=(await probePlatformSessions())[platform];if(owner!==await kol.owner())throw new Error('cancelled');
+  if(observed?.status==='authenticated'&&observed.principal_ref)return observed.principal_ref;
+  if(observed?.status==='logged_out')throw new Error('login_required');
+  if(observed?.status==='challenge')throw new Error(observed.reason||'captcha');
   throw new Error('identity_verification_required');
 }
 async function verifyKOLPrincipal(task){
@@ -186,7 +236,7 @@ async function verifyKOLPrincipal(task){
 async function openKOLSession(platform){
   const url={xiaohongshu:'https://www.xiaohongshu.com',bilibili:'https://www.bilibili.com'}[platform];
   if(!url)throw new Error('unsupported_platform');
-  await kol.stop('session_login',true);await agent.stop('session_login',{drain:true});
+  await kol.stop('session_login',true,{keepPage:true});await agent.stop('session_login',{drain:true,keepPage:true});
   const owner=await kol.owner();if(!owner)throw new Error('backend_login_required');
   const tab=await chrome.tabs.create({url,active:true});
   await storage.set('kol-session-tab:'+owner+':'+platform,tab.id);return {};
@@ -393,7 +443,8 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         const result=message.action==='upsert'?await kolUpsert(message.payload):await kol.rpc(message.action,message.payload||{});
         return result;
       }
-      case 'kol_state': {const s=await kol.read();return {local:{enabled:s.enabled,delivery_enabled:s.delivery_enabled,phase:s.phase,last_error:s.last_error,received:s.received,attempts:s.attempts,next_at:s.next_at,outbox:s.outbox.length,rejected:s.rejected.length,coverage:s.coverage||null,principal_bound:!!s.task?.principal_ref,parser_paused:Object.keys(s.parser_failures||{}).filter(platform=>s.parser_failures[platform]?.paused)},remote:await kol.rpc('list')};}
+      case 'kol_state': {const s=await kol.read();return {local:{platform_health:await platformHealth.publicState(),enabled:s.enabled,delivery_enabled:s.delivery_enabled,phase:s.phase,last_error:s.last_error,received:s.received,attempts:s.attempts,next_at:s.next_at,outbox:s.outbox.length,rejected:s.rejected.length,coverage:s.coverage||null,principal_bound:!!s.task?.principal_ref,parser_paused:Object.keys(s.parser_failures||{}).filter(platform=>s.parser_failures[platform]?.paused)},remote:await kol.rpc('list')};}
+      case 'platform_health_check': await monitorPlatformHealth(true);return platformHealth.publicState();
       case 'kol_upsert': return kolUpsert(message.payload);
       case 'kol_release': return kol.release();
       case 'kol_recover': return kol.recover(message.task);
@@ -401,6 +452,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'kol_resume_parser': return kol.resumeParser(message.platform);
       case 'kol_start': {
         const generation=kol.generation;
+        await platformHealth.check(true);
         await releaseLegacyTask();
         if(generation!==kol.generation)throw new Error('cancelled');
         await kol.start(message.payload||{target_id:message.target_id});return {};
@@ -414,7 +466,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'kol_delete_content': return kol.rpc('delete_content',message.payload||{});
       case 'update_settings': await updater.setEnabled(message.enabled); return {};
       case 'update_check': await updater.check(); return {};
-      case 'state': { const settings = await diagnosticSettings(); return {updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message})), progress:await api.rpc('progress').catch(()=>null)}; }
+      case 'state': { const settings = await diagnosticSettings(); return {platform_health:await platformHealth.publicState(),updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message})), progress:await api.rpc('progress').catch(()=>null)}; }
       case 'rating': await agent.queueRating(message.proof, message.score, message.reason); agent.tick(false,true).catch(console.error); return {};
       case 'profiles': {
         if(typeof message.enabled !== 'boolean')throw new Error('invalid_request');
@@ -446,7 +498,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         await kol.stop('consent_changed',false);await agent.stop(); await api.rpc('register', {p_consent: CrowdCore.CONSENT});
         const s = await agent.read(); s.consent = CrowdCore.CONSENT; await agent.save(s); return {};
       }
-      case 'start': await kol.stop('legacy_collection',true);await agent.start(); return {};
+      case 'start': await platformHealth.check(true);await kol.stop('legacy_collection',true);await agent.start(); return {};
       case 'stop': await kol.stop('user_stopped',true);await agent.stop('user_stopped', {drain:true}); return {};
       case 'logout': {
         await kol.stop('logged_out',false);
@@ -459,7 +511,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'open_login': {
         // Keep the actual challenge/note page. Opening help is a user action,
         // not evidence that either platform or backend authentication failed.
-        await kol.stop('user_login',true,{keepPage:true});await agent.stop('user_login', {keepPage: true});
+        await kol.stop('user_login',true,{keepPage:true});await agent.stop('user_login', {keepPage: true,drain:true});
         const id = await storage.get('work_tab');
         if (id) {
           try {
@@ -489,6 +541,7 @@ chrome.runtime.onMessageExternal?.addListener((message, sender, reply) => {
   } catch (_) { return; }
 });
 chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === 'crowd_platform_health') monitorPlatformHealth().catch(console.error);
   if (alarm.name === 'crowd_kol'&&!agent.maintenance) kol.tick().catch(console.error);
   if (alarm.name === 'crowd_update') updater.check().catch(console.error);
   if (alarm.name === 'crowd_tick') agent.tick().catch(console.error);
@@ -512,4 +565,4 @@ chrome.tabs.onRemoved.addListener(id => {
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable
 // running state on every load; initial installation and user stops remain idle.
-updater.bootstrap().then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>kol.tick()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);
+updater.bootstrap().then(()=>repairPlatformHealth().catch(()=>{})).then(()=>monitorPlatformHealth().catch(()=>{})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>kol.tick()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);

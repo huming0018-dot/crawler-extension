@@ -26,6 +26,11 @@ try{
   await page.evaluate(({platform,author})=>document.body.insertAdjacentHTML('afterbegin',platform==='xiaohongshu'?`<nav><a href="https://www.xiaohongshu.com/user/profile/${author}">我</a></nav>`:`<header class="bili-header"><a class="header-avatar-wrap" href="https://space.bilibili.com/${author}"><img alt="头像" style="width:24px;height:24px"></a></header>`),{platform,author});
   const principal=await page.evaluate(platform=>CrowdKOLPage.probe({action:'principal',platform}),platform);
   assert.equal(principal.ready,true);assert.equal(principal.principal_id,author);assert.equal(principal.verification,'rendered_account_navigation');
+  assert.equal((await page.evaluate(platform=>CrowdKOLPage.probe({action:'session_health',platform}),platform)).status,'authenticated');
+  await page.evaluate(platform=>{document.querySelector(platform==='xiaohongshu'?'nav':'.bili-header').remove();document.body.insertAdjacentHTML('afterbegin',platform==='xiaohongshu'?'<nav><button>登录</button></nav>':'<header class="bili-header"><div class="header-login-entry">登录</div></header>');},platform);
+  assert.equal((await page.evaluate(platform=>CrowdKOLPage.probe({action:'session_health',platform}),platform)).status,'logged_out');
+  await page.evaluate(platform=>document.querySelector(platform==='xiaohongshu'?'nav':'.bili-header').remove(),platform);
+  assert.equal((await page.evaluate(platform=>CrowdKOLPage.probe({action:'session_health',platform}),platform)).status,'unknown','article author alone is not login evidence');
   assert.equal(data.ready,true);assert.equal(data.record.standard.note_id,id);assert.equal(data.record.extra.author.id,author);assert.equal(data.record.extra.comments,undefined,'default comments off');
   assert.equal(data.record.extra.media_refs.length,1);assert.equal(data.record.extra.media_refs[0].kind,'image');assert.ok(!data.record.extra.media_refs[0].url.includes('?'));assert.equal(data.record.extra.media_status,'public_refs_available');
   task.comment_limit=20;task.include_replies=true;

@@ -76,6 +76,31 @@ let browser,proxy,site;const result={version:manifest.version,scope:'Actual inst
   assert.equal(JSON.stringify(done.requests).includes('LOCAL_'),false,'navigation tokens never leave in RPC');
   assert.equal(await worker.evaluate(async platform=>{await verifyKOLPrincipal({platform,principal_ref:fixture.principal_ref});return true;},platform),true,'bound identity stays usable after work tab closes');
   const submits=done.requests.filter(x=>x.action==='submit');assert.equal(submits.length,3);assert.equal(submits[0].payload.request,submits[1].payload.request);
+  if(process.env.CROWD_TEST_HEALTH==='1'){
+   const sessionTab=await worker.evaluate(async platform=>await storage.get('kol-session-tab:kol-fixture:'+platform),platform),sessionTarget=await browser.waitForTarget(async target=>target.type()==='page'&&target.url()===(platform==='xiaohongshu'?'https://www.xiaohongshu.com/':'https://www.bilibili.com/'));
+   const sessionPage=await sessionTarget.page();
+   const healthBefore=await worker.evaluate(async platform=>{await monitorPlatformHealth(true);const s=await kol.read();s.enabled=true;s.delivery_enabled=true;s.phase='open';s.task={id:'health-task',platform,principal_ref:fixture.principal_ref,target_kind:'content',target_id:'a'.repeat(24),url:'https://www.xiaohongshu.com/explore/'+'a'.repeat(24)};s.checkpoint_revision=7;s.candidates=[{id:'a'.repeat(24),url:s.task.url}];s.outbox=[{...fixture.received[0],delivery_attempts:0}];await kol.save(s,'kol-fixture');return {requests:fixture.requests.length,source:fixture.guards.length};},platform);
+   await sessionPage.evaluate(platform=>{document.querySelector(platform==='xiaohongshu'?'nav':'.bili-header')?.remove();document.body.insertAdjacentHTML('afterbegin',platform==='xiaohongshu'?'<nav><button>登录</button></nav>':'<header class="bili-header"><div class="header-login-entry">登录</div></header>');},platform);
+   const paused=await worker.evaluate(async()=>{await monitorPlatformHealth(true);const s=await kol.read();return {enabled:s.enabled,outbox:s.outbox.length,phase:s.phase,error:s.last_error,badge:await chrome.action.getBadgeText({}),guards:fixture.guards.length};});
+   assert.equal(paused.enabled,false);assert.equal(paused.outbox,1);assert.equal(paused.error,'login_required');assert.equal(paused.badge,'登录');assert.equal(paused.guards,healthBefore.source);
+   await worker.evaluate(async()=>{fixture.offset+=61000;await kol.tick();});assert.equal(await worker.evaluate(async()=>(await kol.read()).outbox.length),0,'platform logout does not stop lawful evidence delivery');
+   await sessionPage.reload();await sessionPage.waitForSelector(platform==='xiaohongshu'?'nav a':'.header-avatar-wrap');
+   const restored=await worker.evaluate(async platform=>{await monitorPlatformHealth(true);const s=await kol.read();return {health:(await platformHealth.publicState())[platform],enabled:s.enabled};},platform);
+   assert.equal(restored.health.status,'authenticated');assert.equal(restored.health.recovered,true);assert.equal(restored.enabled,false,'same account recovery never silently starts');
+   const rebound=await command({type:'kol_session_changed',platform});assert.equal(rebound.ok,true);assert.equal(rebound.data.same_platform_account,true);
+   assert.equal(await worker.evaluate(async()=>{const s=await kol.read();return s.task?.id==='health-task'&&s.checkpoint_revision===7&&s.candidates.length===1&&!s.enabled;}),true,'same account explicit check retains task and checkpoint');
+   await command({type:'kol_stop'});await worker.evaluate(async()=>monitorPlatformHealth(true));assert.equal(await worker.evaluate(async()=>(await kol.read()).enabled),false,'manual stop survives healthy observation');
+   await sessionPage.evaluate(platform=>{document.querySelector(platform==='xiaohongshu'?'nav a':'.header-avatar-wrap').href=platform==='xiaohongshu'?'https://www.xiaohongshu.com/user/profile/'+'f'.repeat(24):'https://space.bilibili.com/888';},platform);
+   const changed=await worker.evaluate(async platform=>{await monitorPlatformHealth(true);let reason;try{await platformHealth.require(platform);}catch(e){reason=e.message;}return {health:(await platformHealth.publicState())[platform],reason};},platform);
+   assert.equal(changed.health.status,'account_changed');assert.equal(changed.reason,'platform_identity_changed');
+   await sessionPage.reload();await sessionPage.waitForSelector(platform==='xiaohongshu'?'nav a':'.header-avatar-wrap');await worker.evaluate(async()=>monitorPlatformHealth(true));
+   assert.equal((await worker.evaluate(async()=>(await chrome.tabs.query({active:true,lastFocusedWindow:true}))[0].id)),active,'health monitoring keeps user foreground');
+   await sessionPage.close();const ordinaryLogin=await browser.newPage();await ordinaryLogin.goto(platform==='xiaohongshu'?'https://www.xiaohongshu.com/':'https://www.bilibili.com/');await ordinaryLogin.waitForSelector(platform==='xiaohongshu'?'nav a':'.header-avatar-wrap');await ordinary.bringToFront();
+   assert.equal(await worker.evaluate(async platform=>{await monitorPlatformHealth(true);await verifyKOLPrincipal({platform,principal_ref:fixture.principal_ref});return true;},platform),true,'same-account login in another existing tab supports principal verification');
+   assert.equal(await worker.evaluate(async platform=>{try{await verifyKOLPrincipal({platform,principal_ref:'0'.repeat(64)});}catch(e){return e.message;}return null;},platform),'platform_identity_changed','ordinary-page fallback never accepts a different bound principal');
+   const ordinaryRebind=await command({type:'kol_session_changed',platform});assert.equal(ordinaryRebind.ok,true);assert.equal(ordinaryRebind.data.same_platform_account,true);await ordinaryLogin.close();
+   result.runs.push({platform,health:'PASS',logout_badge:paused.badge,delivery_preserved:true,same_account_checkpoint_retained:true,manual_stop_stays_stopped:true,account_change_blocked:true,ordinary_login_tab_verified:true});
+  }
   result.runs.push({platform,received:done.received,profiles:done.profiles,finish:done.finish,outbox:done.outbox,workTab:done.workTab,detail_attempts:2,phases});await panel.close();
  }
  assert.equal(await worker.evaluate(()=>fixture.legacyFinishes),2);

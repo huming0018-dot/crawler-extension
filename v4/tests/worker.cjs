@@ -42,7 +42,7 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
  alarm=null;await vm.runInContext('agent.tick()',context);assert.equal(alarm.periodInMinutes,.5,'worker load/tick repairs cleared alarms');
  const url='https://www.xiaohongshu.com/explore/abcdef0123456789abcdef01';
  delete data.work_tab;await vm.runInContext('runtime.open('+JSON.stringify(url)+')',context);
- assert.equal(createdTabs.at(-1).windowId,1);assert.equal(createdTabs.at(-1).url,url);assert.equal(createdTabs.at(-1).active,false);assert.equal(data.work_tab,77);
+ assert.equal(createdTabs.at(-1).windowId,undefined,'background creation lets Chrome choose current window');assert.equal(createdTabs.at(-1).url,url);assert.equal(createdTabs.at(-1).active,false);assert.equal(data.work_tab,77);
  assert.equal(createdTabs.some(t=>t.url==='about:blank'),false,'new work tabs request the destination directly');
  windows=[];delete data.work_tab;await vm.runInContext('runtime.open('+JSON.stringify(url)+')',context);
  assert.equal(createdWindows.at(-1).state,'minimized');assert.equal(createdWindows.at(-1).focused,false);
