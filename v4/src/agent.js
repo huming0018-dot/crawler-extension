@@ -179,7 +179,8 @@
           s.next_at = now + 3600000;
         } else if (s.phase === 'idle') {
           if (!await this.admit(s, 'search', alive, signal)) return;
-          s.phase = 'search'; s.page_deadline = now + 120000; s.next_at = now + 30000;
+          // One alarm interval for initial search loading; never auto-reopen it.
+          s.phase = 'search'; s.page_deadline = this.r.now() + 30000; s.next_at = s.page_deadline;
           // Persist before navigation: a worker restart after tabs.update must
           // resume probing instead of opening/charging the same search again.
           await this.save(s); alive();
@@ -464,13 +465,14 @@
       } else finish();
     }
     checkPage(page, s, now) {
+      now = Math.max(now, this.r.now());
       if (page.gate) throw new Error(page.gate);
       if (page.ready) s.last_error = null;
       if (page.reopen) {
         if (s.phase === 'search') throw new Error('navigation_failed');
         s.phase = 'reopen_note'; s.search_round = 0; s.next_at = now + 30000; return;
       }
-      if (!page.ready) { if (now > s.page_deadline) throw new Error(['navigation_uncommitted','page_loading','content_unavailable','probe_timeout'].includes(page.reason) ? page.reason : 'page_timeout'); s.next_at = now + 30000; }
+      if (!page.ready) { if (now >= s.page_deadline) throw new Error(['navigation_uncommitted','page_loading','content_unavailable','probe_timeout'].includes(page.reason) ? page.reason : 'page_timeout'); s.next_at = now + 30000; }
     }
   }
   root.CrowdAgent = CrowdAgent;

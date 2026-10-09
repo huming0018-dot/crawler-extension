@@ -18,7 +18,15 @@ for(const name of ['core','agent'])vm.runInThisContext(fs.readFileSync((process.
  now+=30000;await new CrowdAgent(runtime,api).tick();
  assert.equal(opens,1,'worker restart must not reopen the just-issued search');
  assert.equal(searches,1,'one search admission survives a worker restart');assert.equal(probes,1);
- assert.equal(state.phase,'search');assert.ok(state.page_deadline>now);
+ assert.equal(state.phase,'search');assert.equal(state.enabled,false,'exact deadline stops the unavailable search');
+ assert.equal(state.page_deadline,now);assert.equal(state.last_error,'page_loading');
+ // A probe can cross the deadline; use its completion time, but accept ready DOM.
+ for(const ready of [false,true]){
+  const agent=new CrowdAgent(runtime,api),deadline=now+1000;
+  const checking={phase:'search',page_deadline:deadline};now=deadline;
+  if(ready)assert.doesNotThrow(()=>agent.checkPage({ready:true},checking,deadline-500));
+  else assert.throws(()=>agent.checkPage({ready:false,reason:'page_loading'},checking,deadline-500),/page_loading/);
+ }
  // Both Chrome startup and an alarm gap must finish the already-admitted
  // attempt, even when its document never became accessible to the extension.
  for(const recover of [false,true]){

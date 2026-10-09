@@ -19,6 +19,7 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
  const wake=Date.now()+45000;await vm.runInContext('runtime.schedule('+wake+')',context);
  assert.equal(alarm.when,wake,'45s deadline must not be rounded to an unrelated 60s tick');
  const same=alarm;await vm.runInContext('runtime.schedule('+wake+')',context);assert.equal(alarm,same,'same deadline does not postpone an existing wakeup');
+ await vm.runInContext('runtime.schedule(Date.now()+60000)',context);assert.equal(alarm,same,'an early event cannot postpone the pending wake');
  await vm.runInContext('runtime.schedule(Date.now()+1)',context);assert.ok(alarm.when>=Date.now()+29000);
  await vm.runInContext('runtime.schedule(Date.now()+3600000)',context);assert.ok(alarm.when<=Date.now()+60000,'long waits retain control polling without clearing durable deadlines');
  await vm.runInContext('runtime.cancel()',context);assert.equal(alarm,null);
@@ -121,6 +122,13 @@ vm.runInContext(fs.readFileSync(path.join(src,'background.js'),'utf8'),context);
  assert.equal((await vm.runInContext('runtime.probe("search")',context)).reason,'content_unavailable');
  await vm.runInContext('reportDiagnostics()',context);
  assert.equal(JSON.parse(fetches.at(-1).options.body).p_state.probe_status,'no_receiver');
+ assert.equal(JSON.parse(fetches.at(-1).options.body).p_state.probe_error,'no_receiver');
+ for(const [reply,error] of [[null,'empty_response'],[Error('The message port closed before a response was received.'),'port_closed'],[Error('A listener indicated an asynchronous response, but the message channel closed before a response was received'),'port_closed'],[Error('No tab with id: 99.'),'tab_missing'],[Error('Cannot access contents of url https://PRIVATE_URL_TOKEN'),'access_denied'],[Error('PRIVATE_COOKIE arbitrary failure'),'message_failed'],[Error('probe_timeout'),'timed_out']]){
+   probeReply=reply;await vm.runInContext('reportDiagnostics()',context);
+   const snapshot=JSON.parse(fetches.at(-1).options.body).p_state;
+   assert.equal(snapshot.probe_error,error);assert.equal(JSON.stringify(snapshot).includes('PRIVATE_'),false);
+ }
+ probeReply=Error('Receiving end does not exist');
  tabInfo={status:'loading',url:'about:blank',pendingUrl:url+'?xsec_token=PRIVATE_URL_TOKEN'};
  await vm.runInContext('reportDiagnostics()',context);
  const blankReport=JSON.parse(fetches.at(-1).options.body).p_state;

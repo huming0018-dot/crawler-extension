@@ -12,8 +12,17 @@ async function probeTab(id, action) {
       chrome.tabs.sendMessage(id, {type: 'crowd_probe', action}),
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('probe_timeout')), 2000); })
     ]);
-    return {response, status: response ? 'ok' : 'no_receiver'};
-  } catch (e) { return {response: null, status: e.message === 'probe_timeout' ? 'timed_out' : 'no_receiver'}; }
+    return {response, status: response ? 'ok' : 'no_receiver', error: response ? 'none' : 'empty_response'};
+  } catch (e) {
+    // Only fixed categories leave this helper; browser errors may contain URLs.
+    const message = String(e?.message || '');
+    const error = message === 'probe_timeout' ? 'timed_out' :
+      /Receiving end does not exist/i.test(message) ? 'no_receiver' :
+      /message (?:port|channel) closed/i.test(message) ? 'port_closed' :
+      /No tab with id|Invalid tab ID/i.test(message) ? 'tab_missing' :
+      /Cannot access|Missing host permission/i.test(message) ? 'access_denied' : 'message_failed';
+    return {response: null, status: error === 'timed_out' ? 'timed_out' : 'no_receiver', error};
+  }
   finally { clearTimeout(timer); }
 }
 // Only fixed categories leave this helper. Never retain or report a frame URL.
@@ -47,7 +56,8 @@ const runtime = {
     const now = Date.now();
     const at = Math.max(now + 30000, Math.min(Number.isFinite(when) ? when : now + 30000, now + 60000));
     const alarm = await chrome.alarms.get('crowd_tick');
-    if (alarm?.periodInMinutes !== .5 || !Number.isFinite(alarm.scheduledTime) || Math.abs(alarm.scheduledTime - at) > 1000)
+    // Early page events must not postpone an already scheduled deadline.
+    if (alarm?.periodInMinutes !== .5 || !Number.isFinite(alarm.scheduledTime) || alarm.scheduledTime < now || alarm.scheduledTime > at + 1000)
       await chrome.alarms.create('crowd_tick', {when: at, periodInMinutes: .5});
   },
   cancel: () => chrome.alarms.clear('crowd_tick'),
@@ -358,7 +368,7 @@ async function reportDiagnostics() {
         let snapshot = null;
         if (settings.enabled) {
           const s = await agent.read(), id = await storage.get('work_tab');
-          let tab = null, page = null, tabStatus = 'missing', probeStatus = 'unknown', navDocument = {document_kind:'unavailable',pending_kind:'none'};
+          let tab = null, page = null, tabStatus = 'missing', probeStatus = 'unknown', probeError = 'unknown', navDocument = {document_kind:'unavailable',pending_kind:'none'};
           try {
             if (id) {
               tab = await chrome.tabs.get(id);
@@ -368,6 +378,7 @@ async function reportDiagnostics() {
                 // A disconnected content script is recorded, never fixed by bypassing policy.
                 const result = await probeTab(id, 'diagnostics');
                 probeStatus = result.status;
+                probeError = result.error;
                 page = result.response?.page || null;
                 if (!page && tabStatus === 'complete') tabStatus = 'no_content';
               }
@@ -388,7 +399,7 @@ async function reportDiagnostics() {
             prev_nav_stage: previous?.stage || 'unknown', prev_nav_error: previous?.error || null, prev_nav_age_s: age(previous?.at),
             page_failures: number(s.page_failures, 3), last_tick_age_s: age(s.last_tick),
             next_in_s: Math.min(86400, Math.max(0, Math.ceil(((s.next_at || 0) - Date.now()) / 1000))),
-            probe_status: probeStatus,
+            probe_status: probeStatus, probe_error: probeError,
             phase: oneOf(s.phase, ['idle','search','search_done','note','reopen_note','enrich'], 'idle'),
             error: s.last_error ? oneOf(s.last_error, diagnosticErrors, 'unexpected_error') : null,
             task_id: Number.isSafeInteger(s.task?.id) ? s.task.id : null,
