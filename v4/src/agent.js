@@ -184,6 +184,9 @@
           // Persist before navigation: a worker restart after tabs.update must
           // resume probing instead of opening/charging the same search again.
           await this.save(s); alive();
+          // The pre-admission heartbeat can precede this new deadline. Re-arm
+          // once so a slow guard does not cost another full alarm interval.
+          await this.r.schedule(s.next_at, true); alive();
           await this.r.open(platform.searchURL(s.task.query)); alive();
         } else if (s.phase === 'search') {
           const page = await this.r.probe('search'); alive();
