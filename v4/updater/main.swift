@@ -6,7 +6,7 @@ import Darwin
 let fm = FileManager.default
 let extensionID = "licijehcpohikchlnkbpjdjdfkcocndg"
 let hostName = "com.crowd.v4.updater"
-let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel.json"
+let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-kol.json"
 let origin = "chrome-extension://\(extensionID)/"
 struct Failure: Error { let code: String; init(_ code: String) { self.code = code } }
 func require(_ value: Bool, _ code: String) throws { if !value { throw Failure(code) } }

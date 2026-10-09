@@ -10,9 +10,9 @@ try{
    globalThis.chrome={runtime:{sendMessage:async m=>{
     calls.push(m);
     if(m.type==='state')return {ok:true,data:{session:true,agent:{enabled:false,outbox:[],rejected:[],phase:'idle'},status:{participant:{status:'approved'}},updater:{enabled:true,state:'ready'},diagnostics:{}}};
-    if(m.type==='kol_state')return {ok:true,data:{local:{enabled:false,phase:'idle',outbox:2,rejected:1},remote:{targets,tasks:[],contents:[{platform:'bilibili',content_id:'BV1xx411c7mD',url:'https://www.bilibili.com/video/BV1xx411c7mD',title:'<img src=x onerror=alert(1)>',body:'测试原文 undefined new Set([])',metrics:{like_count:null},version:1}],capabilities:{include_replies:true}}}};
+    if(m.type==='kol_state')return {ok:true,data:{local:{enabled:false,phase:'idle',outbox:2,rejected:1},remote:{targets,tasks:[{id:'recover-task',released_at:'2026-10-09T00:00:00Z',state:'running'}],contents:[{platform:'bilibili',content_id:'BV1xx411c7mD',url:'https://www.bilibili.com/video/BV1xx411c7mD',title:'<img src=x onerror=alert(1)>',body:'测试原文 undefined new Set([])',metrics:{like_count:null},version:1}],capabilities:{include_replies:true}}}};
     if(m.type==='kol_upsert'){targets.push({id:'fixture-target',target_id:'123',target_kind:'creator',url:'https://space.bilibili.com/123',label:m.payload.label,group:m.payload.group,platform:'bilibili',status:'active'});return {ok:true,data:{target:targets.at(-1)}};}
-    if(m.type==='kol_rpc')return {ok:true,data:{versions:[{version:1}],snapshots:[],comments:[]}};
+    if(m.type==='kol_rpc')return {ok:true,data:{versions:[{version:1,record:{extra:{media_refs:[{url:'https://i0.hdslb.com/public.jpg',kind:'image'},{url:'https://i0.hdslb.com/signed.jpg?token=fixture',kind:'image'}]}}}],snapshots:[],comments:[]}};
     return {ok:true,data:{}};
    }}};
  });
@@ -27,6 +27,10 @@ try{
  await page.waitForFunction(()=>document.querySelector('#kol_preview').textContent.includes('重复'));
  assert.equal(await page.locator('#kol_preview p').count(),2);
  await page.locator('#kol_import').click();const calls=await page.evaluate(()=>testCalls);assert.equal(calls.filter(x=>x.type==='kol_upsert').length,2,'only valid preview rows submitted');
+ await page.getByRole('button',{name:'停止并安全释放给另一设备',exact:true}).click();await page.locator('#kol_tasks').locator('xpath=ancestor::details[1]').locator('summary').first().click();await page.getByRole('button',{name:'从检查点恢复到本设备',exact:true}).click();await page.getByRole('button',{name:'重试待回传（最多3次）',exact:true}).click();
+ const recoveryCalls=await page.evaluate(()=>testCalls);assert.ok(recoveryCalls.some(x=>x.type==='kol_release'));assert.ok(recoveryCalls.some(x=>x.type==='kol_recover'&&x.task==='recover-task'));assert.ok(recoveryCalls.some(x=>x.type==='kol_retry_delivery'));
+ page.on('dialog',dialog=>dialog.accept(dialog.type()==='prompt'?'fixture-authorization':undefined));
+ const downloadPromise=page.waitForEvent('download');await page.getByRole('button',{name:'导出授权媒体任务',exact:true}).click();const download=await downloadPromise;const manifest=JSON.parse(fs.readFileSync(await download.path(),'utf8'));assert.equal(manifest.authorization_ref,'fixture-authorization');assert.equal(manifest.assets.length,1);assert.equal(manifest.assets[0].url,'https://i0.hdslb.com/public.jpg');
  assert.deepEqual(failures,[]);
  if(process.env.CROWD_UI_SCREENSHOT)await page.locator('#kol_section').screenshot({path:process.env.CROWD_UI_SCREENSHOT});
  console.log('PASS controller in Chromium: save/start, 2-attempt config, CSV duplicate preview/import, numeric queues, source HTML inert');

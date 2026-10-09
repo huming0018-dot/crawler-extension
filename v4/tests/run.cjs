@@ -2,7 +2,7 @@
 const {spawnSync}=require('node:child_process');
 const path=require('node:path');
 const root=path.resolve(__dirname,'../..');
-const tests=['check.cjs','auth.cjs','safety.cjs','recovery.cjs','scheduling.cjs','timing.cjs','observations.cjs','worker.cjs','navigation-state.cjs','navigation-failure.cjs','update-trace.cjs','native.cjs','parity.cjs','kol.cjs'];
+const tests=['check.cjs','auth.cjs','safety.cjs','recovery.cjs','scheduling.cjs','timing.cjs','observations.cjs','worker.cjs','navigation-state.cjs','navigation-failure.cjs','update-trace.cjs','native.cjs','parity.cjs','kol.cjs','kol-ui.cjs','kol-diagnostics.cjs'];
 if(process.env.CROWD_TEST_TOOLS&&process.env.CROWD_MIGRATIONS_DIR)tests.push('browser.mjs');
 if(process.env.CROWD_TEST_TOOLS)tests.push('loading.mjs');
 for(const test of tests){const result=spawnSync(process.execPath,['v4/tests/'+test],{cwd:root,env:process.env,stdio:'inherit'});if(result.error)throw result.error;if(result.status!==0)process.exit(result.status||1);}

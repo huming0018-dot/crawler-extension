@@ -54,5 +54,24 @@
     const keys=[...new Set(rows.flatMap(r=>Object.keys(r)))];
     return '\uFEFF'+[keys.map(esc).join(','),...rows.map(r=>keys.map(k=>esc(r[k])).join(','))].join('\r\n');
   }
-  root.CrowdKOLUI={target,csv,csvExport};
+  function qualitySummary(rows){
+    rows=Array.isArray(rows)?rows:[];
+    const keys=['title','body','creator_id','published_at','like_count','collect_count','comment_count','view_count','share_count','danmaku_count'];
+    const summarize=items=>Object.fromEntries(keys.map(key=>{
+      const values=items.map(item=>({value:item[key]??item.metrics?.[key],status:(item.field_observations||item.metrics?.observations)?.[key]?.status}));
+      const available=values.filter(x=>x.value!=null&&(typeof x.value!=='string'||x.value.trim().length>0)).length;
+      return [key,{available,missing:items.length-available,rate:items.length?available/items.length:null,approximate:values.filter(x=>x.status==='approximate').length}];
+    }));
+    const platforms=Object.create(null);for(const item of rows){const p=item.platform||'unknown';(platforms[p]??=[]).push(item);}
+    const sampling={requested_contents:0,observed_comments:0,observed_replies:0,source_reported_contents:0,source_reported_comments:0,source_reported_approximate_contents:0,source_coverage:'unknown'};
+    for(const item of rows){const comments=item.comments;if(!comments)continue;
+      if(comments.status==='not_requested')continue;
+      const items=Array.isArray(comments)?comments:Array.isArray(comments.items)?comments.items:[];
+      sampling.requested_contents++;sampling.observed_comments+=items.length;sampling.observed_replies+=items.filter(x=>x.is_reply||x.parent_key).length;
+      const reported=item.metrics?.comment_count;if(Number.isFinite(reported)&&reported>=0){sampling.source_reported_contents++;sampling.source_reported_comments+=reported;if(item.metrics?.observations?.comment_count?.status==='approximate')sampling.source_reported_approximate_contents++;}
+    }
+    return {schema_version:1,scope:'exported_contents_only',total:rows.length,fields:summarize(rows),by_platform:Object.fromEntries(Object.entries(platforms).map(([p,items])=>[p,{total:items.length,fields:summarize(items)}])),comment_sampling:sampling,
+      caveats:['只统计当前导出记录，不代表账号、平台或全部历史内容。','字段可用率不等于准确率；不适用字段也可能为空，请按平台查看。','评论为已加载样本；源站报告可能近似且包含回复，不能由两者比值推断召回率。','目标由用户选择，可能存在选择、时间窗口和可见性偏差；没有总体基准，未估计统计偏差量。']};
+  }
+  root.CrowdKOLUI={target,csv,csvExport,qualitySummary};
 })(globalThis);

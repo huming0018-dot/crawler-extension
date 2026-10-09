@@ -10,3 +10,8 @@ assert.throws(()=>u.csv('url,cookie\nhttps://space.bilibili.com/123,secret'));
 assert.throws(()=>u.csv('url\n"not closed'));
 assert.ok(u.csvExport([{title:'=1+2',body:'a"b'}]).includes('"\'=1+2"'));assert.ok(u.csvExport([{body:'a"b'}]).includes('"a""b"'));
 console.log('PASS KOL UI URL/CSV preview, credential-column rejection, duplicate/error rows, spreadsheet formula protection');
+const summary=u.qualitySummary([{platform:'xiaohongshu',title:'',body:'text',creator_id:'author',metrics:{like_count:0,comment_count:12000,observations:{comment_count:{status:'approximate'}}},comments:{items:[{text:'a'},{text:'b',is_reply:true}]}},{platform:'bilibili',title:'video',body:null,metrics:{view_count:0},comments:{status:'not_requested'}}]);
+assert.equal(summary.total,2);assert.equal(summary.fields.title.rate,.5);assert.equal(summary.fields.like_count.available,1);assert.equal(summary.fields.like_count.missing,1);assert.equal(summary.by_platform.bilibili.fields.view_count.available,1);
+assert.equal(summary.comment_sampling.requested_contents,1);assert.equal(summary.comment_sampling.observed_comments,2);assert.equal(summary.comment_sampling.source_reported_approximate_contents,1);assert.equal(summary.comment_sampling.source_coverage,'unknown');assert.equal(u.qualitySummary([]).fields.body.rate,null);
+assert.equal(JSON.stringify(summary).includes('author'),false);assert.equal(JSON.stringify(summary).includes('text'),false);
+console.log('PASS export quality summary: zero vs missing, per-platform denominator, sample-only scope, no inferred recall or source text');

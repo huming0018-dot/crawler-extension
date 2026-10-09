@@ -21,7 +21,7 @@ async function navigationDocument(id, tab) {
   const kind = value => {
     if (!value) return 'unavailable';
     if (value === 'about:blank') return 'blank';
-    try { const u = new URL(value); return u.protocol === 'https:' && ['www.xiaohongshu.com','m.xiaohongshu.com'].includes(u.hostname) ? 'platform' : 'other'; }
+    try { const u = new URL(value); return u.protocol === 'https:' && ['www.xiaohongshu.com','m.xiaohongshu.com','www.bilibili.com','space.bilibili.com'].includes(u.hostname) ? 'platform' : 'other'; }
     catch (_) { return 'other'; }
   };
   let current = tab?.url, timer;
@@ -212,8 +212,9 @@ async function releaseLegacyTask(){
 const trace = new CrowdTrace({storage,settings:diagnosticSettings,uuid:()=>crypto.randomUUID()});
 const originalRPC=api.rpc.bind(api);
 api.rpc=async(name,params={},...rest)=>{
-  const admission=name==='guard' && ['search','detail','comment','scroll'].includes(params.p_action);
-  const submit=['submit','observe','rating'].includes(name),options=submit?{id:params.p_request}:{};
+  const kolAction=name==='kol'?params.p_action:null;
+  const admission=name==='guard' && ['search','detail','comment','scroll'].includes(params.p_action)||kolAction==='guard';
+  const submit=['submit','observe','rating'].includes(name)||kolAction==='submit',options=submit?{id:kolAction?params.p_payload?.request:params.p_request}:{};
   if(admission)await trace.event('admission_requested',{start:true});
   if(submit)await trace.event('submit_requested',options);
   try {const result=await originalRPC(name,params,...rest);
@@ -252,7 +253,7 @@ for (const [event, stage] of Object.entries({onBeforeNavigate:'started',onCommit
       if (ownership) { try { await ownership; } catch (_) { return; } }
       const settings = await diagnosticSettings();
       if (!settings.enabled || details.tabId !== await storage.get('work_tab')) return;
-      try { const u = new URL(details.url); if (u.protocol !== 'https:' || !['www.xiaohongshu.com','m.xiaohongshu.com'].includes(u.hostname)) return; } catch (_) { return; }
+      try { const u = new URL(details.url); if (u.protocol !== 'https:' || !['www.xiaohongshu.com','m.xiaohongshu.com','www.bilibili.com','space.bilibili.com'].includes(u.hostname)) return; } catch (_) { return; }
       const code = String(details.error || '').replace(/^net::/, '');
       const key = diagnosticKey(settings.id, 'navigation'), previous = await storage.get(key);
       if (!Number.isFinite(details.timeStamp) || (previous?.at > details.timeStamp)) return;
@@ -262,7 +263,19 @@ for (const [event, stage] of Object.entries({onBeforeNavigate:'started',onCommit
       await storage.set(key, {stage, error: stage === 'failed' ? (navigationErrors.includes(code) ? code : 'OTHER') : null,
         at: details.timeStamp, revision: settings.revision, tab: details.tabId});
     }).catch(console.error);
-  }, {url: [{schemes:['https'],hostEquals:'www.xiaohongshu.com'}, {schemes:['https'],hostEquals:'m.xiaohongshu.com'}]});
+  }, {url: ['www.xiaohongshu.com','m.xiaohongshu.com','www.bilibili.com','space.bilibili.com'].map(hostEquals=>({schemes:['https'],hostEquals}))});
+}
+// Fixed fields only. Never serialize an agent state, candidate URL or outbox record.
+function kolDiagnosticState(s) {
+  const count=n=>Number.isSafeInteger(n)&&n>=0?Math.min(n,99999):0;
+  const phases=['idle','open','discover','next','detail','comments','comment_read','finish','resume_detail','resume_listing','discovery_scroll'];
+  const errors=[...diagnosticErrors,'source_outcome_unknown','executor_busy','executor_released','delivery_retry_exhausted','identity_verification_required','platform_session_changed','checkpoint_conflict','old_outbox_pending','unknown_source_outcome','delivery_retry_limit','platform_identity_changed','old_executor_required','checkpoint_gap','lease_expired','unknown_delivery_history','checkpoint_regression','invalid_checkpoint','legacy_executor_required','explicit_recovery_required','lease_expired_requires_release','recovery_not_supported','outbox_not_drained','pending_identity_delivery','comment_page_budget','content_already_received','source_not_found','source_private','source_deleted','parser_paused','invalid_overlap_window','incomplete_window_outside_authorization','scan_window_blocked'];
+  return {enabled:s.enabled===true,phase:phases.includes(s.phase)?s.phase:'idle',
+    error:s.last_error?(errors.includes(s.last_error)?s.last_error:'unexpected_error'):null,
+    platform:['xiaohongshu','bilibili'].includes(s.task?.platform)?s.task.platform:null,
+    queued:count(s.outbox?.length),rejected:count(s.rejected?.length),received:count(s.received),attempts:count(s.attempts),
+    checkpoint_revision:count(s.checkpoint_revision),delivery_paused:s.delivery_enabled===false&&s.outbox?.length>0,
+    next_in_s:Math.min(86400,Math.max(0,Math.ceil(((Number.isFinite(s.next_at)?s.next_at:0)-Date.now())/1000)))};
 }
 async function diagnosticSettings() {
   const session = await storage.get('session');
@@ -317,7 +330,7 @@ async function reportDiagnostics() {
           const savedPrevious = await storage.get(diagnosticKey(settings.id, 'previous_navigation'));
           const previous = savedPrevious?.revision === settings.revision ? savedPrevious : null;
           const age = at => Number.isFinite(at) ? Math.min(86400, Math.max(0, Math.floor((Date.now() - at) / 1000))) : null;
-          snapshot = {version: CrowdCore.VERSION, enabled: s.enabled === true,
+          snapshot = {version: CrowdCore.VERSION, enabled: s.enabled === true,kol:kolDiagnosticState(await kol.read()),
             trace:await trace.snapshot(),update_state:(await updater.status()).state||'unknown',
             document_kind:navDocument.document_kind, pending_kind:navDocument.pending_kind,
             nav_stage: navigation?.stage || 'unknown', nav_error: navigation?.error || null,
@@ -380,8 +393,12 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         const result=message.action==='upsert'?await kolUpsert(message.payload):await kol.rpc(message.action,message.payload||{});
         return result;
       }
-      case 'kol_state': {const s=await kol.read();return {local:{enabled:s.enabled,delivery_enabled:s.delivery_enabled,phase:s.phase,last_error:s.last_error,received:s.received,attempts:s.attempts,next_at:s.next_at,outbox:s.outbox.length,rejected:s.rejected.length,coverage:s.coverage||null,principal_bound:!!s.task?.principal_ref},remote:await kol.rpc('list')};}
+      case 'kol_state': {const s=await kol.read();return {local:{enabled:s.enabled,delivery_enabled:s.delivery_enabled,phase:s.phase,last_error:s.last_error,received:s.received,attempts:s.attempts,next_at:s.next_at,outbox:s.outbox.length,rejected:s.rejected.length,coverage:s.coverage||null,principal_bound:!!s.task?.principal_ref,parser_paused:Object.keys(s.parser_failures||{}).filter(platform=>s.parser_failures[platform]?.paused)},remote:await kol.rpc('list')};}
       case 'kol_upsert': return kolUpsert(message.payload);
+      case 'kol_release': return kol.release();
+      case 'kol_recover': return kol.recover(message.task);
+      case 'kol_retry_delivery': return kol.retryDelivery();
+      case 'kol_resume_parser': return kol.resumeParser(message.platform);
       case 'kol_start': {
         const generation=kol.generation;
         await releaseLegacyTask();

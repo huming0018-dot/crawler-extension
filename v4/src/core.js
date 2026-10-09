@@ -1,7 +1,7 @@
 /* One contract for desktop and native containers. No page receives credentials. */
 (function (root) {
   'use strict';
-  const VERSION = '4.2.4', CONSENT = 'crowd-public-v4';
+  const VERSION = '4.2.5', CONSENT = 'crowd-public-v4';
   const HOST = 'https://www.xiaohongshu.com';
   const publicOrigin = u => u.protocol === 'https:' && ['www.xiaohongshu.com', 'm.xiaohongshu.com'].includes(u.hostname) && !u.username && !u.password && !u.port;
   function noteURL(value) {
