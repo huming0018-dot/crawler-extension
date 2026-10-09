@@ -12,7 +12,33 @@
 <section id="diagnostics_section"><label><input id="diagnostics" type="checkbox">发送运行诊断，帮助排查故障（可随时关闭）</label><p>只发送阶段、错误码、队列数量和页面加载状态、主页面网络错误码和元素数量，不发送账号密码、Cookie、完整网址、截图或网页正文。增加最近24个动作节点、随机关联编号及时间，帮助串起导航与回传；本机最多保留24小时，云端只保留最近一份状态；关闭或退出时尝试清除。离线时须同一参与身份下次联网重试，退出后不再发送。</p><p id="diagnostics_status" role="status"></p><button id="inspect_work_page">查看采集页面</button></section>
 <section id="updater_section"><label><input id="auto_update" type="checkbox">自动安装已验证的插件更新</label><p>需要在原设备接通一次更新助手。以后保留身份和待回传记录，只重载本插件，不关闭浏览器。可随时关闭。</p><p id="updater_status" role="status"></p><button id="update_check">检查更新</button></section>
 <p id="message" role="status" aria-live="polite"></p><details><summary>查看进度与高级账户选项</summary><dl id="status"></dl><button id="refresh">刷新状态</button><button id="logout">退出参与身份</button><button id="export">导出未回传证据</button><form id="login"><label>已有中台账户邮箱<input id="email" type="email" autocomplete="username" required></label><label>密码<input id="password" type="password" autocomplete="current-password" minlength="8" required></label><button>登录</button><button type="button" id="signup">注册</button></form></details>
+<section id="kol_section" aria-labelledby="kol_heading">
+<h2 id="kol_heading">指定 KOL · 持续观察</h2>
+<p>明确名单替代关注动态。支持小红书、B站公开主页或指定内容；只采当前账号可访问的页面。观察记录独立保存，不计众包奖励。</p>
+<p id="kol_message" role="status" aria-live="polite"></p>
+<form id="kol_add"><label>主页或内容链接<input id="kol_url" type="url" required placeholder="https://www.xiaohongshu.com/user/profile/…"></label><label>显示名称<input id="kol_label" maxlength="100"></label><label>分组<input id="kol_group" maxlength="100"></label><button type="submit">保存目标</button></form>
+<details><summary>批量导入名单 CSV</summary><p>列名：platform、profile_url、display_name、group。平台为xiaohongshu或bilibili；不允许Cookie或密码。先预览，再保存有效条目。</p><input id="kol_csv" aria-label="CSV文件" type="file" accept=".csv,text/csv"><div id="kol_preview"></div><button id="kol_import" disabled>保存预览中的有效目标</button></details>
+<fieldset><legend>下一次任务设置</legend>
+<label>模式<select id="kol_mode"><option value="manual">一次采集</option><option value="periodic">持续更新（插件在线时执行）</option><option value="history">有界历史回填</option></select></label>
+<label>时间窗（天）<input id="kol_window" type="number" min="1" max="365" value="30"></label>
+<label>详情尝试上限<input id="kol_limit" type="number" min="1" max="10" value="2"></label>
+<p>默认最多2次详情尝试，失败也消耗次数；不保证得到2条有效内容。已有平台配额与冷却继续适用。</p>
+<label>每篇评论样本上限<input id="kol_comments" type="number" min="0" max="20" value="0"></label>
+<label>评论层级<select id="kol_depth"><option value="1">只采一级评论</option><option value="2">包含当前可见二级回复</option></select></label>
+<label>更新间隔（分钟）<input id="kol_interval" type="number" min="60" max="10080" value="720"></label>
+<p>媒体默认只存引用，不下载。OCR采用本机授权图片后处理；字幕/转录和作者授权汇总画像可单独导入，独立本机转录需要中文离线模型及系统授权，不从评论样本推断全部粉丝。</p>
+</fieldset>
+<label>平台账号<select id="kol_account_platform"><option value="xiaohongshu">小红书</option><option value="bilibili">B站</option></select></label><button id="kol_open_session">打开平台账号页 / 正常登录</button>
+<nav><button id="kol_refresh">刷新观察状态</button><button id="kol_stop">停止新采集</button><button id="kol_continue">继续已有任务</button><button id="kol_session">核对登录身份并确认切换</button></nav>
+<p>切换前先停止并在平台完成登录。核对会读取当前页面全局账号导航，不读Cookie；取得明确身份后才确认切换。新任务使用新的会话代数，已采记录按原来源回传，不清空配额。</p>
+<dl id="kol_status"></dl><div id="kol_targets"></div>
+<details><summary>最近任务与覆盖范围</summary><div id="kol_tasks"></div></details>
+<h3>已收到的内容</h3><label>排序<select id="kol_sort"><option value="observed">最近采集</option><option value="published">源发布时间</option></select></label>
+<p>主页列表只代表已观察范围；置顶、乱序、私密内容与预算截断可能造成缺口。</p><div id="kol_contents"></div>
+<details><summary>导入获授权的 OCR / 字幕转录 / 汇总画像</summary><p>使用随发布包附带的本机后处理工具生成JSON。OCR保留原文字块和位置，不能把菜品单价当人均。字幕文件导入和本机语音转录分开；后者需设备支持及系统授权。画像只接收创作者授权的汇总数据，不接受个人名单。</p><input id="kol_evidence_file" type="file" accept=".json,application/json" aria-label="授权派生证据JSON"><pre id="kol_evidence_preview"></pre><label><input id="kol_evidence_agree" type="checkbox">我确认有权处理这些文件，授权引用和所声明来源准确；系统尚未独立核实授权。</label><button id="kol_evidence_import" disabled>确认导入派生证据</button></details>
+<nav><button id="kol_export_json">导出脱敏 JSON</button><button id="kol_export_csv">导出汇总 CSV</button></nav>
+</section>
 <details id="task_progress" hidden><summary>各任务进度</summary><ul id="task_list"></ul></details>
 <details id="ratings_section" hidden><summary>给已采集门店打分（可选）</summary><p>只填写你本人的用餐评价，1–5星并说明理由（至少8个字）。每个任务可提交一次，关联一篇已收到的笔记。评分和笔记核验、采集奖励分别记录。</p><div id="ratings_list"></div></details>
 <p>桌面浏览器保持运行即可在后台工作标签页采集，参与页面可关闭、窗口可最小化。Mac 睡眠时暂停，唤醒或浏览器重启后自动续做尚未停止的任务；重启或长时间挂起后重新计时，配额与冷却照常保留。手动停止、验证码或限流暂停后，需要本人点击继续。手机后台批次仍由系统安排。不会自动破解验证。</p>
-</main><script src="config.js"></script><script src="core.js"></script><script src="api.js"></script><script src="agent.js"></script><script src="join.js"></script><script src="native-runtime.js"></script><script src="controller.js"></script></body></html>
+</main><script src="config.js"></script><script src="core.js"></script><script src="api.js"></script><script src="agent.js"></script><script src="join.js"></script><script src="native-runtime.js"></script><script src="controller.js"></script><script src="kol-ui.js"></script><script src="kol-controller.js"></script></body></html>

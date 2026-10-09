@@ -13,7 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 FILES = ['manifest.json', 'icons/icon128.png'] + ['src/'+name for name in (
     'core.js','api.js','agent.js','background.js','content.js','config.js','join.js',
-    'controller.js','controller.html','controller.css','native-runtime.js','updater.js','trace.js')]
+    'controller.js','controller.html','controller.css','native-runtime.js','updater.js','trace.js','kol.js','kol-content.js','kol-ui.js','kol-controller.js')]
 
 
 def build(output):
@@ -41,7 +41,7 @@ def build(output):
     files[entry]=("try { importScripts('background.js'); } catch (_) { chrome.runtime.sendNativeMessage('com.crowd.v4.updater', {action:'rollback',version:'"+version+"'}).then(r=>{if(r.status==='rolled_back')chrome.runtime.reload();}).catch(()=>{}); }\n").encode()
     manifest['background']={'service_worker':entry}
     manifest.pop('browser_specific_settings',None)
-    manifest['host_permissions']=['https://www.xiaohongshu.com/*','https://m.xiaohongshu.com/*',conf['url']+'/*',conf['portal']+'/*']
+    manifest['host_permissions']=['https://www.xiaohongshu.com/*','https://m.xiaohongshu.com/*','https://space.bilibili.com/*','https://www.bilibili.com/*',conf['url']+'/*',conf['portal']+'/*']
     manifest['externally_connectable']={'matches':[conf['portal']+'/*']}
     files['manifest.json']=(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n').encode()
     files['src/config.js']=('globalThis.CROWD_CONFIG = '+json.dumps(conf)+';\n').encode()

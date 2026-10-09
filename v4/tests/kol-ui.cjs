@@ -1,0 +1,12 @@
+'use strict';
+const assert=require('node:assert/strict');require('../src/kol-ui.js');const u=globalThis.CrowdKOLUI;
+assert.equal(u.target('https://www.xiaohongshu.com/explore/abcdef0123456789abcdef01?xsec_token=local#frag').canonical_url,'https://www.xiaohongshu.com/explore/abcdef0123456789abcdef01');
+assert.equal(u.target('https://space.bilibili.com/123/video').id,'123');
+assert.equal(u.target('https://www.bilibili.com/video/BV1xx411c7mD').platform,'bilibili');
+for(const v of ['http://space.bilibili.com/123','https://space.bilibili.com.evil/123','https://x@space.bilibili.com/123','https://www.bilibili.com/video/av123'])assert.throws(()=>u.target(v));
+const rows=u.csv('platform,profile_url,display_name,group\r\nbilibili,https://space.bilibili.com/123,"a,b",g\r\nbilibili,https://space.bilibili.com/123,a,g\r\nxhs,https://space.bilibili.com/124,a,g');
+assert.deepEqual(rows.map(r=>r.status),['valid','duplicate','invalid']);assert.equal(rows[0].display_name,'a,b');
+assert.throws(()=>u.csv('url,cookie\nhttps://space.bilibili.com/123,secret'));
+assert.throws(()=>u.csv('url\n"not closed'));
+assert.ok(u.csvExport([{title:'=1+2',body:'a"b'}]).includes('"\'=1+2"'));assert.ok(u.csvExport([{body:'a"b'}]).includes('"a""b"'));
+console.log('PASS KOL UI URL/CSV preview, credential-column rejection, duplicate/error rows, spreadsheet formula protection');

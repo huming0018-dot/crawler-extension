@@ -1,5 +1,5 @@
 /* Windows/macOS Chrome & Edge MV3. No automatic start on installation. */
-if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'join.js', 'updater.js', 'trace.js');
+if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'join.js', 'updater.js', 'trace.js', 'kol.js');
 const storage = CrowdCore.accountStorage({
   async get(key) { return (await chrome.storage.local.get(key))[key]; },
   async set(key, value) { await chrome.storage.local.set({[key]: value}); }
@@ -54,8 +54,9 @@ const runtime = {
     if (!await chrome.alarms.get('crowd_upload')) await chrome.alarms.create('crowd_upload', {periodInMinutes: 1});
   },
   cancelDelivery: () => chrome.alarms.clear('crowd_upload'),
-  async open(url) {
-    CrowdCore.navigationURL(url);
+  async open(url, kolMode = false) {
+    const validate = value => kolMode ? CrowdKOL.targetURL(value) : CrowdCore.navigationURL(value);
+    validate(url);
     await trace.event('open_requested');
     await clearNavigation(true);
     const id = await storage.get('work_tab');
@@ -65,7 +66,7 @@ const runtime = {
       // Persisted IDs can point at another tab after a browser restart.
       // A pending destination does not make an uncommitted blank document
       // reusable. A user retry must take the direct-create path as well.
-      CrowdCore.navigationURL(tab.url);
+      validate(tab.url);
       reusable = true;
     } catch (_) {} }
     // A failed mutation is not a stale tab: never issue a second navigation
@@ -108,12 +109,106 @@ const runtime = {
   async close() {
     const id = await storage.get('work_tab');
     if (id) {
-      try { const tab=await chrome.tabs.get(id); CrowdCore.navigationURL(tab.url); await chrome.tabs.remove(id); } catch (_) {}
+      try { const tab=await chrome.tabs.get(id); CrowdKOL.targetURL(tab.url); await chrome.tabs.remove(id); } catch (_) {
+        try { const tab=await chrome.tabs.get(id); CrowdCore.navigationURL(tab.url); await chrome.tabs.remove(id); } catch (_) {}
+      }
       await storage.set('work_tab', null);
     }
   }
 };
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
+const kol = new CrowdKOL.Agent({storage,now:Date.now,uuid:()=>crypto.randomUUID(),
+  verifyPrincipal:task=>verifyKOLPrincipal(task),
+  schedule:async()=>{if(!await chrome.alarms.get('crowd_kol'))await chrome.alarms.create('crowd_kol',{periodInMinutes:.5});},
+  cancel:()=>chrome.alarms.clear('crowd_kol'),open:url=>runtime.open(url,true),close:()=>runtime.close(),
+  async locator(task){
+    const owner=(await storage.get('session'))?.user?.id;
+    const saved=(await storage.get('kol-locators:'+owner))?.[task.target_ref],expected=CrowdKOL.targetURL(task.url);
+    if(saved){const actual=CrowdKOL.targetURL(saved);if(actual.url===expected.url)return actual.navigation;}
+    return expected.navigation;
+  },
+  async probe(input){
+    const id=await storage.get('work_tab');if(!id)return {ready:false,reason:'navigation_uncommitted'};
+    let timer;try{
+      const tab=await chrome.tabs.get(id);if(tab.url==='about:blank')return {ready:false,reason:'navigation_uncommitted'};
+      return await Promise.race([chrome.tabs.sendMessage(id,{type:'crowd_kol_probe',input}),new Promise(resolve=>{timer=setTimeout(()=>resolve({ready:false,reason:'probe_timeout'}),2000);})])||{ready:false};
+    }catch(_){return {ready:false,reason:'content_unavailable'};}finally{clearTimeout(timer);}
+  }
+},api);
+async function kolUpsert(payload){
+  const owner=await kol.owner();if(!owner)throw new Error('backend_login_required');
+  const parsed=CrowdKOL.targetURL(payload?.url);
+  const result=await kol.rpc('upsert',{...payload,url:parsed.url});
+  if(owner!==await kol.owner())throw new Error('cancelled');
+  if(!result?.target?.id||result.target.platform!==parsed.platform||result.target.target_id!==parsed.id)throw new Error('invalid_target');
+  const key='kol-locators:'+owner,locators=await storage.get(key)||{};
+  locators[result.target.id]=parsed.navigation;await storage.set(key,locators);return result;
+}
+async function kolSessionChanged(payload={}){
+  await kol.stop('session_changed',true,{keepPage:true});
+  while(kol.active)await kol.active.catch(()=>{});
+  const generation=kol.generation;kol.controller=new AbortController();const signal=kol.controller.signal;
+  kol.active=(async()=>{
+    const owner=await kol.owner();if(!owner)throw new Error('backend_login_required');
+    const alive=async()=>{if(signal.aborted||generation!==kol.generation||owner!==await kol.owner())throw new Error('cancelled');};
+    try{
+      if(!['xiaohongshu','bilibili'].includes(payload.platform))throw new Error('identity_verification_required');
+      const principal_ref=await readKOLPrincipal(payload.platform,owner,true);await alive();
+      const result=await kol.rpc('session_changed',{platform:payload.platform,principal_ref,verification:'rendered_account_navigation'},signal);await alive();
+      await storage.set('kol-principal:'+owner+':'+payload.platform,{principal_ref,verified_at:new Date().toISOString()});await alive();
+      const s=await kol.read(owner);await alive();s.task=null;s.phase='idle';s.candidates=[];s.current=null;s.current_id=null;
+      await kol.save(s,owner);await alive();
+      // Access locators may belong to the previous platform account. Evidence is unchanged.
+      await storage.set('kol-locators:'+owner,{});return result;
+    }catch(error){await alive();const s=await kol.read(owner);await alive();s.last_error=error.message;await kol.save(s,owner);throw error;}
+  })().finally(()=>{kol.active=null;});
+  return kol.active;
+}
+async function readKOLPrincipal(platform,owner,ownedOnly=false){
+  const work=ownedOnly?null:await storage.get('work_tab'),session=await storage.get('kol-session-tab:'+owner+':'+platform);
+  for(const id of [...new Set([work,session].filter(Boolean))]){
+    let page;try{page=await chrome.tabs.sendMessage(id,{type:'crowd_kol_probe',input:{action:'principal',platform}});}catch(_){continue;}
+    if(page?.gate)throw new Error(page.gate);
+    if(page?.platform===platform&&!page.ready)throw new Error('identity_verification_required');
+    if(!page?.ready||page.platform!==platform||page.verification!=='rendered_account_navigation')continue;
+    if(!(platform==='xiaohongshu'?/^[0-9a-f]{24}$/:/^\d{1,20}$/).test(page.principal_id||''))continue;
+    if(owner!==await kol.owner())throw new Error('cancelled');
+    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(owner+'\n'+platform+'\n'+page.principal_id));
+    return [...new Uint8Array(digest)].map(n=>n.toString(16).padStart(2,'0')).join('');
+  }
+  throw new Error('identity_verification_required');
+}
+async function verifyKOLPrincipal(task){
+  if(!task.principal_ref)return;
+  const owner=await kol.owner(),observed=await readKOLPrincipal(task.platform,owner);
+  if(observed!==task.principal_ref)throw new Error('platform_identity_changed');
+}
+async function openKOLSession(platform){
+  const url={xiaohongshu:'https://www.xiaohongshu.com',bilibili:'https://www.bilibili.com'}[platform];
+  if(!url)throw new Error('unsupported_platform');
+  await kol.stop('session_login',true);await agent.stop('session_login',{drain:true});
+  const owner=await kol.owner();if(!owner)throw new Error('backend_login_required');
+  const tab=await chrome.tabs.create({url,active:true});
+  await storage.set('kol-session-tab:'+owner+':'+platform,tab.id);return {};
+}
+async function releaseLegacyTask(){
+  await agent.stop('kol_collection',{drain:true,keepPage:true});
+  await agent.tick(false,true);
+  const owner=await kol.owner();
+  while(agent.active)await agent.active.catch(()=>{});
+  const generation=agent.generation;
+  agent.active=(async()=>{
+    const alive=async()=>{if(generation!==agent.generation||owner!==await kol.owner())throw new Error('cancelled');};
+    const s=await agent.read();await alive();
+    if(s.outbox.length)throw new Error('legacy_outbox_pending');
+    if(s.enrichment)throw new Error('legacy_enrichment_pending');
+    if(!s.task)return;
+    const result=await api.rpc('finish',{p_task:s.task.id,p_lease:s.task.lease_token});await alive();
+    if(!result||(result.error&&result.error!=='lease_lost')||(!result.error&&(!['open','complete','exhausted','closed'].includes(result.status)||!Number.isSafeInteger(result.received)||result.received<0)))throw new Error('legacy_handoff_failed');
+    s.task=null;s.phase='idle';s.candidates=[];s.note_url=null;s.note_id=null;await agent.save(s);
+  })().finally(()=>{agent.active=null;});
+  return agent.active;
+}
 const trace = new CrowdTrace({storage,settings:diagnosticSettings,uuid:()=>crypto.randomUUID()});
 const originalRPC=api.rpc.bind(api);
 api.rpc=async(name,params={},...rest)=>{
@@ -128,7 +223,7 @@ api.rpc=async(name,params={},...rest)=>{
   }catch(e){if(submit)await trace.event('submit_failed',options);throw e;}
 };
 let pendingCommands=0;
-const updater = new CrowdUpdater({chrome,storage,agent,isBusy:()=>pendingCommands>0,version:CrowdCore.VERSION,releaseHash:async()=>{
+const updater = new CrowdUpdater({chrome,storage,agent,isBusy:()=>pendingCommands>0||!!kol.active,version:CrowdCore.VERSION,releaseHash:async()=>{
   const data=await (await fetch(chrome.runtime.getURL('release.json'))).arrayBuffer();
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(b=>b.toString(16).padStart(2,'0')).join('');
 }});
@@ -268,7 +363,7 @@ async function setDiagnostics(enabled) {
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (sender.id !== chrome.runtime.id) return;
   if (message.type === 'page_ready') {
-    storage.get('work_tab').then(id => { if (id === sender.tab?.id) return agent.tick(); }).catch(console.error); return;
+    storage.get('work_tab').then(async id => { if (id === sender.tab?.id) {if((await kol.read()).enabled)return kol.tick();return agent.tick();} }).catch(console.error); return;
   }
   const allowed = [chrome.runtime.getURL('src/controller.html')];
   if (!allowed.includes(sender.url) || sender.tab?.url?.startsWith(CrowdCore.HOST)) return;
@@ -277,12 +372,36 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   (async () => {
     if (agent.maintenance && !['state','stop','export'].includes(message.type)) throw new Error('update_in_progress');
     switch (message.type) {
+      case 'kol_rpc': {
+        const allowed=['list','upsert','start','stop','resume','delete_target','delete_content','export','session_changed','detail','history','attach_evidence'];
+        if(!allowed.includes(message.action))throw new Error('unknown_command');
+        if(message.action==='session_changed')return kolSessionChanged(message.payload||{});
+        if(['stop','delete_target','session_changed'].includes(message.action))await kol.stop('user_stopped',true);
+        const result=message.action==='upsert'?await kolUpsert(message.payload):await kol.rpc(message.action,message.payload||{});
+        return result;
+      }
+      case 'kol_state': {const s=await kol.read();return {local:{enabled:s.enabled,delivery_enabled:s.delivery_enabled,phase:s.phase,last_error:s.last_error,received:s.received,attempts:s.attempts,next_at:s.next_at,outbox:s.outbox.length,rejected:s.rejected.length,coverage:s.coverage||null,principal_bound:!!s.task?.principal_ref},remote:await kol.rpc('list')};}
+      case 'kol_upsert': return kolUpsert(message.payload);
+      case 'kol_start': {
+        const generation=kol.generation;
+        await releaseLegacyTask();
+        if(generation!==kol.generation)throw new Error('cancelled');
+        await kol.start(message.payload||{target_id:message.target_id});return {};
+      }
+      case 'kol_stop': await kol.stop();if(message.target_id)await kol.rpc('stop',{target_id:message.target_id});return {};
+      case 'kol_open_session': return openKOLSession(message.platform);
+      case 'kol_session_changed': return kolSessionChanged({platform:message.platform||message.payload?.platform});
+      case 'kol_export': return kol.rpc('export',message.payload||{});
+      case 'kol_resume': return kol.rpc('resume',message.payload||{});
+      case 'kol_delete_target': await kol.stop();return kol.rpc('delete_target',message.payload||{});
+      case 'kol_delete_content': return kol.rpc('delete_content',message.payload||{});
       case 'update_settings': await updater.setEnabled(message.enabled); return {};
       case 'update_check': await updater.check(); return {};
       case 'state': { const settings = await diagnosticSettings(); return {updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message})), progress:await api.rpc('progress').catch(()=>null)}; }
       case 'rating': await agent.queueRating(message.proof, message.score, message.reason); agent.tick(false,true).catch(console.error); return {};
       case 'profiles': {
         if(typeof message.enabled !== 'boolean')throw new Error('invalid_request');
+        await kol.stop('preferences_changed',true);
         await agent.stop();
         const result=await api.rpc('observation_preferences',{p_profiles:message.enabled});
         const s=await agent.read();s.profiles=result.profiles===true;await agent.save(s);return {};
@@ -298,21 +417,22 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'receive_invite': await storage.set('pending_invite', CrowdJoin.invite(message.invite, CROWD_CONFIG.portal)); return {};
       case 'join': {
         if (message.consent !== CrowdCore.CONSENT) throw new Error('consent_required');
-        await agent.stop(); const generation = agent.generation;
+        await kol.stop('logged_out',false);await agent.stop(); const generation = agent.generation;
         await CrowdJoin.join(api, storage, await storage.get('pending_invite'));
         if (generation !== agent.generation) throw new Error('cancelled');
         const s = await agent.read(); s.consent = CrowdCore.CONSENT; await agent.save(s);
         if (generation !== agent.generation) throw new Error('cancelled');
         await agent.start(); return {};
       }
-      case 'login': await agent.stop(); return api.login(message.email, message.password, message.signup);
+      case 'login': await kol.stop('logged_out',false);await agent.stop(); return api.login(message.email, message.password, message.signup);
       case 'consent': {
-        await agent.stop(); await api.rpc('register', {p_consent: CrowdCore.CONSENT});
+        await kol.stop('consent_changed',false);await agent.stop(); await api.rpc('register', {p_consent: CrowdCore.CONSENT});
         const s = await agent.read(); s.consent = CrowdCore.CONSENT; await agent.save(s); return {};
       }
-      case 'start': await agent.start(); return {};
-      case 'stop': await agent.stop('user_stopped', {drain:true}); return {};
+      case 'start': await kol.stop('legacy_collection',true);await agent.start(); return {};
+      case 'stop': await kol.stop('user_stopped',true);await agent.stop('user_stopped', {drain:true}); return {};
       case 'logout': {
+        await kol.stop('logged_out',false);
         await agent.stop('logged_out');
         const settings = await diagnosticSettings();
         if (settings.enabled || settings.pending_clear) await setDiagnostics(false);
@@ -322,12 +442,12 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'open_login': {
         // Keep the actual challenge/note page. Opening help is a user action,
         // not evidence that either platform or backend authentication failed.
-        await agent.stop('user_login', {keepPage: true});
+        await kol.stop('user_login',true,{keepPage:true});await agent.stop('user_login', {keepPage: true});
         const id = await storage.get('work_tab');
         if (id) {
           try {
             const tab = await chrome.tabs.get(id), url = new URL(tab.pendingUrl || tab.url);
-            if (url.protocol === 'https:' && !url.username && !url.password && !url.port && ['www.xiaohongshu.com','m.xiaohongshu.com'].includes(url.hostname)) {
+            if (url.protocol === 'https:' && !url.username && !url.password && !url.port && ['www.xiaohongshu.com','m.xiaohongshu.com','www.bilibili.com','space.bilibili.com'].includes(url.hostname)) {
               await chrome.tabs.update(id, {active: true});
               await chrome.windows.update(tab.windowId, {focused: true}); return {};
             }
@@ -352,12 +472,13 @@ chrome.runtime.onMessageExternal?.addListener((message, sender, reply) => {
   } catch (_) { return; }
 });
 chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === 'crowd_kol'&&!agent.maintenance) kol.tick().catch(console.error);
   if (alarm.name === 'crowd_update') updater.check().catch(console.error);
   if (alarm.name === 'crowd_tick') agent.tick().catch(console.error);
   if (alarm.name === 'crowd_upload') agent.tick(false, true).catch(console.error);
   if (alarm.name === 'crowd_diagnostics') reportDiagnostics().catch(console.error);
 });
-chrome.runtime.onStartup.addListener(async () => { await agent.repairDelivery(); await agent.tick(true); await repairDiagnostics(); await reportDiagnostics(); });
+chrome.runtime.onStartup.addListener(async () => { await agent.repairDelivery(); await agent.tick(true); await kol.tick(); await repairDiagnostics(); await reportDiagnostics(); });
 chrome.runtime.onInstalled.addListener((details = {reason: 'install'}) => {
   (async () => {
     // Also hand off a trial when replacing an unjoined development copy.
@@ -374,4 +495,4 @@ chrome.tabs.onRemoved.addListener(id => {
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable
 // running state on every load; initial installation and user stops remain idle.
-updater.bootstrap().then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);
+updater.bootstrap().then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>kol.tick()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);
