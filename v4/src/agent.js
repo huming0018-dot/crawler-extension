@@ -228,13 +228,14 @@
       const inflight = (s.work_slots || []).filter(slot => slot.phase !== 'done' && !slot.base_received).length;
       return s.test_run.state === 'waiting' ? 0 : Math.max(0, Math.min(s.test_run.limit-s.test_run.attempts, this.testGoal(s)-s.test_run.accepted.length-inflight));
     }
-    async endTest(s, reason) {
+    async endTest(s, reason, {drain = true} = {}) {
       s.test_run.state=reason==='test_completed'?'complete':'stopped';
       s.test_run.reason=reason;s.test_run.ended_at=this.r.now();
-      s.enabled=false;s.delivery_enabled=true;s.last_error=reason;
+      s.enabled=false;s.delivery_enabled=drain;s.last_error=reason;
+      if(!drain)s.delivery_error=reason;
       await this.save(s);
       // Stop waits for the writer. Defer cleanup until tick releases that writer.
-      this.testStop={generation:this.generation,reason};
+      this.testStop={generation:this.generation,reason,drain,keepPage:!drain};
     }
     async start(test = false, {valid = async()=>true} = {}) {
       const stopIntent=this.stopIntent || 0,requested=valid;
@@ -267,7 +268,7 @@
         if(!await valid())throw Error('cancelled');
         return this.start(test,{valid});
       }
-      this.active = this.activate(generation,test,valid).finally(() => { this.active = null;const stop=this.testStop;this.testStop=null;if(stop?.generation===this.generation)this.stop(stop.reason,{drain:true}).catch(()=>{}); });
+      this.active = this.activate(generation,test,valid).finally(() => { this.active = null;const stop=this.testStop;this.testStop=null;if(stop?.generation===this.generation)this.stop(stop.reason,{drain:stop.drain!==false,keepPage:stop.keepPage===true}).catch(()=>{}); });
       return this.active;
     }
     async activate(generation, test = false, valid = async()=>true) {
@@ -406,7 +407,7 @@
       })().finally(() => {
         this.active = null;
         const stop=this.testStop;this.testStop=null;
-        if(stop?.generation===this.generation){this.stop(stop.reason,{drain:true}).catch(()=>{});return;}
+        if(stop?.generation===this.generation){this.stop(stop.reason,{drain:stop.drain!==false,keepPage:stop.keepPage===true}).catch(()=>{});return;}
         if(this.poolWake && !this.stopping){this.poolWake=false;this.tick().catch(()=>{});}
         if (this.readyPending?.generation === this.generation) {
           const pending = this.readyPending; this.readyPending = null;
@@ -430,9 +431,9 @@
           if (s.outbox.length) { continueDelivery=await this.flushOutbox(s, alive, signal); s.delivery_error = null; await this.save(s); }
         } catch (error) {
           alive();
-          const auth = error.status === 401 || error.status === 403;
-          s.delivery_error = auth ? 'backend_login_required' : error.message === 'review_local_rejections' ? error.message : 'backend_unavailable';
-          if (auth || error.message === 'review_local_rejections') { s.delivery_enabled = false; s.enabled = false; await this.r.cancel(); }
+          const auth = error.status === 401, permission = error.status === 403;
+          s.delivery_error = auth ? 'backend_login_required' : permission ? 'backend_permission_denied' : error.message === 'review_local_rejections' ? error.message : 'backend_unavailable';
+          if (auth || permission || error.message === 'review_local_rejections') { s.delivery_enabled = false; s.enabled = false; await this.r.cancel(); }
           if (s.outbox.length) {
             const item = s.outbox[0]; item.retries = (item.retries || 0) + 1;
             item.retry_at = this.r.now() + Math.min(900000, 60000 * 2 ** Math.min(item.retries - 1, 4));
@@ -747,7 +748,10 @@
         }
         if (err.message==='navigation_uncommitted') await this.r.trace?.('navigation_timeout');
         if (['sdk_unknown','test_expired','parallel_unavailable','pool_recovery_required','identity_verification_required','platform_identity_changed','navigation_failed', 'navigation_uncommitted', 'page_loading', 'page_timeout', 'content_unavailable', 'probe_timeout', 'captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections', 'unsupported_platform'].includes(err.message) || err.status === 401 || err.status === 403) {
-          if(s.test_run){await this.endTest(s,err.message);return;}
+          const backendError=err.status===401?'backend_login_required':err.status===403?'backend_permission_denied':null;
+          if(s.test_run){await this.endTest(s,backendError||err.message,{drain:!backendError});return;}
+          if(backendError)s.last_error=backendError;
+          if(err.status===401 || err.status===403){s.delivery_enabled=false;s.delivery_error=err.status===403?'backend_permission_denied':'backend_login_required';await this.r.cancelDelivery?.();}
           s.enabled = false; await this.save(s); await this.r.cancel(); return;
         }
         if (pageFailure || err.message === 'wrong_note') {
@@ -791,7 +795,7 @@
       const next=s.outbox[0];
       return this.r.fastDelivery===true && !this.maintenance && !this.stopping &&
         (s.enabled===true || s.delivery_enabled===true) && !!next && ['comments','structured'].includes(next.kind) &&
-        (next.retry_at||0)<=this.r.now() && !['backend_login_required','review_local_rejections'].includes(s.delivery_error);
+        (next.retry_at||0)<=this.r.now() && !['backend_login_required','backend_permission_denied','review_local_rejections'].includes(s.delivery_error);
     }
     captureScope(s) {
       if(this.r.localTest===true && s.owner_id==='7033ff0c-65d7-4963-b65c-a4ac9e31f03a' && s.test_run?.state==='active')return s.test_run.id;

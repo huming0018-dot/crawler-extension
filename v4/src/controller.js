@@ -13,7 +13,9 @@ Object.assign(errors, {
   parallel_unavailable:'当前安装渠道尚未通过并行采集升级检查，请使用单页采集。',
   pool_recovery_required:'并行工作页状态需要核对，已停止新访问，原记录保留。',
   user_login: '已暂停并打开小红书工作页；处理完成后，回到这里点击「继续采集」。',
-  backend_login_required: '中台参与身份已失效，无法领取或回传；原有进度保留。这不是小红书登录问题。',
+  backend_login_required: '中台参与会话需要恢复，采集与回传已暂停，原进度保留。请联系邀请人恢复原参与身份；不要重新报名或卸载插件。',
+  backend_permission_denied: '中台未允许此操作，采集与回传已暂停。原身份和进度保留，请联系邀请人检查参与权限。',
+  legacy_migration_required: '检测到旧版参与身份与未迁移进度，请保留原插件并联系邀请人接续。不要卸载或重新报名；本版本不会覆盖旧任务和待回传记录。',
   unrelated_note: '笔记正文/标题未匹配任务相关性要求（unrelated_note）',
   invalid_record: '记录字段未通过服务端校验（invalid_record）',
   invalid_published_date: '发布日期不符合格式（invalid_published_date）',
@@ -71,7 +73,7 @@ async function refresh() {
   $('welcome').textContent = errors[p.error] || errors[s.last_error] || (s.enabled ? (s.phase === 'idle' ? '自动任务已开启，正在等待下一步。' : '自动任务执行中，你可以随时停止。') : data.session ? '参与身份已就绪，可点击继续；无需再次报名。' : data.invited ? '邀请已接续，请确认是否参与。' : '请从邀请链接打开，无需注册中台账号。');
   $('start').hidden = !data.session;
   $('consent').textContent = data.session ? '同意并继续' : '同意并开始';
-  const fields = {'插件版本': CrowdCore.VERSION, '中台账户': p.error === 'backend_login_required' ? '登录已失效' : data.session ? '已登录' : '未登录', '参与状态': p.participant?.status || p.error || '尚未报名', '自动执行': s.enabled ? '已开启' : '已停止', '当前阶段': s.phase === 'idle' && s.task ? '准备执行任务' : labels[s.phase] || s.phase,
+  const fields = {'插件版本': CrowdCore.VERSION, '中台账户': p.error === 'backend_login_required' ? '需要恢复' : p.error === 'backend_permission_denied' ? '权限待核对' : data.session ? '已登录' : '未登录', '参与状态': p.participant?.status || p.error || '尚未报名', '自动执行': s.enabled ? '已开启' : '已停止', '当前阶段': s.phase === 'idle' && s.task ? '准备执行任务' : labels[s.phase] || s.phase,
     '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': s.outbox.length + ' / ' + s.rejected.length, '最近待处理原因': s.rejected.length ? (errors[s.rejected.at(-1).reason] || s.rejected.at(-1).reason) : '无', '最早下一步': !s.enabled ? '已停止，不会自动执行' : s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
   $('status').replaceChildren();
   fields['后台回传'] = s.delivery_error ? (errors[s.delivery_error] || s.delivery_error) : s.outbox.length && (s.enabled || s.delivery_enabled) ? '已有记录会继续回传' : '无待发送记录或已停止回传';

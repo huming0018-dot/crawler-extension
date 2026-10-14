@@ -11,7 +11,7 @@ import urllib.parse
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
-COMMON = ('core.js','api.js','agent.js','pool.js','work-tabs.js','content.js','config.js','join.js',
+COMMON = ('core.js','identity.js','api.js','agent.js','pool.js','work-tabs.js','content.js','config.js','join.js',
     'controller.css','native-runtime.js','updater.js','trace.js','structured.js','site-sdk.js',
     'passive.js','hybrid.js','main-observer.js')
 PROFILES = {

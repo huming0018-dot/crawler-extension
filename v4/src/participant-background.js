@@ -1,5 +1,5 @@
 /* Windows/macOS Chrome & Edge MV3. No automatic start on installation. */
-if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'pool.js', 'work-tabs.js', 'join.js', 'updater.js', 'participant-policy.js', 'trace.js', 'node-monitor.js');
+if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'identity.js', 'api.js', 'agent.js', 'pool.js', 'work-tabs.js', 'join.js', 'updater.js', 'participant-policy.js', 'trace.js', 'node-monitor.js');
 const storage = CrowdCore.accountStorage({
   async get(key) { return (await chrome.storage.local.get(key))[key]; },
   async set(key, value) { await chrome.storage.local.set({[key]: value}); }
@@ -110,8 +110,14 @@ const runtime = {
 const workTabs=new CrowdWorkTabs({chrome,storage,owner:async()=>(await storage.get('session'))?.user?.id,probe:probeTab,uuid:()=>crypto.randomUUID(),structuredAllowed:async()=>{const s=await agent.read();return s.enabled===true&&s.task?.structured_capture===true;},presentationAllowed:async()=>{const state=await agent.read();return !agent.pendingStop&&!agent.stopping&&!agent.stopActive&&!agent.maintenance&&state.enabled===true;}});
 async function workingTab(){if((await storage.get('session'))?.user?.id){const state=await agent.read(),owned=await workTabs.first((state.work_slots||[]).map(slot=>slot.id));return owned || null;}return null;}
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
+// Legacy 3.x has the same extension ID but a different identity/outbox protocol.
+// Detect once per worker, preserve every legacy key, and never enroll over it.
+const legacyInstallation = CrowdIdentity.legacy(storage);
+const tickAgent=agent.tick.bind(agent);
+agent.tick=async(...args)=>{if(await legacyInstallation)return;return tickAgent(...args);};
 const trace = new CrowdTrace({storage,settings:diagnosticSettings,uuid:()=>crypto.randomUUID()});
-const originalRPC=api.rpc.bind(api);
+const baseRPC=api.rpc.bind(api);
+const originalRPC=async(...args)=>{if(await legacyInstallation)throw Error('legacy_migration_required');return baseRPC(...args);};
 const nodeMonitor=new CrowdNodeMonitor({storage,api:{rpc:originalRPC},settings:diagnosticSettings,
   state:async()=>{const state=await agent.read();return {enabled:state.enabled===true,
     login_state:['login_required','backend_login_required'].includes(state.last_error)?'needs_login':
@@ -315,12 +321,13 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   const mutating=!['state','stop','export','update_check','update_settings'].includes(message.type);
   if(mutating)pendingCommands++;
   const operation=(async () => {
+    if (await legacyInstallation && message.type !== 'state') throw Error('legacy_migration_required');
     if (agent.maintenance && !['state','stop','export'].includes(message.type)) throw new Error('update_in_progress');
     switch (message.type) {
       case 'update_settings': await updater.setEnabled(message.enabled); return {};
       case 'update_check': {const result=await updater.check();if(result?.blocked)throw Error(result.blocked);return {};}
       case 'local_test_updates': if(message.enabled===false)await recovery.cancel();await localTests.settings(message.enabled);return {};
-      case 'state': { const settings = await diagnosticSettings(); return {node_monitor:await nodeMonitor.snapshot(),risk_confirmation:await risk.status(),recovery:localTests.allowed()&&(await localTests.status()).enabled===true?await api.rpc('recovery_check',{p_action:'status'}).catch(()=>null):null,local_test:localTests.allowed(),local_test_updates:await localTests.status(),parallel_requested:(await agent.preferences())?.parallelism,parallel_allowed:await runtime.poolAllowed(),updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message})), progress:await api.rpc('progress').catch(()=>null)}; }
+      case 'state': { const session=await storage.get('session'), legacy=await legacyInstallation; if(legacy)return {legacy_installation:true,session:!!session,invited:false,agent:CrowdCore.initial(),status:{error:'legacy_migration_required'},progress:null,diagnostics:{enabled:false},updater:{enabled:false,state:'legacy_hold'},local_test:false,local_test_updates:{enabled:false},risk_confirmation:{}}; const settings = await diagnosticSettings(); return {legacy_installation:legacy,node_monitor:await nodeMonitor.snapshot(),risk_confirmation:await risk.status(),recovery:!!session&&!legacy&&localTests.allowed()&&(await localTests.status()).enabled===true?await api.rpc('recovery_check',{p_action:'status'}).catch(()=>null):null,local_test:localTests.allowed(),local_test_updates:await localTests.status(),parallel_requested:(await agent.preferences())?.parallelism,parallel_allowed:await runtime.poolAllowed(),updater:legacy?{enabled:false,state:'legacy_hold'}:await updater.status(),agent: await agent.read(), session: !!session, invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: legacy?{error:'legacy_migration_required'}:session?await api.rpc('status').catch(e => ({error: e.message})):{}, progress:session&&!legacy?await api.rpc('progress').catch(()=>null):null}; }
       case 'rating': await agent.queueRating(message.proof, message.score, message.reason); agent.tick(false,true).catch(console.error); return {};
       case 'risk_confirm': return risk.confirm(message.confirmed);
       case 'parallelism': {await agent.requestParallelism(message.value);return {};}
@@ -405,12 +412,13 @@ chrome.runtime.onMessageExternal?.addListener((message, sender, reply) => {
     const u = new URL(sender.url), portal = new URL(CROWD_CONFIG.portal);
     if (u.origin !== portal.origin || u.pathname !== '/crowd' || message.type !== 'connect') return;
     const value = CrowdJoin.invite(message.invite, CROWD_CONFIG.portal);
-    storage.set('pending_invite', value).then(() => chrome.tabs.create({url: chrome.runtime.getURL('src/controller.html'), active: true}))
+    legacyInstallation.then(legacy=>{if(legacy)throw Error('legacy_migration_required');return storage.set('pending_invite', value);}).then(() => chrome.tabs.create({url: chrome.runtime.getURL('src/controller.html'), active: true}))
       .then(() => reply({ok: true}), () => reply({ok: false}));
     return true;
   } catch (_) { return; }
 });
-chrome.alarms.onAlarm.addListener(alarm => {
+chrome.alarms.onAlarm.addListener(async alarm => {
+  if(await legacyInstallation)return;
   if(alarm.name==='crowd_node_monitor')nodeMonitor.flush().catch(()=>{});
   if (alarm.name === 'crowd_update') updater.check().catch(console.error);
   if (alarm.name === 'crowd_update_bootstrap') updater.bootstrap().then(()=>localTests.run()).catch(console.error);
@@ -418,9 +426,10 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === 'crowd_upload') agent.tick(false, true).then(()=>localTests.run()).catch(console.error);
   if (alarm.name === 'crowd_diagnostics') recovery.run().then(()=>localTests.run()).then(reportDiagnostics).catch(console.error);
 });
-chrome.runtime.onStartup.addListener(async () => { await agent.repairDelivery(); await agent.tick(true); await repairDiagnostics(); await reportDiagnostics(); });
+chrome.runtime.onStartup.addListener(async () => { if(await legacyInstallation)return; await agent.repairDelivery(); await agent.tick(true); await repairDiagnostics(); await reportDiagnostics(); });
 chrome.runtime.onInstalled.addListener((details = {reason: 'install'}) => {
   (async () => {
+    if(await legacyInstallation){await chrome.runtime.openOptionsPage?.();return;}
     // Also hand off a trial when replacing an unjoined development copy.
     // Never overwrite an existing invitation, consent or participant identity.
     const handoff = /^[a-f0-9]{64}$/.test(CROWD_CONFIG.trialInvite || '') && !await storage.get('pending_invite') && !await storage.get('session');
@@ -436,4 +445,4 @@ chrome.tabs.onRemoved.addListener(id => {
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable
 // running state on every load; initial installation and user stops remain idle.
-updater.bootstrap().then(()=>chrome.alarms.create('crowd_node_monitor',{periodInMinutes:.5})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>localTests.run()).then(repairDiagnostics).then(()=>recovery.run()).then(()=>localTests.run()).then(reportDiagnostics).catch(console.error);
+legacyInstallation.then(legacy=>{if(legacy)return;return updater.bootstrap().then(()=>chrome.alarms.create('crowd_node_monitor',{periodInMinutes:.5})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>localTests.run()).then(repairDiagnostics).then(()=>recovery.run()).then(()=>localTests.run()).then(reportDiagnostics);}).catch(console.error);

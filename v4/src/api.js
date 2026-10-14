@@ -58,13 +58,13 @@
         return data;
       } finally { clearTimeout(timer); }
     }
-    async session(signal, metrics = null) {
+    async session(signal, metrics = null, rejectedToken = null) {
       const revision = this.authRevision;
       const readAt=metrics?clock():0;let s = await this.storage.get('session');
       if(metrics)metrics.session_read_ms=elapsed(readAt);
       if (signal?.aborted || revision !== this.authRevision) throw new Error('cancelled');
       if (!s?.refresh_token) throw Object.assign(new Error('backend_login_required'), {status: 401});
-      if (!s.access_token || !Number.isFinite(s.expires_at) || s.expires_at < Date.now() + 60000) {
+      if ((rejectedToken && s.access_token === rejectedToken) || !s.access_token || !Number.isFinite(s.expires_at) || s.expires_at < Date.now() + 60000) {
         // Status, collection and diagnostics share this API in the worker.
         // Refresh once; cancelling one caller must not consume the token and
         // lose the new session for all other callers.
@@ -92,12 +92,24 @@
       return s;
     }
     async rpc(name, params = {}, signal, metrics = null) {
-      const rpcAt=metrics?clock():0;
+      const rpcAt=metrics?clock():0, revision=this.authRevision;
       try{
         const sessionAt=metrics?clock():0;let s;
         try{s=await this.session(signal,metrics);}finally{if(metrics)metrics.session_ms=elapsed(sessionAt);}
-        return await this.request('/rest/v1/rpc/crowd_v4_' + name,params,s.access_token,signal,metrics);
-      }catch(error){if(error.status===401||error.message==='login_required')error.message='backend_login_required';throw error;}
+        try { return await this.request('/rest/v1/rpc/crowd_v4_' + name,params,s.access_token,signal,metrics); }
+        catch (error) {
+          // PostgREST rejected the JWT before entering the RPC. Only this
+          // definitive pre-execution rejection permits one retry of a write.
+          // A delayed rejection of an older token reuses an already refreshed
+          // session; it must not rotate the new refresh token a second time.
+          if (error.status !== 401 || !['PGRST301','PGRST303'].includes(error.code)) throw error;
+          if (revision !== this.authRevision) throw Error('cancelled');
+          const owner = s.user?.id;
+          s = await this.session(signal, metrics, s.access_token);
+          if (revision !== this.authRevision || s.user?.id !== owner) throw Error('cancelled');
+          return await this.request('/rest/v1/rpc/crowd_v4_' + name,params,s.access_token,signal,metrics);
+        }
+      }catch(error){if(error.status===401||error.message==='login_required')error.message='backend_login_required';else if(error.status===403)error.message='backend_permission_denied';throw error;}
       finally{if(metrics)metrics.rpc_ms=elapsed(rpcAt);}
     }
     async logout() {

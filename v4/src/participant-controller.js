@@ -13,7 +13,9 @@ Object.assign(errors, {
   pool_recovery_required:'并行工作页状态需要核对，已停止新访问，原记录保留。',
   executor_busy:'请先停止并完成待回传记录，再更改设置。',
   user_login: '已暂停并打开小红书工作页；处理完成后，回到这里点击「继续采集」。',
-  backend_login_required: '中台参与身份已失效，无法领取或回传；原有进度保留。这不是小红书登录问题。',
+  backend_login_required: '中台参与会话需要恢复，采集与回传已暂停，原进度保留。请联系邀请人恢复原参与身份；不要重新报名或卸载插件。',
+  backend_permission_denied: '中台未允许此操作，采集与回传已暂停。原身份和进度保留，请联系邀请人检查参与权限。',
+  legacy_migration_required: '检测到旧版参与身份与未迁移进度，请保留原插件并联系邀请人接续。不要卸载或重新报名；本版本不会覆盖旧任务和待回传记录。',
   unrelated_note: '笔记正文/标题未匹配任务相关性要求（unrelated_note）',
   invalid_record: '记录字段未通过服务端校验（invalid_record）',
   invalid_published_date: '发布日期不符合格式（invalid_published_date）',
@@ -66,16 +68,17 @@ async function refresh() {
   $('risk_evidence').textContent=data.risk_confirmation?.source==='operator_confirmation'?'风险证据：操作员确认；仅暂停上报，不是当前页面元数据或恢复证明。':'';
   renderControls();
   $('profiles').checked=s.profiles===true;
-  $('profiles').disabled=!data.session || actions>0;
+  $('profiles').disabled=!!data.legacy_installation || !data.session || actions>0;
   $('welcome').textContent = errors[p.error] || errors[s.last_error] || (s.enabled ? (s.phase === 'idle' ? '自动任务已开启，正在等待下一步。' : '自动任务执行中，你可以随时停止。') : data.session ? '参与身份已就绪，可点击继续；无需再次报名。' : data.invited ? '邀请已接续，请确认是否参与。' : '请从邀请链接打开，无需注册中台账号。');
   const pilotWaiting=s.enabled && s.pilot_waiting===true && s.pilot_phase==='awaiting_acceptance';
   if(pilotWaiting)$('welcome').textContent='两条验收已回传，等待实验启动，之后自动继续。';
-  $('start').hidden = !data.session;
+  $('start').hidden = !data.session || data.legacy_installation;
   $('first_diagnostics_label').hidden = !!data.session;
   $('consent').textContent = data.session ? '同意并继续' : '同意并开始';
-  const fields = {'插件版本': CrowdCore.VERSION, '中台账户': p.error === 'backend_login_required' ? '登录已失效' : data.session ? '已登录' : '未登录', '参与状态': p.participant?.status || p.error || '尚未报名', '自动执行': s.enabled ? '已开启' : '已停止', '当前阶段': s.phase === 'idle' && s.task ? '准备执行任务' : labels[s.phase] || s.phase,
+  const fields = {'插件版本': CrowdCore.VERSION, '中台账户': p.error === 'backend_login_required' ? '需要恢复' : p.error === 'backend_permission_denied' ? '权限待核对' : data.session ? '已登录' : '未登录', '参与状态': p.participant?.status || p.error || '尚未报名', '自动执行': s.enabled ? '已开启' : '已停止', '当前阶段': s.phase === 'idle' && s.task ? '准备执行任务' : labels[s.phase] || s.phase,
     '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': s.outbox.length + ' / ' + s.rejected.length, '最近待处理原因': s.rejected.length ? (errors[s.rejected.at(-1).reason] || s.rejected.at(-1).reason) : '无', '最早下一步': !s.enabled ? '已停止，不会自动执行' : s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
   if(pilotWaiting){fields['自动执行']='已启用，等待实验启动';fields['当前阶段']='两条验收已回传';fields['最早下一步']='实验启动后自动继续，无需再次点击';fields['最近提示']='等待实验启动；只检查运行状态，不访问采集来源。';}
+  if(data.legacy_installation)Object.assign(fields,{'中台账户':'旧版参与身份（待接续）','参与状态':'旧版数据原样保留','任务':'请在原版查看','待回传 / 待处理':'请在原版查看','最近提示':errors.legacy_migration_required});
   $('status').replaceChildren();
   if(!s.enabled&&s.last_error==='rate_limit'&&data.recovery?.gate==='waiting'){fields['最早下一步']=data.recovery.reason==='attempt_active'?'正在自动检查恢复状态':data.recovery.wait_ms>0?new Date(Date.now()+data.recovery.wait_ms).toLocaleString('zh-CN')+' 后自动检查一次':'等待自动恢复检查';fields['最近提示']='限流期间停止采集；确认恢复后自动继续本批，完成后自动停止。';}
   fields['后台回传'] = s.delivery_error ? (errors[s.delivery_error] || s.delivery_error) : s.outbox.length && (s.enabled || s.delivery_enabled) ? '已有记录会继续回传' : '无待发送记录或已停止回传';
@@ -96,7 +99,8 @@ function renderControls() {
   $('local_test_updates_label').hidden=!data.local_test;
   $('local_test_updates').checked=data.local_test_updates?.enabled===true;
   $('local_test_updates').disabled=actions>0 || !data.session || !data.local_test;
-  $('consent_section').hidden=!!data.session && s.consent===CrowdCore.CONSENT;
+  $('consent_section').hidden=!!data.legacy_installation || !!data.session && s.consent===CrowdCore.CONSENT;
+  $('invitation').hidden=!!data.legacy_installation;
   const desired=data.parallel_requested || s.parallelism || 1,actual=s.parallelism || 1;
   $('parallelism').value=String(desired);
   $('parallelism').disabled=actions>0 || !data.session || !local;
@@ -114,6 +118,7 @@ function renderControls() {
   $('risk_confirm').disabled=actions>0||!data.risk_confirmation?.can_confirm||!$('risk_acknowledge').checked;
   $('profiles').disabled=actions>0 || !data.session;
   $('diagnostics').disabled=actions>0 || !data.session;
+  for(const id of ['start','open_login','consent','logout','export','auto_update','update_check','profiles','diagnostics'])if(data.legacy_installation)$(id).disabled=true;
 }
 Object.assign(errors,{test_completed:'本批测试已完成，已自动停止。',test_partial:'本批详情尝试已结束，已停止；有效回执不足目标。',test_expired:'测试已超时或跨日，已停止新访问，待回传证据保留。',test_quota:'今日剩余配额不足，测试已停止，不会等到明天继续。',test_no_task:'没有可领取任务，测试已停止。',test_new_run_required:'上次测试已结束；请点击「开始两篇测试」建立新批次。'});
 Object.assign(errors,{invalid_rating:'请选择1–5星，并填写至少8个字的实际评价',rating_queued:'这条评分已在等待回传',invalid_anchor:'评分关联的笔记尚未收到或已被拒绝',already_rated:'这个任务已经评分',queue_full:'待回传记录已满，请先等待回传'});
