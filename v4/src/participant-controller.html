@@ -4,7 +4,7 @@
 <p>自愿参与内部研究。启动后自动领取任务、搜索与采集公开笔记。登录失效时保留原任务，原账号重新登录并核验后自动继续；手动停止、验证码或限流暂停后需本人点击继续。</p>
 <p>评论和回复按可见分页采集，保留普通附图引用；回执分别记录已采数量、分页结束和未完整原因。页面未公开或未读到的阅读量、互动数留空。</p>
 <p id="welcome">请从邀请链接打开。确认参与后自动接入，无需注册中台账号或等待审核。</p>
-<details id="invitation"><summary>重新打开邀请</summary><form id="invite_form"><label>邀请链接<input id="invite_value" type="text" autocomplete="off" required></label><button>接续邀请</button></form></details>
+<details id="invitation"><summary>接续参与邀请</summary><form id="invite_form"><label>邀请链接<input id="invite_value" type="text" autocomplete="off" required></label><button>接续邀请</button></form></details>
 <section id="consent_section"><label><input id="agree" type="checkbox">我自愿参加，并同意自动访问公开网页及回传笔记正文、公开互动数量、评论及回复、字段和采集证据。小红书登录凭据留在本机。按核验通过且去重后的笔记累计，每 100 条奖励 ¥0.10；不足 100 条继续累计。我了解后台运行受系统限制，可随时停止。</label><label id="first_diagnostics_label"><input id="first_diagnostics" type="checkbox" checked>发送必要运行状态供 Owner 排查：阶段、错误码、队列、OTA检查结果；不发送Cookie、完整网址或正文。状态变化在云端最多保留7天，可随时关闭。</label><button id="consent">同意并开始</button></section>
 <section id="parallel_section" hidden><label>同时采集笔记详情 <select id="parallelism"><option value="1">1 篇</option><option value="2">2 篇</option></select></label><p id="parallel_hint" role="status"></p></section>
 <section id="test_section" hidden><h2>本机两篇测试</h2><p id="test_status" role="status"></p><button id="test_start">开始两篇测试</button><label id="local_test_updates_label" hidden><input id="local_test_updates" type="checkbox">新版验证通过后自动测试两篇</label><p>仅本机测试安装可启用。每个新签名版本最多启动一批；旧记录先对账。点击停止会关闭此选项，失败不会自动新建批次。</p></section>

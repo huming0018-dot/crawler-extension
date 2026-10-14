@@ -70,5 +70,11 @@ function fixture(){
  await m.register();await m.event('session');assert.equal(f.data[key].rows[0].node_seq,501);
  f.handler=async(name,p)=>name==='step_events'?{schema:'crowd-step-events-v1',accepted:[],duplicates:[],discarded:p.p_events.map(x=>x.event_id),discard_reason:'sequence_not_retained',diagnostics_enabled:true}:backend(name,p);
  await m.flush();assert.equal(f.data[key].rows.length,1);assert.equal(f.data[key].rows[0].step,'telemetry_gap');assert.equal(f.data[key].dropped,1);
+ // Only the three explicit server-wait reasons are added; arbitrary strings remain redacted.
+ f=fixture();m=f.make();await m.claim();
+ for(const reason of ['session_rest','action_gap','global_pause'])await m.event('session',{status:'waiting',error_code:reason});
+ assert.deepEqual(f.data[key].rows.slice(-3).map(x=>x.error_code),['session_rest','action_gap','global_pause']);
+ await m.event('session',{status:'waiting',error_code:'unknown server text'});assert.equal(f.data[key].rows.at(-1).error_code,'unexpected_error');
+ await m.flush();assert.equal(f.data[key].rows.length,0);assert.deepEqual(f.calls.find(x=>x.name==='step_events').p.p_events.filter(x=>x.error_code&&x.error_code!=='unexpected_error').map(x=>x.error_code),['session_rest','action_gap','global_pause']);
  console.log('PASS node monitor: one claim, durable same-ID retry, opt-out, bounded gap, safe payload, concurrent ACK and account switch');
 })().catch(error=>{console.error(error);process.exitCode=1;});

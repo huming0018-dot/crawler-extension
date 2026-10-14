@@ -45,6 +45,13 @@
       if (this.active) return;
       return this.tick();
     }
+    async parkPilot(s, value, alive = ()=>{}) {
+      if(value?.error!=='test_completed'||value.pilot_phase!=='awaiting_acceptance')return false;
+      s.pilot_phase='awaiting_acceptance';s.pilot_waiting=true;delete s.pilot_check_pending;
+      s.pilot_checked_at=this.r.now();s.last_error='test_completed';s.next_at=this.r.now()+60000;
+      s.wait_kind='action';s.control=null;s.control_expires=0;
+      await this.save(s);alive();if(s.enabled)await this.schedule(s,s.next_at);return true;
+    }
     async control(s, action, alive, signal, note = null) {
       const before = this.r.now();
       let value;const metrics=this.r.localTest===true&&s.test_run?.state==='active'?{}:null;
@@ -66,10 +73,10 @@
       if(['awaiting_acceptance','active','closed'].includes(value?.pilot_phase))s.pilot_phase=value.pilot_phase;
       const terminal=value?.pilot_phase==='closed' && ['control','search','detail','comment','scroll'].includes(action)?'user_stopped':value?.error || (value?.allowed===false ? value.reason : null);
       if(['task_full','daily_quota','test_completed','user_stopped'].includes(terminal)) {
+        if(await this.parkPilot(s,{error:terminal,pilot_phase:value.pilot_phase},alive))return {...value,allowed:false,paused:false,reason:terminal};
         s.last_error=terminal;
         if(terminal==='task_full') {s.assignment_refresh=true;s.next_at=this.r.now()+1000;}
         else if(terminal==='daily_quota') {s.assignment_refresh=true;s.next_at=C.quotaRetry(value,this.r.now());}
-        else if(terminal==='test_completed' && value.pilot_phase==='awaiting_acceptance') {s.pilot_waiting=true;s.next_at=this.r.now()+60000;}
         else {s.delivery_enabled=s.delivery_enabled||s.enabled;s.enabled=false;await this.r.cancel();}
         s.wait_kind=terminal==='daily_quota'?'budget':'action';s.control=null;s.control_expires=0;
         await this.save(s);alive();if(!s.enabled)await this.repairDelivery();return {...value,allowed:false,paused:false,reason:terminal};
@@ -103,8 +110,8 @@
       // Action guards may return the legacy default; only control refreshes task rules.
       if(action!=='control') value.relevance_revision=Math.max(value.relevance_revision||0,s.task?.relevance_revision||0,s.control_task===s.task?.id?s.control?.relevance_revision||0:0);
       if(this.r.localTest===true&&value.recovery_enabled===true&&value.reason==='rate_limit'&&Number.isSafeInteger(value.recovery_wait_ms)&&value.recovery_wait_ms>=0&&value.recovery_wait_ms<=172800000){s.next_at=this.r.now()+value.recovery_wait_ms;}
-      if(s.pilot_waiting===true && action==='control' && value.pilot_phase==='active' && value.reason===null && !value.paused && !s.pending_risk) {
-        s.pilot_waiting=false;s.assignment_refresh=true;s.next_at=this.r.now();s.wait_kind=null;s.last_error=null;
+      if((s.pilot_waiting===true||s.pilot_check_pending===true) && action==='control' && value.pilot_phase==='active' && value.reason===null && !value.paused && !s.pending_risk) {
+        s.pilot_waiting=false;delete s.pilot_check_pending;s.assignment_refresh=true;s.next_at=this.r.now();s.wait_kind=null;s.last_error=null;
       }
       s.control = value; s.control_task=s.task?.id || null; s.control_checked = this.r.now(); s.control_expires = before + value.ttl_ms;
       s.control_error = false;
@@ -287,7 +294,7 @@
         const parking=['task_full','daily_quota'].includes(admission.reason) || admission.reason==='test_completed'&&admission.pilot_phase==='awaiting_acceptance';
         s.enabled=parking;s.last_error=admission.reason||'control_unavailable';
         if(parking){s.delivery_enabled=true;await this.save(s);await this.schedule(s,s.next_at);}
-        else{s.next_at=Math.max(s.next_at||0,this.r.now()+admission.wait_ms);await this.save(s);}
+        else{s.next_at=Math.max(s.next_at||0,this.r.now()+admission.wait_ms);if(['session_rest','action_gap','global_pause'].includes(s.last_error)){s.wait_kind='action';s.action_not_before=s.next_at;}await this.save(s);}
         return;
       }
 
@@ -320,7 +327,7 @@
       // Continuing never clears a durable deadline or a pending risk report.
       await this.save(s); await this.schedule(s,this.r.now() + 1000);
     }
-    async bootstrapLoginPage(valid, resumeKnownWait = false) {
+    async bootstrapLoginPage(valid, resumeKnownWait = false, resumeStoppedWait = false) {
       await this.initializeGeneration();
       if(this.active||this.stopping||this.maintenance)throw Error('executor_busy');
       const generation=this.generation,stopIntent=this.stopIntent||0;
@@ -330,8 +337,9 @@
       this.active=(async()=>{
         const s=await this.read();await check();
         const waits=new Set(['session_rest','action_gap','global_pause']),mark=s.first_login_page;
-        const retry=resumeKnownWait&&mark?.task_id===s.task?.id&&['admitting','waiting'].includes(mark?.stage)&&waits.has(s.last_error);
-        if(s.consent!==C.CONSENT||s.enabled||!s.task||(!retry&&(!['login_required','identity_verification_required'].includes(s.last_error)||mark))||s.received||s.note_id||s.note_url||s.enrichment||s.test_run||s.sdk_unknown||s.sdk_pending||s.risk_report||!['idle','search'].includes(s.phase)||[s.outbox,s.rejected,s.history,s.seen,s.candidates,s.work_slots].some(a=>a?.length))throw Error('pool_recovery_required');
+        const stoppedWait=resumeStoppedWait&&s.last_error==='user_stopped'&&mark?.stage==='waiting'&&waits.has(mark.reason);
+        const retry=resumeKnownWait&&mark?.task_id===s.task?.id&&['admitting','waiting'].includes(mark?.stage)&&(waits.has(s.last_error)||stoppedWait);
+        if(s.consent!==C.CONSENT||s.enabled||!s.task||(!retry&&(!['login_required','identity_verification_required'].includes(s.last_error)||mark))||s.received||s.note_id||s.note_url||s.enrichment||s.test_run||s.sdk_unknown||s.sdk_pending||s.risk_report||s.pending_risk||!['idle','search'].includes(s.phase)||[s.outbox,s.rejected,s.history,s.seen,s.candidates,s.work_slots].some(a=>a?.length))throw Error('pool_recovery_required');
         const wait=async admission=>{
           if(!waits.has(admission.reason)||!Number.isFinite(admission.wait_ms)||admission.wait_ms<0)throw Error(admission.reason||'control_unavailable');
           const retry_at=this.r.now()+Math.max(1000,admission.wait_ms);
@@ -340,6 +348,8 @@
           await this.save(s);await check();return {waiting:true,reason:admission.reason,retry_at};
         };
         if(retry){
+          // Only the explicit Continue restores intent after a user stop. The known deadline still applies.
+          if(stoppedWait){s.last_error=mark.reason;await this.save(s);await check();}
           if(mark.stage==='waiting'&&Number.isFinite(mark.retry_at)&&mark.retry_at>this.r.now())return {waiting:true,reason:s.last_error,retry_at:mark.retry_at};
           // A 63 definite refusal did not persist its guard reply. Read control
           // again; never treat the old control snapshot as a source receipt.
@@ -353,6 +363,7 @@
         const status=await this.api.rpc('status',{},signal);await check();
         if(status.participant?.status!=='approved')throw Error('approval_required');
         const claimed=await this.api.rpc('claim',{p_task:s.task.id},signal);await check();
+        if(claimed.error==='test_completed'&&claimed.pilot_phase==='awaiting_acceptance'){s.enabled=true;await this.parkPilot(s,claimed,alive);return {pilot_waiting:true};}
         if(claimed.error)throw Error(claimed.error);
         const task=claimed.task;
         if(task?.id!==s.task.id||task.query!==s.task.query||task.platform!==s.task.platform||task.received!==0)throw Error('lease_lost');
@@ -509,12 +520,32 @@
       try {
         alive();
         if(s.test_run && ['waiting','active'].includes(s.test_run.state) && (now>=s.test_run.expires_at || day!==s.test_run.day)) {await this.endTest(s,'test_expired');return;}
+        // A known pilot acceptance boundary needs cloud status, never a live platform page or a new claim.
+        if(s.pilot_waiting||s.pilot_check_pending||s.pilot_phase==='awaiting_acceptance'&&s.last_error==='daily_quota'){
+          if(!s.pilot_waiting)s.pilot_check_pending=true;
+          if(!Number.isFinite(s.pilot_checked_at)||now<s.pilot_checked_at||now>=s.pilot_checked_at+60000){
+            s.pilot_checked_at=now;await this.save(s);alive();
+            try{await this.control(s,'control',alive,signal);}catch(error){
+              alive();if(error.status===401||error.status===403)throw error;
+              s.control_error=true;s.last_error='control_unavailable';
+            }
+            await this.save(s);alive();
+          }
+          if(!s.enabled)return;
+          if(s.pilot_waiting||s.pilot_check_pending){
+            if(s.outbox.length)await this.flushOutbox(s,alive,signal);
+            await this.save(s);await this.schedule(s,this.r.now()+60000);return;
+          }
+          // Let the outer session check verify the original account before any armed source work.
+          await this.schedule(s,this.r.now()+1000);return;
+        }
         if(s.assignment_refresh && s.outbox.length)return await this.flushOutbox(s,alive,signal);
         if(s.assignment_refresh && s.last_error==='daily_quota' && s.next_at>now){await this.schedule(s,s.next_at);return;}
         if(s.assignment_refresh) {
           if(s.test_run?.task_ids && !this.claimTask(s)){await this.endTest(s,'test_partial');return;}
           const requested=this.claimTask(s),bound=!!s.test_run?.task_ids;
           const claimed=await this.api.rpc('claim',{p_task:requested},signal);alive();
+          if(await this.parkPilot(s,claimed,alive))return;
           if(claimed.error==='daily_quota') {if(s.test_run){await this.endTest(s,'test_quota');return;}s.next_at=C.quotaRetry(claimed,now);s.last_error='daily_quota';await this.save(s);await this.schedule(s,s.next_at);return;}
           if(claimed.error)throw Error(claimed.error);
           let task=claimed.task;
@@ -526,6 +557,7 @@
           if(!task && s.task && !s.test_run?.task_ids) {
             if(s.work_slots?.length || s.enrichment || ['note','reopen_note'].includes(s.phase))throw Error('pool_recovery_required');
             const fresh=await this.api.rpc('claim',{p_task:null},signal);alive();
+            if(await this.parkPilot(s,fresh,alive))return;
             if(fresh.error==='daily_quota') {if(s.test_run){await this.endTest(s,'test_quota');return;}s.next_at=C.quotaRetry(fresh,now);s.last_error='daily_quota';await this.save(s);await this.schedule(s,s.next_at);return;}
             if(fresh.error)throw Error(fresh.error);task=fresh.task;
           }
@@ -636,6 +668,7 @@
           if(s.test_run?.task_ids && !this.claimTask(s)){await this.endTest(s,'test_partial');return;}
           const requested=this.claimTask(s),bound=!!s.test_run?.task_ids;
           const claimed = await this.api.rpc('claim', {p_task: requested}, signal); alive();
+          if(await this.parkPilot(s,claimed,alive))return;
           if (claimed.error === 'daily_quota') { if(s.test_run){await this.endTest(s,'test_quota');return;} s.next_at = C.quotaRetry(claimed, now); s.last_error = 'daily_quota'; await this.save(s); await this.schedule(s,s.next_at); return; }
           if (claimed.error) throw new Error(claimed.error);
           if(!this.bindBatch(s,claimed.task,bound?requested:null)){await this.endTest(s,'test_no_task');return;}
@@ -977,6 +1010,7 @@
         item.retry_at = C.quotaRetry(receipt, now); s.last_error = 'daily_quota'; await this.save(s); await this.scheduleReceipt(s, item.retry_at); return;
       } else if (receipt.error === 'lease_expired') {
         const renewed = await this.api.rpc('claim', {p_task: item.task}, signal); alive();
+        if(await this.parkPilot(s,renewed,alive)){item.retry_at=s.next_at;await this.save(s);await this.scheduleReceipt(s,item.retry_at);return;}
         if (renewed.error === 'daily_quota') {
           item.retry_at = C.quotaRetry(renewed, now); s.last_error = 'daily_quota';
           await this.save(s); await this.scheduleReceipt(s, item.retry_at); return;

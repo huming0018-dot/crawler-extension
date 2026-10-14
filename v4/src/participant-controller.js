@@ -11,6 +11,9 @@ $('updater_section').hidden = !!globalThis.CrowdNative;
 $('profiles_section').hidden = !!globalThis.CrowdNative;
 const errors = {test_comments_partial:'已停止：正文已完成，评论覆盖请查看下方状态',invalid_invite: '邀请无效，请重新打开邀请链接', invite_expired: '邀请已过期，请联系邀请人', invite_full: '本批参与名额已满', installation_already_joined: '本设备已加入另一批邀请，请继续原参与身份', portal_not_configured: '安装包尚未接通参与入口', release_not_ready: '此设备的正式安装渠道尚未开放', backend_unavailable: '暂时连接不上，请稍后重试，已有进度会保留', consent_required: '请先确认自愿参与', approval_required: '账户尚未获得中台审核批准', login_required: '请在下方或工作页面登录小红书后继续', captcha: '遇到验证，请在工作页面处理', rate_limit: '平台已限流，已暂停', user_stopped: '已停止', logged_out: '已退出', system_suspended: '系统暂停或本次批次结束，进度已保存，可重新启动', lease_lost: '任务已由其他设备领取，证据保留待审'};
 Object.assign(errors, {
+  invite_required:'参与邀请尚未接续。请打开邀请人发来的原邀请页面，点击「已安装，继续」；也可以在这里粘贴原邀请链接。',
+  identity_recovery_required:'检测到原参与身份或采集进度，但当前会话缺失。原记录保留，请联系邀请人恢复原身份；不要重新报名或卸载。',
+  participant_already_joined:'此浏览器已有参与会话，请继续原参与身份，无需再次报名。',
   parallel_unavailable:'当前安装渠道尚未通过并行采集升级检查，请使用单页采集。',
   identity_verification_required:'尚未确认小红书原账号。请打开原工作页并登录原账号；核验成功后会按原运行意图继续。',
   platform_identity_changed:'当前小红书账号与原账号不同，已暂停。请切回原账号，原任务和记录保留。',
@@ -74,6 +77,7 @@ async function refresh() {
   $('profiles').checked=s.profiles===true;
   $('profiles').disabled=!!data.legacy_installation || !data.session || actions>0;
   $('welcome').textContent = errors[p.error] || errors[s.last_error] || (s.enabled ? (s.phase === 'idle' ? '自动任务已开启，正在等待下一步。' : '自动任务执行中，你可以随时停止。') : data.session ? '参与身份已就绪，可点击继续；无需再次报名。' : data.invited ? '邀请已接续，请确认是否参与。' : '请从邀请链接打开，无需注册中台账号。');
+  if(!data.session && !data.legacy_installation)$('welcome').textContent=data.entry_state==='identity_recovery_required'?errors.identity_recovery_required:data.invited?'邀请已接续，请确认是否参与。':errors.invite_required;
   const platform=data.platform_session;
   if(platform?.pending&&platform.wait_until&&!p.error)$('welcome').textContent=(errors[platform.reason]||'服务端暂缓访问')+' 原任务保留，'+new Date(platform.wait_until).toLocaleString('zh-CN')+'后自动重新核验，无需重复点击。';
   else if(platform?.pending&&platform.desired_running&&!p.error)$('welcome').textContent=platform.reason==='platform_identity_changed'?'当前登录账号与原账号不同，已暂停。请切回原账号；原任务和记录保留。':platform.reason==='login_required'?'小红书已退出登录，采集暂停、原任务保留。请登录原账号；核验后自动继续。':'正在核验小红书原账号，采集暂停、原任务保留。核验通过后自动继续。';
@@ -87,6 +91,11 @@ async function refresh() {
   const fields = {'插件版本': CrowdCore.VERSION, '中台账户': p.error === 'backend_login_required' ? '需要恢复' : p.error === 'backend_permission_denied' ? '权限待核对' : data.session ? '已登录' : '未登录', '参与状态': p.participant?.status || p.error || '尚未报名', '自动执行': s.enabled ? '已开启' : '已停止', '当前阶段': s.phase === 'idle' && s.task ? '准备执行任务' : labels[s.phase] || s.phase,
     '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': s.outbox.length + ' / ' + s.rejected.length, '最近待处理原因': s.rejected.length ? (errors[s.rejected.at(-1).reason] || s.rejected.at(-1).reason) : '无', '最早下一步': !s.enabled ? data.platform_session?.pending&&data.platform_session.desired_running?(data.platform_session.wait_until?new Date(data.platform_session.wait_until).toLocaleString('zh-CN')+'后自动重新核验':'等待原账号核验，成功后自动继续'):'已停止，不会自动执行' : s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
   if(pilotWaiting){fields['自动执行']='已启用，等待实验启动';fields['当前阶段']='两条验收已回传';fields['最早下一步']='实验启动后自动继续，无需再次点击';fields['最近提示']='等待实验启动；只检查运行状态，不访问采集来源。';}
+  if(pilotWaiting){
+    const notice={login_required:'小红书已退出登录，请在原窗口登录原账号。',platform_identity_changed:'当前小红书账号已改变，请切回原账号。',captcha:'小红书需要本人完成验证。',rate_limit:'小红书已限流，请按原页面提示处理。'}[platform?.platform_reason];
+    if(notice){fields['平台账号']=notice;$('welcome').textContent='两条验收已回传，等待实验启动。'+notice;}
+  }
+  if(!data.session && !data.legacy_installation){fields['最近提示']=data.entry_state==='identity_recovery_required'?errors.identity_recovery_required:data.invited?'请确认参与后开始。':errors.invite_required;if(data.entry_state==='identity_recovery_required'){fields['中台账户']='原参与身份待恢复';fields['参与状态']='原数据保留，暂不重新报名';}}
   if(data.legacy_installation)Object.assign(fields,{'中台账户':'旧版参与身份（待接续）','参与状态':'旧版数据原样保留','任务':'请在原版查看','待回传 / 待处理':'请在原版查看','最近提示':errors.legacy_migration_required});
   $('status').replaceChildren();
   if(!s.enabled&&s.last_error==='rate_limit'&&data.recovery?.gate==='waiting'){fields['最早下一步']=data.recovery.reason==='attempt_active'?'正在自动检查恢复状态':data.recovery.wait_ms>0?new Date(Date.now()+data.recovery.wait_ms).toLocaleString('zh-CN')+' 后自动检查一次':'等待自动恢复检查';fields['最近提示']='限流期间停止采集；确认恢复后自动继续本批，完成后自动停止。';}
@@ -111,8 +120,13 @@ function renderControls() {
   $('local_test_updates_label').hidden=!data.local_test;
   $('local_test_updates').checked=data.local_test_updates?.enabled===true;
   $('local_test_updates').disabled=actions>0 || !data.session || !data.local_test;
-  $('consent_section').hidden=!!data.legacy_installation || !!data.session && s.consent===CrowdCore.CONSENT;
-  $('invitation').hidden=!!data.legacy_installation;
+  const recovery=data.entry_state==='identity_recovery_required';
+  $('consent_section').hidden=!!data.legacy_installation || recovery || !data.session&&!data.invited || !!data.session && s.consent===CrowdCore.CONSENT;
+  $('consent').disabled=actions>0 || recovery || !data.session&&!data.invited;
+  $('invitation').hidden=!!data.legacy_installation || recovery || !!data.session;
+  if(!data.session&&!data.invited&&!recovery)$('invitation').open=true;
+  $('open_login').disabled=actions>0 || !data.session;
+  $('signup').hidden=recovery || !!data.session;
   const desired=data.parallel_requested || s.parallelism || 1,actual=s.parallelism || 1;
   $('parallelism').value=String(desired);
   $('parallelism').disabled=actions>0 || !data.session || !local;
@@ -161,7 +175,7 @@ function renderProgress(data) {
 async function action(fn) { ++actions; ++viewTicket; renderControls(); const buttons = [...document.querySelectorAll('button')]; buttons.forEach(b => b.disabled = b.id !== 'stop'); try { $('message').textContent = ''; if(fn)await fn(); await refresh(); } catch (e) { $('message').textContent = e.message === 'cancelled' ? '已取消启动' : errors[e.message] || e.message; } finally { --actions; buttons.forEach(b => b.disabled = actions > 0 && b.id !== 'stop'); renderControls(); } }
 $('login').addEventListener('submit', e => { e.preventDefault(); action(() => send('login', {email: $('email').value, password: $('password').value}).then(() => { $('password').value = ''; })); });
 $('signup').onclick = () => action(async () => { const r = await send('login', {email: $('email').value, password: $('password').value, signup: true}); $('password').value = ''; if (r.confirmation_required) $('message').textContent = '请到邮箱确认账户，再回来登录。'; });
-$('consent').onclick = () => action(async () => { if (!$('agree').checked) throw new Error('consent_required'); if (current?.invited && !current.session) await send('join', {consent: CrowdCore.CONSENT,diagnostics:$('first_diagnostics').checked}); else { await send('consent'); await send('start'); } });
+$('consent').onclick = () => action(async () => { if(current?.entry_state==='identity_recovery_required')throw Error('identity_recovery_required'); if(!current?.session&&!current?.invited)throw Error('invite_required'); if (!$('agree').checked) throw new Error('consent_required'); if (current?.invited && !current.session) await send('join', {consent: CrowdCore.CONSENT,diagnostics:$('first_diagnostics').checked}); else { await send('consent'); await send('start'); } });
 $('invite_form').onsubmit = e => { e.preventDefault(); action(async () => { await send('receive_invite', {invite: $('invite_value').value}); $('invite_value').value = ''; $('invitation').open = false; }); };
 for (const type of ['start', 'stop', 'logout', 'open_login']) $(type).onclick = () => action(() => send(type));
 $('export').onclick = () => action(async () => { const data = await send('export'), text = JSON.stringify(data, null, 2); if (globalThis.CrowdNative) { await CrowdNative.download(text); return; } const blob = new Blob([text], {type: 'application/json'}); const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = 'crowd-pending-evidence.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); });

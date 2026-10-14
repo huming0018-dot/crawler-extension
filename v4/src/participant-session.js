@@ -20,7 +20,7 @@
    const revision=++this.revision,owner=await this.r.owner();if(!owner)return;
    const job=this.tail.catch(()=>{}).then(async()=>{if(revision!==this.revision||owner!==await this.r.owner())return;const p=await this.record(owner);await this.save(owner,{...p,desired_running:enabled,pending:enabled?p.pending:false,reason:enabled?p.reason:null,recovered_at:null});});this.tail=job;await job;
   }
-  async status(){const owner=await this.r.owner();if(!owner)return {status:'not_checked',desired_running:false,pending:false};const p=await this.record(owner),h=(await this.r.health.publicState()).xiaohongshu;return {...h,desired_running:p.desired_running===true,pending:p.pending===true,reason:p.reason||h.reason||null,recovered_at:p.recovered_at||null,initial_confirmed_at:p.initial_confirmed_at||null,wait_until:p.wait_until||null,initial_login:p.initial_login===true};}
+  async status(){const owner=await this.r.owner();if(!owner)return {status:'not_checked',desired_running:false,pending:false};const p=await this.record(owner),h=(await this.r.health.publicState()).xiaohongshu;return {...h,desired_running:p.desired_running===true,pending:p.pending===true,reason:p.reason||h.reason||null,platform_reason:h.reason||null,recovered_at:p.recovered_at||null,initial_confirmed_at:p.initial_confirmed_at||null,wait_until:p.wait_until||null,initial_login:p.initial_login===true};}
   reason(entry){return entry?.reason || (entry?.status==='authenticated'&&entry.expected_ref&&entry.expected_ref===entry.observed_ref?null:'identity_verification_required');}
   async require(){const h=await this.r.health.check();const reason=this.reason(h.xiaohongshu);if(reason)throw Error(reason);return h.xiaohongshu;}
   async start(){await this.intent(true);return this.check(true,true);}
@@ -35,19 +35,27 @@
    let p=await this.record(owner);
    // Persist the inherited running/first-login intent before a source actor can pause.
    if(!await this.r.storage.get('participant-session:'+owner))await this.save(owner,p);
-   const h=await this.r.health.check(force);if(!await valid())return;
    let s=await this.r.agent.read();if(!await valid())return;
+   // Completed acceptance has no source work; an OTA's absent receiver must not block cloud parking.
+   if(s.enabled&&(s.pilot_waiting||s.pilot_check_pending||s.pilot_phase==='awaiting_acceptance'&&s.last_error==='daily_quota')){
+    const h=await this.r.health.check(force);if(!await valid())return;
+    const notice=h.xiaohongshu?.reason;
+    await this.r.indicate?.({reason:['login_required','captcha','rate_limit','platform_identity_changed'].includes(notice)?notice:s.last_error,pending:false,desired_running:p.desired_running});return;
+   }
+   const h=await this.r.health.check(force);if(!await valid())return;
+   s=await this.r.agent.read();if(!await valid())return;
    const reason=this.reason(h.xiaohongshu);
-   const waiting=p.initial_login&&p.bootstrap_started&&p.desired_running&&s.first_login_page?.task_id===s.task?.id&&['admitting','waiting'].includes(s.first_login_page?.stage)&&WAIT.has(s.last_error)&&!BACKEND.has(s.delivery_error);
+   const stoppedWait=explicit&&s.last_error==='user_stopped'&&s.first_login_page?.stage==='waiting'&&WAIT.has(s.first_login_page.reason);
+   const waiting=p.initial_login&&p.bootstrap_started&&p.desired_running&&s.first_login_page?.task_id===s.task?.id&&['admitting','waiting'].includes(s.first_login_page?.stage)&&(WAIT.has(s.last_error)||stoppedWait)&&!BACKEND.has(s.delivery_error);
    if(waiting&&this.r.bootstrap){
     if(['captcha','rate_limit','platform_identity_changed'].includes(reason)){
      await this.save(owner,{...p,pending:false,reason,wait_until:null});
      if(await valid())await this.r.stop(reason,{keepPage:true,drain:true,expectedOwner:owner});return;
     }
     try{
-     const result=await this.r.bootstrap(valid,true);if(!await valid())return;
-     await this.save(owner,{...p,pending:true,reason:result?.waiting?result.reason:'identity_verification_required',wait_until:result?.retry_at||null});
-     await this.r.indicate?.({reason:result?.waiting?result.reason:'identity_verification_required',pending:true,desired_running:true});
+     const result=await this.r.bootstrap(valid,true,stoppedWait);if(!await valid())return;
+     await this.save(owner,{...p,pending:!result?.pilot_waiting,reason:result?.pilot_waiting?'test_completed':result?.waiting?result.reason:'identity_verification_required',wait_until:result?.retry_at||null});
+     await this.r.indicate?.({reason:result?.pilot_waiting?'test_completed':result?.waiting?result.reason:'identity_verification_required',pending:!result?.pilot_waiting,desired_running:true});
     }catch(error){
      if(!await valid()||error.message==='cancelled')return;
      const failed=error.status===401?'backend_login_required':error.status===403?'backend_permission_denied':error.message;
@@ -57,9 +65,14 @@
    }
    const hardTerminal=!!(s.first_login_page&&s.first_login_page.stage!=='opened')||!!s.test_run||s.sdk_unknown||['sending','unknown'].includes(s.sdk_pending?.status)||['sending','unknown'].includes(s.risk_report?.state);
    const terminal=hardTerminal||BACKEND.has(s.last_error)||BACKEND.has(s.delivery_error);
+   const activationWait=!terminal&&p.desired_running&&!s.enabled&&WAIT.has(s.last_error)&&s.control?.reason===s.last_error&&Number.isFinite(s.next_at);
+   if(activationWait){
+    p={...p,pending:true,reason:s.last_error,wait_until:s.next_at};await this.save(owner,p);
+    if(!reason&&this.r.now()<s.next_at){await this.r.indicate?.({reason:s.last_error,pending:true,desired_running:true});return;}
+   }
    // A source-gate failure can reach the actor before this DOM observer.
    if(p.desired_running&&HOLD.has(s.last_error)&&!s.enabled&&!terminal)p={...p,pending:true,reason:s.last_error};
-   if(!explicit&&(terminal||!s.enabled&&!HOLD.has(s.last_error))){
+   if(!explicit&&(terminal||!s.enabled&&!HOLD.has(s.last_error)&&!activationWait)){
     if(p.pending){p={...p,pending:false,reason:s.last_error||s.delivery_error||null};await this.save(owner,p);}
     await this.r.indicate?.({reason:s.last_error||reason,pending:false,desired_running:p.desired_running});return;
    }
@@ -67,7 +80,7 @@
     const freshPage=p.initial_login&&!p.bootstrap_started&&!h.xiaohongshu?.expected_ref&&['unknown','no_page'].includes(h.xiaohongshu?.status);
     if(freshPage&&p.desired_running&&!terminal&&this.r.bootstrap){
      p={...p,bootstrap_started:true,pending:true,reason:'identity_verification_required'};await this.save(owner,p);
-     try{if(await valid()){const result=await this.r.bootstrap(valid);if(await valid()&&result?.waiting)await this.save(owner,{...p,pending:true,reason:result.reason,wait_until:result.retry_at});}}
+     try{if(await valid()){const result=await this.r.bootstrap(valid);if(await valid()&&(result?.waiting||result?.pilot_waiting))await this.save(owner,{...p,pending:!result.pilot_waiting,reason:result.pilot_waiting?'test_completed':result.reason,wait_until:result.retry_at||null});}}
      catch(error){
       if(!await valid()||error.message==='cancelled')return;
       const failed=error.status===401?'backend_login_required':error.status===403?'backend_permission_denied':error.message;
@@ -77,13 +90,13 @@
      return;
     }
     if(p.desired_running&&(s.enabled||p.pending||explicit)){
-     p={...p,pending:HOLD.has(reason),reason,recovered_at:null};await this.save(owner,p);
+     p={...p,pending:HOLD.has(reason),reason,recovered_at:null,wait_until:null};await this.save(owner,p);
      if(!await valid())return;
      if(s.enabled||s.last_error!==reason)await this.r.stop(reason,{keepPage:true,drain:!BACKEND.has(s.delivery_error),expectedOwner:owner});
     }
     await this.r.indicate?.({reason,pending:p.pending,desired_running:p.desired_running});return;
    }
-   if(!explicit&&(!p.desired_running||!p.pending||!HOLD.has(p.reason)||!HOLD.has(s.last_error))){await this.r.indicate?.({reason:null,pending:false,desired_running:p.desired_running,recovered_at:p.recovered_at});return;}
+   if(!explicit&&(!p.desired_running||!p.pending||(!HOLD.has(p.reason)||!HOLD.has(s.last_error))&&!activationWait)){await this.r.indicate?.({reason:null,pending:false,desired_running:p.desired_running,recovered_at:p.recovered_at});return;}
    if(!await valid())return;
    try{
     if(hardTerminal)throw Error(s.last_error||'pool_recovery_required');
@@ -95,8 +108,9 @@
     if(!await valid())return;
     s=await this.r.agent.read();
     const resumed=s.enabled===true&&(!s.last_error||HOLD.has(s.last_error));
-    await this.save(owner,{...p,pending:!s.enabled&&HOLD.has(s.last_error),reason:s.last_error||null,recovered_at:resumed&&p.pending&&!p.initial_login?this.r.now():null,initial_confirmed_at:resumed&&p.initial_login?this.r.now():p.initial_confirmed_at||null,initial_login:resumed?false:p.initial_login});
-    await this.r.indicate?.({reason:s.last_error,pending:!s.enabled&&HOLD.has(s.last_error),desired_running:true,recovered_at:resumed&&p.pending&&!p.initial_login?this.r.now():null});
+    const waitingStart=!s.enabled&&WAIT.has(s.last_error)&&s.control?.reason===s.last_error&&Number.isFinite(s.next_at),pending=!s.enabled&&(HOLD.has(s.last_error)||waitingStart);
+    await this.save(owner,{...p,pending,reason:s.last_error||null,wait_until:waitingStart?s.next_at:null,recovered_at:resumed&&p.pending&&!p.initial_login?this.r.now():null,initial_confirmed_at:resumed&&p.initial_login?this.r.now():p.initial_confirmed_at||null,initial_login:resumed?false:p.initial_login});
+    await this.r.indicate?.({reason:s.last_error,pending,desired_running:true,recovered_at:resumed&&p.pending&&!p.initial_login?this.r.now():null});
    }catch(error){
     if(!await valid()||error.message==='cancelled')return;
     const reason=error.status===401?'backend_login_required':error.status===403?'backend_permission_denied':error.message;

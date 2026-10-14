@@ -27,7 +27,9 @@
     let password = await storage.get('install_secret');
     if (!password) { password = secret(); await storage.set('install_secret', password); }
     const account = await api.enroll({ invite: token, install_secret: password, consent: CrowdCore.CONSENT, platform: os || api.config.platform || platform() });
-    await api.login(account.email, 'Cr4!' + password);
+    const login=await api.login(account.email, 'Cr4!' + password);
+    const session=await storage.get('session');
+    if(login?.confirmation_required || !session?.user?.id || !session.access_token || !session.refresh_token || !Number.isFinite(session.expires_at) || session.expires_at<=Date.now() || (session.user.email && session.user.email.toLowerCase()!==account.email.toLowerCase()))throw new Error('backend_unavailable');
     await storage.set('pending_invite', null);
   }
   async function download(release, progress = () => {}) {

@@ -1,0 +1,17 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),crypto=require('node:crypto');
+const source=fs.readFileSync('v4/src/participant-background.js','utf8'),start=source.indexOf('const updater = new CrowdUpdater('),guard=source.slice(start).match(/isBusy:(async\(\)=>\{[\s\S]+?\}),version:/)?.[1];assert(guard);
+function fixture(){
+ const state={enabled:true,pilot_waiting:true,pilot_phase:'awaiting_acceptance',last_error:'test_completed',phase:'enrich',outbox:[],work_slots:[],task:{id:19,lease:'original'},enrichment:{proof:'original',sdk_pending:null,comments:[{id:'kept'}]},received:2};
+ const raw={session:{user:{id:'fixture'},refresh_token:'local-fixture'},'agent:fixture':state,updater_enabled:true},calls=[];let reloads=0;
+ const agent={read:async()=>state},recovery={},ctx=vm.createContext({agent,recovery,pendingCommands:0});vm.runInContext(fs.readFileSync('v4/src/updater.js','utf8'),ctx);
+ const updater=new ctx.CrowdUpdater({agent,storage:{get:async key=>raw[key],set:async(key,v)=>raw[key]=v},version:'4.2.65',releaseHash:async()=>'a'.repeat(64),isBusy:vm.runInContext('('+guard+')',ctx),chrome:{runtime:{sendNativeMessage:async(_,m)=>{calls.push(m);return {status:'pending_reload',version:'4.2.66'};},reload:()=>reloads++},alarms:{create:async()=>{}}}});
+ return {state,raw,agent,recovery,ctx,calls,updater,reloads:()=>reloads,hash:()=>crypto.createHash('sha256').update(JSON.stringify([raw.session,state])).digest('hex')};
+}
+const settle=async()=>{for(let i=0;i<10;i++)await new Promise(r=>setImmediate(r));};
+(async()=>{
+ const f=fixture(),hash=f.hash();await f.updater.check();assert.equal(f.calls.length,1);assert.equal(f.calls[0].action,'apply');assert.equal(f.reloads(),1);assert.equal(f.hash(),hash,'session/task/enrichment remain byte-identical across apply and reload boundary');
+ for(const change of [f=>f.state.last_error='daily_quota',f=>f.state.pilot_phase='active',f=>f.state.outbox=[{request:'unknown'}],f=>f.state.work_slots=[{id:'unknown'}],f=>f.state.sdk_unknown=true,f=>f.state.sdk_pending={status:'unknown'},f=>f.state.pending_risk='captcha',f=>f.state.risk_report={state:'sending'},f=>f.state.pending_observation_batch={request:'unknown'},f=>f.agent.pendingStop=Promise.resolve(),f=>f.agent.stopping=true,f=>f.agent.stopActive=Promise.resolve(),f=>f.agent.poolJobs=new Map([['a',1]]),f=>f.ctx.pendingCommands=1,f=>f.recovery.active=true]){const f=fixture();change(f);const hash=f.hash();assert.equal((await f.updater.check()).blocked,'executor_busy');assert.equal(f.calls.length,0);assert.equal(f.hash(),hash);}
+ const wait=fixture();let finishActive,finishWrite;wait.agent.active=new Promise(r=>finishActive=r);wait.agent.writeTail=new Promise(r=>finishWrite=r);const updating=wait.updater.check();await settle();assert.equal(wait.agent.maintenance,true);assert.equal(wait.calls.length,0);finishActive();await settle();assert.equal(wait.calls.length,0);finishWrite();await updating;assert.equal(wait.reloads(),1);
+ const race=fixture();let done;race.agent.active=new Promise(r=>done=r);const updatingRace=race.updater.check();await settle();race.state.sdk_pending={status:'unknown'};done();assert.equal((await updatingRace).blocked,'executor_busy');assert.equal(race.calls.length,0);
+ console.log('PASS production participant updater: exact parked nonempty enrichment survives apply/reload, 15 uncertainty/activity holds, writer drain and second-guard race; native reply is isolated fixture');
+})().catch(e=>{console.error(e);process.exitCode=1;});

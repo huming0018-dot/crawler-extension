@@ -11,11 +11,11 @@ function fixture(extra={}){
  const health=new CrowdPlatformHealth({storage,owner:async()=>owner,now:()=>now,probe:async()=>probe?await probe():pages});
  const r={storage,owner:async()=>owner,now:()=>now,uuid:randomUUID,random:()=>.5,schedule:async(...v)=>schedules.push(v),scheduleDelivery:async()=>{},cancelDelivery:async()=>{},cancel:async()=>{},close:async()=>{throw Error('must retain work page');}};
  const api={rpc:async(name,p)=>{calls.push({name,p});if(name==='status')return status?await status():{participant:{status:'approved'}};if(name==='guard')return {version:1,ttl_ms:60000,paused:false,allowed:true,reason:null,wait_ms:0,gap_ms:1000,caps:{search:30,detail:60,comment:120,scroll:120},counts:{search:0,detail:0,comment:0,scroll:0}};if(name==='claim')return {task:structuredClone(task)};throw Error('unexpected '+name);}};
- r.retireLoginPage=async()=>calls.push({name:'retire-metadata'});r.open=async()=>{calls.push({name:'open-new-owned'});};
+ r.retireLoginPage=async()=>calls.push({name:'retire-metadata'});r.open=async url=>{calls.push({name:'open-new-owned',url});};
  const agent=new CrowdAgent(r,api);let controller;
- const make=()=>new CrowdParticipantSession({bootstrap:(valid,retry)=>agent.bootstrapLoginPage(valid,retry),storage,owner:r.owner,now:r.now,health,agent,start:agent.start.bind(agent),stop:agent.stop.bind(agent),rebind:async()=>{calls.push({name:'rebind'});}});
+ const make=()=>new CrowdParticipantSession({bootstrap:(valid,retry,stopped)=>agent.bootstrapLoginPage(valid,retry,stopped),storage,owner:r.owner,now:r.now,health,agent,start:agent.start.bind(agent),stop:agent.stop.bind(agent),rebind:async()=>{calls.push({name:'rebind'});}});
  controller=make();r.sourceHealth=()=>controller.require();
- return {data,storage,task,agent,health,calls,schedules,make,get controller(){return controller;},restart(){controller=make();},page(p){pages={xiaohongshu:p};now+=60001;},probe(p){probe=p;},status(p){status=p;},advance(n){now+=n;},read:()=>agent.read(),async modify(p){const s=await agent.read();Object.assign(s,p);await agent.save(s);}};
+ return {data,storage,task,agent,health,calls,schedules,make,get now(){return now;},get controller(){return controller;},restart(){controller=make();},page(p){pages={xiaohongshu:p};now+=60001;},probe(p){probe=p;},status(p){status=p;},advance(n){now+=n;},read:()=>agent.read(),async modify(p){const s=await agent.read();Object.assign(s,p);await agent.save(s);}};
 }
 (async()=>{
  let f=fixture({outbox:[{request:'stable-original',kind:'rating',proof:'p',score:4,reason:'original review'}],received:1});
@@ -61,6 +61,48 @@ function fixture(extra={}){
  f=await waiting63();{const rpc=f.agent.api.rpc;f.agent.api.rpc=async(name,p)=>{const v=await rpc(name,p);return name==='guard'?{...v,allowed:false,reason:'session_rest',wait_ms:1800000}:v;};}
  await f.controller.check(true);s=await f.read();assert.equal(s.first_login_page.stage,'waiting');assert.equal(s.control.allowed,false);assert.equal(s.control.reason,'session_rest');assert.deepEqual(f.calls.map(x=>[x.name,x.p?.p_action]),[['guard','control']],'63 old allowed=true is not a current admission');
  f.restart();await f.controller.check(true);assert.equal(f.calls.length,1);await f.controller.intent(false);await f.agent.stop('user_stopped',{keepPage:true});f.advance(1800001);await f.controller.check(true);assert.equal(f.calls.length,1,'manual stop cancels all automatic admission');
+ // Explicit Continue after a manual stop can restore only a saved, known waiting checkpoint.
+ for(const beforeDeadline of [true,false]){
+  f=await waiting63();const rpc=f.agent.api.rpc;let blocked=true;
+  f.agent.api.rpc=async(name,p)=>{const v=await rpc(name,p);return name==='guard'?{...v,allowed:!blocked&&p.p_action==='search',reason:blocked?'session_rest':null,wait_ms:blocked?120000:0}:v;};
+  await f.controller.check(true);await f.controller.intent(false);await f.agent.stop('user_stopped',{keepPage:true});
+  f.restart();await f.controller.check(true);assert.equal(f.calls.length,1,'manual stop never resumes itself');
+  if(beforeDeadline){await f.controller.start();assert.equal(f.calls.length,1,'Continue preserves the saved server deadline');assert.equal((await f.read()).last_error,'session_rest');assert.equal((await f.controller.status()).pending,true);f.restart();await f.controller.check(true);assert.equal(f.calls.length,1);}
+  blocked=false;f.advance(120001);if(beforeDeadline)await f.controller.check(true);else await f.controller.start();
+  assert.equal((await f.read()).first_login_page.stage,'opened');assert.equal((await f.read()).task.id,19);assert.equal(f.calls.filter(x=>x.name==='open-new-owned').length,1);assert.deepEqual(f.calls.filter(x=>x.name==='claim').map(x=>x.p),[{p_task:19}]);
+ }
+ for(const patch of [{first_login_page:{stage:'opening',task_id:19,reason:'session_rest'}},{first_login_page:{stage:'checking_wait',task_id:19,reason:'session_rest'}},{first_login_page:{stage:'waiting',task_id:99,reason:'session_rest'}},{pending_risk:'captcha'},{outbox:[{request:'unknown-kept',kind:'note'}]},{delivery_error:'backend_permission_denied'}]){
+  f=await waiting63();await f.modify({last_error:'user_stopped',first_login_page:{stage:'waiting',task_id:19,reason:'session_rest',retry_at:0},...patch});await f.controller.intent(false);f.restart();await f.controller.check(true);await f.controller.start().catch(()=>{});assert.equal(f.calls.length,0,JSON.stringify(patch));assert.equal((await f.read()).enabled,false);
+ }
+ // Full first-login actor sequence: admitted search, visible subject, control wait, deadline, first body receipt.
+ for(const waitReason of ['action_gap','session_rest','global_pause']){
+  f=fixture({enabled:false,last_error:'login_required'});f.page({status:'unknown'});const rpc=f.agent.api.rpc;let until=0;
+  f.agent.api.rpc=async(name,p)=>{
+   if(name==='submit'){f.calls.push({name,p});return {request:p.p_request,gate:'received',inserted:true,duplicate:false,task_received:1};}
+   const v=await rpc(name,p);if(name!=='guard')return v;
+   if(p.p_action==='search'){until=f.now+120000;return v;}
+   if(p.p_action==='control')return {...v,allowed:false,reason:f.now<until?waitReason:null,wait_ms:Math.max(0,until-f.now)};
+   return v;
+  };
+  await f.controller.check(true);assert.equal((await f.read()).first_login_page.stage,'opened');
+  f.page({status:'authenticated',principal_ref:'a'.repeat(64)});await f.controller.check(true);s=await f.read();assert.equal(s.last_error,waitReason);assert.equal(s.enabled,false);assert.equal((await f.controller.status()).pending,true);assert.equal(s.wait_kind,'action');
+  const heldCalls=f.calls.length;f.restart();await f.controller.check(true);await f.controller.start();assert.equal(f.calls.length,heldCalls,'known activation wait never calls start before its deadline');
+  // Reproduce 64's pending=false checkpoint; explicit persisted intent and current control proof suffice.
+  const saved=await f.storage.get('participant-session:fixture-owner');await f.storage.set('participant-session:fixture-owner',{...saved,pending:false});
+  f.advance(until-f.now+1);await f.controller.check(true);assert.equal((await f.read()).enabled,true);assert.equal((await f.read()).phase,'search');assert.equal((await f.controller.status()).wait_until,null);
+  const ids=['abcdef0123456789abcdef01','abcdef0123456789abcdef02'],links=ids.map(id=>'https://www.xiaohongshu.com/explore/'+id);
+  const record={schema_version:4,standard:{platform:'xiaohongshu',note_id:ids[0],url:links[0],title:'Original task fixture',captured_at:new Date(f.now).toISOString(),published_at:null,author_display:null,like_count:1,collect_count:1,comment_count:0},evidence:{text:'Synthetic first body for actor regression.',original_length:42,truncated:false,source:'rendered_public_dom',parser_version:'4.2.65'},extra:{author_opinion_quotes:[]}};
+  record.evidence.original_length=record.evidence.text.length;f.agent.r.fastCapture=true;
+  f.agent.r.probe=async action=>{f.calls.push({name:'probe-'+action});return action==='search'?{ready:true,keyword:f.task.query,links}:{ready:true,record};};
+  const step=()=>f.agent.step(()=>{},new AbortController().signal);
+  await step();f.advance(1001);await step();assert.equal((await f.read()).phase,'search_done');await step();assert.equal((await f.read()).phase,'note');f.advance(1001);await step();
+  s=await f.read();assert.equal(s.received,1);assert.equal(s.outbox.length,0);assert.equal(s.task.id,19);assert.equal(f.calls.filter(x=>x.name==='guard'&&x.p.p_action==='search').length,1);assert.equal(f.calls.filter(x=>x.name==='open-new-owned'&&x.url.includes('/search_result')).length,1);assert.equal(f.calls.filter(x=>x.name==='submit').length,1);assert.equal(f.calls.find(x=>x.name==='submit').p.p_task,19);
+ }
+ // A claim's explicit acceptance completion cannot be misreported as platform recovery.
+ f=await waiting63();const indications=[];f.controller.r.indicate=async value=>indications.push(value);{const rpc=f.agent.api.rpc;f.agent.api.rpc=async(name,p)=>name==='claim'?{error:'test_completed',pilot_phase:'awaiting_acceptance'}:rpc(name,p);}
+ await f.controller.check(true);assert.equal((await f.read()).pilot_waiting,true);assert.equal((await f.controller.status()).pending,false);assert.equal(indications.at(-1).pending,false);assert.equal(indications.at(-1).reason,'test_completed');
+ // A manual stop during an activation wait cannot be converted to automatic continuation.
+ f=fixture({enabled:false,last_error:'action_gap',control:{version:1,reason:'action_gap'},next_at:0});await f.storage.set('participant-session:fixture-owner',{desired_running:false,pending:false,reason:null});await f.controller.check(true);assert.equal(f.calls.length,0);
  // Unknown control/search results and risk responses must never repeat a source action.
  f=await waiting63();f.agent.api.rpc=async(name,p)=>{f.calls.push({name,p});throw Error('network_unknown');};await f.controller.check(true);assert.equal((await f.read()).first_login_page.stage,'checking_wait');f.restart();await f.controller.check(true);await f.controller.start().catch(()=>{});assert.equal(f.calls.length,1);
  for(const guardReason of ['captcha','rate_limit']){f=await waiting63();const rpc=f.agent.api.rpc;f.agent.api.rpc=async(name,p)=>{const v=await rpc(name,p);return name==='guard'?{...v,allowed:false,reason:guardReason,wait_ms:1000}:v;};await f.controller.check(true);assert.equal((await f.read()).last_error,guardReason);f.advance(2000);f.restart();await f.controller.check(true);assert.equal(f.calls.length,1);}
