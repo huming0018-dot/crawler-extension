@@ -52,6 +52,127 @@
       s.wait_kind='action';s.control=null;s.control_expires=0;
       await this.save(s);alive();if(s.enabled)await this.schedule(s,s.next_at);return true;
     }
+    recoveryUnsafe(s) {
+      return !!(s.test_run||s.outbox?.length||s.work_slots?.length||s.pending_batch||s.pending_observation_batch||s.enrichment?.sdk_pending||s.sdk_pending||s.sdk_unknown||s.risk_report||s.pending_risk||['backend_login_required','backend_permission_denied'].includes(s.delivery_error));
+    }
+    async finishAcknowledgedTask(s, alive = ()=>{}, signal) {
+      const t=s.task;
+      if(!this.r.recoveryPages||!t||this.recoveryUnsafe(s)||!(t.target>0&&t.received>=t.target)||t.comments_capture===true||t.structured_capture===true||t.repair_only||t.repair_notes?.length)return false;
+      let mark=s.task_closure;
+      if(mark&&mark.stage!=='acknowledged'&&(mark.task_id!==t.id||mark.lease!==t.lease_token))throw Error('task_reconciliation_required');
+      if(mark?.stage==='pending'&&this.r.now()<mark.retry_at)return false;
+      if(!mark||mark.stage==='acknowledged'){
+        const snapshot={};for(const key of ['task','phase','enrichment','note_id','note_url','candidates','seen','search_round','api_capture_ledger'])snapshot[key]=s[key]??null;
+        mark=s.task_closure={stage:'pending',task_id:t.id,lease:t.lease_token,snapshot,created_at:this.r.now()};
+      }
+      // finish is idempotent for this exact owner/task/lease. An unknown reply may
+      // retry only this closure; it never creates a new assignment or source action.
+      mark.retry_at=this.r.now()+60000;await this.save(s);alive();
+      let result;try{result=await this.api.rpc('finish',{p_task:t.id,p_lease:t.lease_token},signal);alive();}
+      catch(error){alive();if(error.status===401||error.status===403)throw error;mark.error='finish_unknown';await this.save(s);return false;}
+      if(result?.status!=='complete'||!Number.isSafeInteger(result.received)||result.received<t.target||result.error){mark.error=result?.error==='lease_lost'?'lease_lost':'task_reconciliation_required';await this.save(s);return false;}
+      const archived={...mark.snapshot,closed_at:this.r.now(),receipt:{status:result.status,received:result.received,available_at:result.available_at??null},enrichment_result:mark.snapshot.enrichment?'partial_archived':'not_requested'};
+      s.task_archives||=[];const previous=s.task_archives.find(a=>a.task?.id===t.id&&a.task?.lease_token===t.lease_token);
+      if(previous){for(const key of Object.keys(mark.snapshot))if(JSON.stringify(previous[key])!==JSON.stringify(mark.snapshot[key]))throw Error('task_archive_conflict');}
+      else s.task_archives.push(archived);
+      s.task_closure={stage:'acknowledged',task_id:t.id,lease:t.lease_token,received:result.received,closed_at:this.r.now()};
+      s.task=null;s.enrichment=null;s.note_id=null;s.note_url=null;s.phase='idle';s.candidates=[];s.seen=[];s.search_round=0;delete s.platform_resume_task;
+      await this.save(s);alive();return true;
+    }
+    async reconcileCompletedTask(valid) {
+      await this.initializeGeneration();if(this.active||this.stopping||this.maintenance)return false;
+      const generation=this.generation,stop=this.stopIntent||0,alive=()=>{if(generation!==this.generation||stop!==(this.stopIntent||0))throw Error('cancelled');};
+      const check=async()=>{alive();if(!await valid())throw Error('cancelled');};
+      this.active=(async()=>{
+        const s=await this.read();await check();
+        if(s.consent!==C.CONSENT||this.recoveryUnsafe(s)||['backend_login_required','backend_permission_denied','captcha','rate_limit','user_stopped'].includes(s.last_error))return false;
+        const full=s.task?.target>0&&s.task.received>=s.task.target&&!s.task.comments_capture&&!s.task.structured_capture&&!s.task.repair_only&&!s.task.repair_notes?.length;
+        if(!full&&!s.acceptance_reconcile)return false;
+        if(s.acceptance_reconcile_at&&this.r.now()<s.acceptance_reconcile_at+60000)return false;
+        s.acceptance_reconcile=true;s.acceptance_reconcile_at=this.r.now();s.enabled=false;await this.save(s);await check();
+        const status=await this.api.rpc('status');await check();if(status.participant?.status!=='approved')throw Error('approval_required');
+        if(full){await this.finishAcknowledgedTask(s,alive);await check();if(s.task)return false;}
+        const control=await this.control(s,'control',alive);await check();
+        if(control.reason==='test_completed'&&control.pilot_phase==='awaiting_acceptance'){
+          s.enabled=true;s.delivery_enabled=true;s.acceptance_reconcile=false;await this.save(s);await this.schedule(s,this.r.now()+60000);return true;
+        }
+        if(control.pilot_phase==='active'&&!control.paused&&!control.reason){s.acceptance_reconcile=false;s.enabled=false;s.last_error='identity_verification_required';await this.save(s);return true;}
+        await this.save(s);return false;
+      })().finally(()=>{this.active=null;});return this.active;
+    }
+    async recoverLoginPage(valid,{manual=false,confirm=false}={}) {
+      await this.initializeGeneration();if(this.active||this.stopping||this.maintenance)throw Error('executor_busy');
+      const generation=this.generation,stopIntent=this.stopIntent||0,owner=this.generationOwner;
+      const check=async()=>{if(generation!==this.generation||stopIntent!==(this.stopIntent||0)||owner!==(await this.r.owner?.()||'standalone')||!await valid())throw Error('cancelled');};
+      const alive=()=>{if(generation!==this.generation||stopIntent!==(this.stopIntent||0))throw Error('cancelled');};
+      this.controller=new AbortController();const signal=this.controller.signal;
+      this.active=(async()=>{
+        const s=await this.read();await check();
+        if(s.consent!==C.CONSENT)throw Error('consent_required');
+        if(this.recoveryUnsafe(s))throw Error('task_reconciliation_required');
+        const expected=await this.r.expectedPrincipal?.();if(!/^[a-f0-9]{64}$/.test(expected||''))throw Error('identity_verification_required');
+        let m=s.verification_page;
+        if(confirm){
+          if(!m||m.stage!=='opened'||m.expected_ref!==expected)throw Error('verification_page_unknown');
+          const page=await this.r.verifyPage(m.slot);await check();
+          if(page?.status!=='authenticated'||page.principal_ref!==expected)throw Error(page?.status==='authenticated'?'platform_identity_changed':page?.reason||'identity_verification_required');
+          if(!m.manual){
+            if(!s.task||s.task.id!==m.task_id||s.task.lease_token!==m.lease||Date.parse(s.task.lease_until)<=this.r.now())throw Error('lease_lost');
+            await this.r.adoptVerification(m.slot,valid);await check();s.phase='search';s.page_deadline=this.r.now()+180000;s.wait_kind='page';s.next_at=this.r.now()+1000;s.assignment_refresh=false;
+          }
+          m.stage='confirmed';m.confirmed_at=this.r.now();await this.save(s);return {confirmed:true,manual:m.manual};
+        }
+        // Only known opened/confirmed pages can advance generations; an unknown
+        // creation still needs reconciliation and must never open a second page.
+        if(m&&['opened','confirmed'].includes(m.stage)&&this.r.verificationCurrent&&!await this.r.verificationCurrent(m.slot)){
+          await check();if(m.expected_ref!==expected)throw Error('platform_identity_changed');
+          s.verification_history||=[];s.verification_history.push({...m,retired_at:this.r.now(),retired_reason:'browser_generation_changed'});m=null;
+        }
+        if(m?.stage==='confirmed'&&m.manual&&!manual){
+          // A manually opened home page is not a task search. Preserve its proof
+          // and allocate a separately admitted page only after the experiment starts.
+          s.verification_history||=[];s.verification_history.push(m);m=null;
+        }
+        if(m){
+          if(m.expected_ref!==expected)throw Error('platform_identity_changed');
+          if(['opened','confirmed'].includes(m.stage)){if(manual)await this.r.focusVerification?.(m.slot);return {opened:true,confirmed:m.stage==='confirmed',manual:m.manual};}
+          if(['claiming','admitting','opening'].includes(m.stage))throw Error('verification_page_unknown');
+          if(m.stage==='blocked')throw Error(m.reason||'verification_page_unknown');
+          if(m.retry_at>this.r.now())return {waiting:true,reason:m.reason,retry_at:m.retry_at};
+        }
+        if(!manual&&s.pilot_phase!=='active')return {waiting:true,reason:'test_completed'};
+        if(!manual){s.enabled=false;s.last_error='identity_verification_required';await this.save(s);await check();}
+        if(!m){m=s.verification_page={stage:'intent',slot:'verify-'+this.r.uuid(),manual,expected_ref:expected,created_at:this.r.now()};await this.save(s);await check();}
+        const status=await this.api.rpc('status',{},signal);await check();if(status.participant?.status!=='approved')throw Error('approval_required');
+        const control=await this.control(s,'control',alive,signal);await check();await this.save(s);
+        const wait=async value=>{m.stage='waiting';m.reason=value.reason;m.retry_at=this.r.now()+Math.max(1000,value.wait_ms||60000);await this.save(s);return {waiting:true,reason:m.reason,retry_at:m.retry_at};};
+        if(manual){
+          if(control.reason&&!['test_completed','daily_quota','task_full','session_rest','action_gap','global_pause'].includes(control.reason))throw Error(control.reason);
+        }else{
+          if(control.pilot_phase!=='active')return await wait({reason:control.reason||'test_completed',wait_ms:60000});
+          if(control.paused||control.reason)return await wait(control);
+          if(s.task&&s.task.received>=s.task.target){await this.finishAcknowledgedTask(s,alive,signal);await check();}
+          if(s.task&&(s.enrichment||s.note_id||s.note_url||!['idle','search'].includes(s.phase)||s.task.received>0||Date.parse(s.task.lease_until)<=this.r.now()))throw Error('task_reconciliation_required');
+          if(!s.task){
+            if(s.enrichment||s.note_id||s.note_url||!['idle','search'].includes(s.phase))throw Error('task_reconciliation_required');
+            m.stage='claiming';await this.save(s);await check();
+            const claimed=await this.api.rpc('claim',{p_task:null},signal);await check();
+            if(await this.parkPilot(s,claimed,alive)){m.stage='waiting';m.reason='test_completed';m.retry_at=this.r.now()+60000;await this.save(s);return {waiting:true,reason:m.reason,retry_at:m.retry_at};}
+            if(claimed?.error){m.stage='blocked';m.reason=claimed.error;await this.save(s);throw Error(claimed.error);}
+            if(!claimed?.task){m.stage='waiting';m.reason='no_task';m.retry_at=this.r.now()+60000;await this.save(s);return {waiting:true,reason:m.reason,retry_at:m.retry_at};}
+            const t=claimed.task;m.claimed_task=t;await this.save(s);await check();
+            if(!Number.isSafeInteger(t.id)||!t.lease_token||!(Date.parse(t.lease_until)>this.r.now())||t.received!==0||!(t.target>0)||C.taskPlatform(t).id!=='xiaohongshu'||typeof t.query!=='string'||!t.query.trim())throw Error('task_reconciliation_required');
+            s.task=t;s.assignment_refresh=false;await this.save(s);await check();
+          }
+          m.task_id=s.task.id;m.lease=s.task.lease_token;m.stage='admitting';await this.save(s);await check();
+          const admission=await this.control(s,'search',alive,signal);await check();
+          if(!admission.allowed||admission.paused){if(['session_rest','action_gap','global_pause','test_completed','daily_quota','task_full'].includes(admission.reason))return await wait(admission);m.stage='blocked';m.reason=admission.reason||'control_unavailable';await this.save(s);throw Error(m.reason);}
+        }
+        m.stage='opening';delete m.reason;delete m.retry_at;await this.save(s);await check();
+        await this.r.openVerification(manual?C.HOST+'/':C.taskPlatform(s.task).searchURL(s.task.query),m.slot,manual,valid);await check();
+        m.stage='opened';m.opened_at=this.r.now();await this.save(s);return {opened:true,manual};
+      })().finally(()=>{this.active=null;});return this.active;
+    }
     async control(s, action, alive, signal, note = null) {
       const before = this.r.now();
       let value;const metrics=this.r.localTest===true&&s.test_run?.state==='active'?{}:null;
@@ -315,7 +436,8 @@
         throw Error('test_new_run_required');
       }
       if (!resumePlatform) {
-        if (s.enrichment) s.enrichment.stage='done';
+        // Continue retains the original enrichment checkpoint; enrich validates
+        // its lease and page before performing the next action.
         if (s.phase === 'note') s.phase = 'reopen_note';
         if (s.phase === 'search') { s.phase = 'idle'; s.search_round = 0; }
       } else {
@@ -520,6 +642,7 @@
       try {
         alive();
         if(s.test_run && ['waiting','active'].includes(s.test_run.state) && (now>=s.test_run.expires_at || day!==s.test_run.day)) {await this.endTest(s,'test_expired');return;}
+        if(this.r.recoveryPages&&s.pilot_waiting&&s.pilot_phase==='awaiting_acceptance'&&s.last_error==='test_completed')await this.finishAcknowledgedTask(s,alive,signal);
         // A known pilot acceptance boundary needs cloud status, never a live platform page or a new claim.
         if(s.pilot_waiting||s.pilot_check_pending||s.pilot_phase==='awaiting_acceptance'&&s.last_error==='daily_quota'){
           if(!s.pilot_waiting)s.pilot_check_pending=true;
@@ -598,7 +721,8 @@
         // suspension must restart dwell; wake detection is an alarm-gap heuristic.
         if (recover || (s.last_tick != null && now - s.last_tick > 120000)) {
           if(this.r.localTest === true && s.wait_kind === 'action')s.control_checked=0;
-          if (s.enrichment) { s.enrichment.stage = 'done'; }
+          // Keep comment/profile checkpoints; enrich rechecks page, lease and action gates.
+          // Elapsed sleep is not evidence that comments ended.
           if (s.phase === 'note') { s.phase = 'reopen_note'; s.loaded_at = null; s.scrolls = 0; }
           // An admitted search survives suspension. Probe its existing page and
           // original deadline; resetting to idle would charge and navigate again.

@@ -20,10 +20,17 @@
    const revision=++this.revision,owner=await this.r.owner();if(!owner)return;
    const job=this.tail.catch(()=>{}).then(async()=>{if(revision!==this.revision||owner!==await this.r.owner())return;const p=await this.record(owner);await this.save(owner,{...p,desired_running:enabled,pending:enabled?p.pending:false,reason:enabled?p.reason:null,recovered_at:null});});this.tail=job;await job;
   }
-  async status(){const owner=await this.r.owner();if(!owner)return {status:'not_checked',desired_running:false,pending:false};const p=await this.record(owner),h=(await this.r.health.publicState()).xiaohongshu;return {...h,desired_running:p.desired_running===true,pending:p.pending===true,reason:p.reason||h.reason||null,platform_reason:h.reason||null,recovered_at:p.recovered_at||null,initial_confirmed_at:p.initial_confirmed_at||null,wait_until:p.wait_until||null,initial_login:p.initial_login===true};}
+  async status(){const owner=await this.r.owner();if(!owner)return {status:'not_checked',desired_running:false,pending:false};const p=await this.record(owner),h=(await this.r.health.publicState()).xiaohongshu,s=await this.r.agent.read();return {...h,verification_stage:s.verification_page?.stage||null,verification_manual:s.verification_page?.manual===true,verification_error:s.verification_page?.reason||null,task_closure:s.task_closure?.stage||null,desired_running:p.desired_running===true,pending:p.pending===true,reason:p.reason||h.reason||null,platform_reason:h.reason||null,recovered_at:p.recovered_at||null,initial_confirmed_at:p.initial_confirmed_at||null,wait_until:p.wait_until||null,initial_login:p.initial_login===true};}
   reason(entry){return entry?.reason || (entry?.status==='authenticated'&&entry.expected_ref&&entry.expected_ref===entry.observed_ref?null:'identity_verification_required');}
   async require(){const h=await this.r.health.check();const reason=this.reason(h.xiaohongshu);if(reason)throw Error(reason);return h.xiaohongshu;}
   async start(){await this.intent(true);return this.check(true,true);}
+  async openLogin(){
+   while(this.active)await this.active.catch(()=>{});await this.tail;
+   const owner=await this.r.owner(),revision=this.revision;if(!owner)throw Error('backend_login_required');
+   const valid=async()=>owner===await this.r.owner()&&revision===this.revision;
+   const job=(async()=>{const result=await this.r.recoverPage(valid,{manual:true});if(await valid()){const h=await this.r.health.check(true);if(result.opened&&!result.confirmed&&!this.reason(h.xiaohongshu))await this.r.recoverPage(valid,{confirm:true});}return result;})();
+   this.active=job;try{return await job;}finally{if(this.active===job)this.active=null;}
+  }
   async check(force=false,explicit=false){
    while(this.active){await this.active.catch(()=>{});if(!force&&!explicit)return;}
    const job=this.inspect(force,explicit);this.active=job;
@@ -36,15 +43,21 @@
    // Persist the inherited running/first-login intent before a source actor can pause.
    if(!await this.r.storage.get('participant-session:'+owner))await this.save(owner,p);
    let s=await this.r.agent.read();if(!await valid())return;
+   if(this.r.reconcile&&p.desired_running&&(s.acceptance_reconcile||s.task?.target>0&&s.task.received>=s.task.target)){
+    try{await this.r.reconcile(valid);if(!await valid())return;s=await this.r.agent.read();}
+    catch(error){if(!await valid()||error.message==='cancelled')return;const reason=error.status===401?'backend_login_required':error.status===403?'backend_permission_denied':error.message;await this.save(owner,{...p,pending:false,reason});await this.r.stop(reason,{keepPage:true,drain:!BACKEND.has(reason),expectedOwner:owner});return;}
+    if(s.acceptance_reconcile)return;
+   }
    // Completed acceptance has no source work; an OTA's absent receiver must not block cloud parking.
    if(s.enabled&&(s.pilot_waiting||s.pilot_check_pending||s.pilot_phase==='awaiting_acceptance'&&s.last_error==='daily_quota')){
     const h=await this.r.health.check(force);if(!await valid())return;
+    if(s.verification_page?.manual&&s.verification_page.stage==='opened'&&!this.reason(h.xiaohongshu)&&this.r.recoverPage)await this.r.recoverPage(valid,{confirm:true});
     const notice=h.xiaohongshu?.reason;
     await this.r.indicate?.({reason:['login_required','captcha','rate_limit','platform_identity_changed'].includes(notice)?notice:s.last_error,pending:false,desired_running:p.desired_running});return;
    }
-   const h=await this.r.health.check(force);if(!await valid())return;
+   let h=await this.r.health.check(force);if(!await valid())return;
    s=await this.r.agent.read();if(!await valid())return;
-   const reason=this.reason(h.xiaohongshu);
+   let reason=this.reason(h.xiaohongshu);
    const stoppedWait=explicit&&s.last_error==='user_stopped'&&s.first_login_page?.stage==='waiting'&&WAIT.has(s.first_login_page.reason);
    const waiting=p.initial_login&&p.bootstrap_started&&p.desired_running&&s.first_login_page?.task_id===s.task?.id&&['admitting','waiting'].includes(s.first_login_page?.stage)&&(WAIT.has(s.last_error)||stoppedWait)&&!BACKEND.has(s.delivery_error);
    if(waiting&&this.r.bootstrap){
@@ -65,6 +78,24 @@
    }
    const hardTerminal=!!(s.first_login_page&&s.first_login_page.stage!=='opened')||!!s.test_run||s.sdk_unknown||['sending','unknown'].includes(s.sdk_pending?.status)||['sending','unknown'].includes(s.risk_report?.state);
    const terminal=hardTerminal||BACKEND.has(s.last_error)||BACKEND.has(s.delivery_error);
+   const recoveryCandidate=this.r.recoverPage&&!terminal&&p.desired_running&&s.pilot_phase==='active'&&h.xiaohongshu?.expected_ref&&
+    !['captcha','rate_limit','platform_identity_changed','login_required'].includes(reason)&&
+    (!!s.verification_page&&s.verification_page.stage!=='confirmed'||s.verification_page?.manual||['unknown','no_page'].includes(h.xiaohongshu?.status)||await this.r.verificationNeeded?.());
+   if(recoveryCandidate){
+    try{
+     const result=await this.r.recoverPage(valid);if(!await valid())return;
+     p={...p,pending:true,reason:result?.waiting?result.reason:'identity_verification_required',wait_until:result?.retry_at||null};await this.save(owner,p);
+     if(result?.waiting){await this.r.indicate?.({reason:p.reason,pending:true,desired_running:true});return;}
+     h=await this.r.health.check(true);if(!await valid())return;reason=this.reason(h.xiaohongshu);
+     if(!reason&&!result?.confirmed){await this.r.recoverPage(valid,{confirm:true});if(!await valid())return;}
+     s=await this.r.agent.read();
+    }catch(error){
+     if(!await valid()||error.message==='cancelled')return;
+     const failed=error.status===401?'backend_login_required':error.status===403?'backend_permission_denied':error.message;
+     await this.save(owner,{...p,pending:false,reason:failed,wait_until:null});await this.r.stop(failed,{keepPage:true,drain:!BACKEND.has(failed),expectedOwner:owner});
+     await this.r.indicate?.({reason:failed,pending:false,desired_running:p.desired_running});return;
+    }
+   }
    const activationWait=!terminal&&p.desired_running&&!s.enabled&&WAIT.has(s.last_error)&&s.control?.reason===s.last_error&&Number.isFinite(s.next_at);
    if(activationWait){
     p={...p,pending:true,reason:s.last_error,wait_until:s.next_at};await this.save(owner,p);
@@ -72,7 +103,7 @@
    }
    // A source-gate failure can reach the actor before this DOM observer.
    if(p.desired_running&&HOLD.has(s.last_error)&&!s.enabled&&!terminal)p={...p,pending:true,reason:s.last_error};
-   if(!explicit&&(terminal||!s.enabled&&!HOLD.has(s.last_error)&&!activationWait)){
+   if(!explicit&&(terminal||!s.enabled&&!HOLD.has(s.last_error)&&!activationWait&&!recoveryCandidate)){
     if(p.pending){p={...p,pending:false,reason:s.last_error||s.delivery_error||null};await this.save(owner,p);}
     await this.r.indicate?.({reason:s.last_error||reason,pending:false,desired_running:p.desired_running});return;
    }
@@ -96,7 +127,7 @@
     }
     await this.r.indicate?.({reason,pending:p.pending,desired_running:p.desired_running});return;
    }
-   if(!explicit&&(!p.desired_running||!p.pending||(!HOLD.has(p.reason)||!HOLD.has(s.last_error))&&!activationWait)){await this.r.indicate?.({reason:null,pending:false,desired_running:p.desired_running,recovered_at:p.recovered_at});return;}
+   if(!explicit&&(!p.desired_running||!p.pending||(!HOLD.has(p.reason)||!HOLD.has(s.last_error))&&!activationWait&&!recoveryCandidate)){await this.r.indicate?.({reason:null,pending:false,desired_running:p.desired_running,recovered_at:p.recovered_at});return;}
    if(!await valid())return;
    try{
     if(hardTerminal)throw Error(s.last_error||'pool_recovery_required');

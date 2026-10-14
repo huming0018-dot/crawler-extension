@@ -50,6 +50,10 @@ errors.task_full = '该任务已满，正在自动领取下一项。';
 errors.daily_quota = '今日配额已满，已有证据保留，稍后自动重试。';
 errors.unsupported_platform = '此任务的平台尚未接入当前版本，已暂停，请等待平台支持更新。';
 errors.work_page_missing = '采集页面尚未打开，请先开始或继续任务。';
+errors.verification_page_unknown = '核验页面或任务领取的结果尚未确认，原记录保留。请联系邀请人核对；不要重复安装或报名。';
+errors.task_reconciliation_required = '原任务或未回传操作需要核对，已保留全部进度，暂不领取替代任务。';
+errors.task_archive_conflict = '原任务归档需要核对，当前任务与记录均保留。';
+errors.no_task = '当前没有可领取任务，等待中心分配后自动继续。';
 errors.invite_full = '此邀请的名额已占用。已参加过请回到原浏览器和个人资料继续，更新无需重新报名；不要卸载插件。';
 Object.assign(errors, {
   invalid_receipt: '中台回执不完整，证据仍保留在本机，正在重试。',
@@ -95,6 +99,12 @@ async function refresh() {
     const notice={login_required:'小红书已退出登录，请在原窗口登录原账号。',platform_identity_changed:'当前小红书账号已改变，请切回原账号。',captcha:'小红书需要本人完成验证。',rate_limit:'小红书已限流，请按原页面提示处理。'}[platform?.platform_reason];
     if(notice){fields['平台账号']=notice;$('welcome').textContent='两条验收已回传，等待实验启动。'+notice;}
   }
+  if(platform?.verification_stage){
+    const label={intent:'正在准备恢复页面连接',claiming:'正在确认本次任务领取结果',admitting:'正在确认访问准入',opening:'正在确认新核验页是否已打开',waiting:errors[platform.verification_error]||'等待服务端准入',opened:platform.platform_reason==='login_required'?'请在新核验页登录原账号':'已打开自有核验页，正在确认原账号',confirmed:platform.verification_manual?'原账号核验通过；此登录操作不领取任务':'原账号核验通过，已接续本次任务',blocked:errors[platform.verification_error]||'核验暂时不能继续'};
+    fields['页面连接']=label[platform.verification_stage]||'原核验记录保留';
+    if(platform.verification_stage==='confirmed'&&platform.verification_manual&&platform.platform_reason)fields['页面连接']=errors[platform.platform_reason]||'原账号需要重新核验';
+  }
+  if(platform?.task_closure==='acknowledged')fields['上轮任务']='已获云端完成回执；未完成补充内容原样归档';
   if(!data.session && !data.legacy_installation){fields['最近提示']=data.entry_state==='identity_recovery_required'?errors.identity_recovery_required:data.invited?'请确认参与后开始。':errors.invite_required;if(data.entry_state==='identity_recovery_required'){fields['中台账户']='原参与身份待恢复';fields['参与状态']='原数据保留，暂不重新报名';}}
   if(data.legacy_installation)Object.assign(fields,{'中台账户':'旧版参与身份（待接续）','参与状态':'旧版数据原样保留','任务':'请在原版查看','待回传 / 待处理':'请在原版查看','最近提示':errors.legacy_migration_required});
   $('status').replaceChildren();

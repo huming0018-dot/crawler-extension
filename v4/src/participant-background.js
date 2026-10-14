@@ -46,6 +46,7 @@ async function navigationDocument(id, tab) {
 let pendingTabCreation = null, fastTickTimer = null, fastTickAt = null, fastUploadTimer = null, fastUploadAt = null;
 const runtime = {
   localTest:false,
+  recoveryPages:true,
   siteSDK:true,
   sdkAllowed:async s=>s?.task?.capabilities?.site_sdk_v1===true,
   leaseScope:async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join(''),
@@ -59,6 +60,12 @@ const runtime = {
   splitCapture: true,
   sourceHealth:()=>participantSession.require(),
   retireLoginPage:valid=>workTabs.retireLoginPage(valid),
+  expectedPrincipal:async()=>(await platformHealth.read()).xiaohongshu?.expected_ref,
+  verificationCurrent:slot=>workTabs.verificationCurrent(slot),
+  async verifyPage(slot){const owner=await runtime.owner(),expected=(await platformHealth.read()).xiaohongshu?.expected_ref;const page=await workTabs.verificationProbe(slot,async value=>{const p=await normalizeSessionPage(value,owner);return p.status==='authenticated'&&p.principal_ref===expected;});return normalizeSessionPage(page,owner);},
+  async openVerification(url,slot,manual,valid){if(!await valid())throw Error('cancelled');await workTabs.open(url,slot,{verificationHome:manual});if(!await valid())throw Error('cancelled');if(manual)await workTabs.focusVerification(slot);},
+  adoptVerification:(slot,valid)=>workTabs.adoptVerification(slot,valid),
+  focusVerification:slot=>workTabs.focusVerification(slot),
   trace:(stage,options)=>trace.event(stage,options),
   storage, now: Date.now, random: Math.random, uuid: () => crypto.randomUUID(),
   // Align the next wake with the durable deadline, not an unrelated 30s grid.
@@ -127,7 +134,7 @@ async function requireParticipant(){
 const tickAgent=agent.tick.bind(agent),startAgent=agent.start.bind(agent),stopAgent=agent.stop.bind(agent);
 const platformHealth=new CrowdPlatformHealth({storage,owner:runtime.owner,now:Date.now,probe:probePlatformSessions});
 const participantSession=new CrowdParticipantSession({storage,owner:runtime.owner,now:Date.now,health:platformHealth,agent,
-  start:startAgent,stop:stopAgent,bootstrap:(valid,retry,stopped)=>agent.bootstrapLoginPage(valid,retry,stopped),rebind:valid=>workTabs.rebindAfterLogin(valid),indicate:indicatePlatformSession});
+  start:startAgent,stop:stopAgent,bootstrap:(valid,retry,stopped)=>agent.bootstrapLoginPage(valid,retry,stopped),rebind:valid=>workTabs.rebindAfterLogin(valid),reconcile:valid=>agent.reconcileCompletedTask(valid),recoverPage:(valid,options)=>agent.recoverLoginPage(valid,options),verificationNeeded:()=>workTabs.recoveryNeeded(),indicate:indicatePlatformSession});
 // Direct controller stops cancel persisted intent before any pending recovery can start.
 agent.stop=async(reason='user_stopped',options={})=>{await participantSession.intent(false);return stopAgent(reason,options);};
 agent.tick=async(...args)=>{
@@ -138,20 +145,30 @@ agent.tick=async(...args)=>{
   if(!args[1])await participantSession.check();
   return result;
 };
+async function normalizeSessionPage(page,owner){
+  if(page?.platform!=='xiaohongshu')return {status:'unknown'};
+  if(page.status==='authenticated'&&page.verification==='rendered_account_navigation'&&/^[a-f0-9]{24}$/.test(page.principal_id||''))return {status:'authenticated',principal_ref:await runtime.leaseScope(owner+'\n'+'xiaohongshu'+'\n'+page.principal_id)};
+  return ['logged_out','challenge','unknown'].includes(page.status)?{status:page.status,reason:page.reason}:{status:'unknown'};
+}
 async function probePlatformSessions(){
   const owner=await runtime.owner();if(!owner)return {};
-  const work=await storage.get('work_tab');
+  const work=await storage.get('work_tab'),s=await agent.read(),m=s.verification_page;
+  const owned=m&&(['opened'].includes(m.stage)||m.manual&&m.stage==='confirmed');
+  let primary=null;if(owned){try{primary=await runtime.verifyPage(m.slot);}catch(error){primary={status:error.message==='rate_limit'?'challenge':'unknown',reason:error.message==='rate_limit'?'rate_limit':null};}}
   const tabs=(await chrome.tabs.query({url:['https://www.xiaohongshu.com/*','https://m.xiaohongshu.com/*']})).filter(tab=>!tab.discarded).sort((a,b)=>Number(b.id===work)-Number(a.id===work)||(b.lastAccessed||0)-(a.lastAccessed||0)).slice(0,6);
   const observations=[];
   await Promise.all(tabs.map(async tab=>{let timer;try{
     const page=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'crowd_session_probe'}),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),1500);})]);
-    if(page?.platform!=='xiaohongshu')return;
-    if(page.status==='authenticated'&&page.verification==='rendered_account_navigation'&&/^[a-f0-9]{24}$/.test(page.principal_id||'')){
-      const principal_ref=await runtime.leaseScope(owner+'\n'+'xiaohongshu'+'\n'+page.principal_id);
-      observations.push({status:'authenticated',principal_ref});
-    }else if(['logged_out','challenge','unknown'].includes(page.status))observations.push({status:page.status,reason:page.reason});
+    if(page)observations.push(await normalizeSessionPage(page,owner));
   }catch(_){}finally{clearTimeout(timer);}}));
   const loggedOut=observations.find(p=>p.status==='logged_out'),challenge=observations.find(p=>p.status==='challenge'),authenticated=observations.filter(p=>p.status==='authenticated');
+  if(primary){
+    // Other tabs can veto risk/identity conflict; they can never supply missing
+    // identity proof for the one newly created, owned verification document.
+    if(challenge)return {xiaohongshu:challenge};
+    if(primary.status==='authenticated'&&(loggedOut||authenticated.some(p=>p.principal_ref!==primary.principal_ref)))return {xiaohongshu:{status:'unknown'}};
+    return {xiaohongshu:primary};
+  }
   return {xiaohongshu:(loggedOut&&authenticated.length||new Set(authenticated.map(p=>p.principal_ref)).size>1)?{status:'unknown'}:challenge||loggedOut||authenticated[0]||{status:tabs.length?'unknown':'no_page'}};
 }
 let indicatedPlatformSession=null;
@@ -439,6 +456,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       }
       case 'export': { const s = await agent.read(); return {outbox: s.outbox, rejected: s.rejected}; }
       case 'open_login': {
+        if((await platformHealth.read()).xiaohongshu?.expected_ref)return participantSession.openLogin();
         // Keep the actual challenge/note page. Opening help is a user action,
         // not evidence that either platform or backend authentication failed.
         const held=await participantSession.status();

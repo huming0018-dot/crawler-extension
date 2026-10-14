@@ -18,7 +18,8 @@
     async key() {const owner=await this.owner();if(!owner)throw Error('backend_login_required');return 'work_tabs:'+owner;}
     matches(current,expected) {
       try {
-        const a=new URL(root.CrowdCore.navigationURL(current)),b=new URL(expected);
+        const b=new URL(expected),home=b.href===root.CrowdCore.HOST+'/';
+        const a=new URL(home?current:root.CrowdCore.navigationURL(current));if(home)return a.href===b.href;
         try{return root.CrowdCore.noteURL(a.href).id===root.CrowdCore.noteURL(b.href).id;}catch(_){}
         return a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'') && a.searchParams.get('keyword')===b.searchParams.get('keyword');
       }catch(_){return false;}
@@ -32,8 +33,9 @@
         const result=await fn(entries);await this.storage.set(key,entries);return result;
       });this.tail=pending;return pending;
     }
-    async open(url, slot) {
-      const key=await this.key(),destination=root.CrowdCore.navigationURL(url),session=await this.session();
+    async open(url, slot, {verificationHome=false}={}) {
+      const home=verificationHome&&slot.startsWith('verify-')&&url===root.CrowdCore.HOST+'/';
+      const key=await this.key(),destination=home?url:root.CrowdCore.navigationURL(url),session=await this.session();
       let entry=(await this.entries())[slot];
       if(entry?.state==='retired') {
         await this.write(entries=>{if(entries[slot]?.token===entry.token)delete entries[slot];},key);entry=null;
@@ -49,7 +51,7 @@
         await this.assertKey(key);
         await this.chrome.tabs.update(entry.tab,{url:entry.url,active:false});
       } else {
-        entry={url:destination,token:this.uuid(),state:'opening',session,tab:null,instance:this.instance,document:null};
+        entry={url:destination,token:this.uuid(),state:'opening',session,tab:null,instance:this.instance,document:null,...(slot.startsWith('verify-')?{verification:true}:{})};
         // A crash after creation and before saving the ID remains unknown;
         // recovery refuses a second creation under the same admission.
         await this.write(entries=>{entries[slot]=entry;},key);
@@ -128,6 +130,65 @@
       if(sdk){const target=await this.target(slot),proof=(await this.probe(entry.tab,'ownership')).response;if(target.entry.token!==currentEntry.token||proof?.document!==currentEntry.document||proof?.token!==currentEntry.token)throw this.failure('document_changed');}
       if(action==='comments'&&response.response?.needs_visible_page===true&&!entry.presentation){await this.present(slot,entry,ownerKey);return {ready:true};}
       return response.response || {ready:false,reason:tab.status==='loading'?'page_loading':'content_unavailable'};
+    }
+    async recoveryNeeded() {
+      const session=await this.session();
+      return Object.values(await this.entries()).some(e=>e.state!=='retired'&&(e.session!==session||e.state!=='opened'));
+    }
+    async verificationCurrent(slot) {
+      const entries=await this.entries(),entry=entries[slot],session=await this.session();
+      if(!entry||entry.session!==session)return false;
+      const current=entry.state==='retired'&&entry.retired_reason==='adopted_search'?entries.search:entry;
+      if(!(current&&current.state==='opened'&&current.session===session&&current.token===entry.token))return false;
+      // Only an explicitly missing/discarded owned tab permits replacement.
+      // An unknown Chrome error must not turn into another creation attempt.
+      let tab;try{tab=await this.chrome.tabs.get(current.tab);}catch(error){
+        if(/No tab with id/i.test(String(error?.message||error)))return false;
+        throw error;
+      }
+      return !!tab&&!tab.discarded;
+    }
+    async verificationMessage(tab,message) {
+      let timer;
+      try{return await Promise.race([this.chrome.tabs.sendMessage(tab,message),new Promise((_,reject)=>{timer=setTimeout(()=>reject(this.failure('probe_timeout')),1500);})]);}
+      finally{clearTimeout(timer);}
+    }
+    async verificationProbe(slot,accept=async()=>false) {
+      if(!slot?.startsWith('verify-'))throw this.failure('verification_slot');
+      const key=await this.key(),{entry,pending}=await this.target(slot);
+      if(!entry.verification)throw this.failure('verification_slot');if(pending)return {status:'unknown'};
+      const proof=(await this.probe(entry.tab,'ownership')).response;if(!proof?.document)return {status:'unknown'};
+      if(proof.token&&proof.token!==entry.token)throw this.failure('token_changed');
+      const page=await this.verificationMessage(entry.tab,{type:'crowd_session_probe'}),after=await this.target(slot),second=(await this.probe(entry.tab,'ownership')).response;
+      if(after.entry.token!==entry.token||after.entry.document!==entry.document||proof.document!==second?.document||proof.token!==second?.token)throw this.failure('verification_document_changed');
+      // A persisted newly-created page may outlive its worker before binding.
+      // Only this current-browser owned slot and a confirmed original principal
+      // can authorize binding; an old browser marker is rejected by target().
+      if((!entry.document||entry.document!==proof.document||proof.token!==entry.token)&&await accept(page)){
+        await this.assertKey(key);const bound=await this.verificationMessage(entry.tab,{type:'crowd_bind',token:entry.token});
+        if(bound?.document!==proof.document)throw this.failure('verification_document_changed');
+        await this.write(entries=>{if(entries[slot]?.token!==entry.token||entries[slot]?.document!==entry.document)throw Error('cancelled');entries[slot]={...entry,document:bound.document,instance:this.instance};},key);
+      }
+      return page;
+    }
+    async focusVerification(slot) {
+      const {entry,tab}=await this.target(slot);if(!entry.verification)throw this.failure('verification_slot');
+      await this.chrome.tabs.update(entry.tab,{active:true});await this.chrome.windows.update(tab.windowId,{focused:true});
+    }
+    async adoptVerification(slot,valid) {
+      const key=await this.key();await this.read('ownership',slot);if(!await valid())throw Error('cancelled');
+      const entry=(await this.entries())[slot];
+      if(!entry?.document||!entry.url.includes('/search_result?'))throw this.failure('verification_not_search');
+      await this.write(entries=>{
+        if(entries[slot]?.token!==entry.token||entries[slot]?.document!==entry.document)throw Error('cancelled');
+        // Retire only metadata. Stale tab IDs from an older browser session are
+        // never read, rebound, navigated or closed during recovery.
+        for(const [name,old]of Object.entries(entries))if(name!==slot&&old.state!=='retired'){
+          if(name==='search')entries['recovery-retired-'+this.uuid()]={...old,state:'retired',retired_reason:'verified_page_replacement'};
+          entries[name]={...old,state:'retired',retired_reason:'verified_page_replacement'};
+        }
+        entries.search={...entry};entries[slot]={...entry,state:'retired',retired_reason:'adopted_search'};
+      },key);
     }
     async retireLoginPage(valid) {
       const key=await this.key();if(!await valid())throw Error('cancelled');
