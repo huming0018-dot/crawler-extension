@@ -2,6 +2,8 @@
 (function (root) {
   'use strict';
   const C = root.CrowdCore, platform = C.platform('xiaohongshu');
+  let workDocument=null,workToken=null;
+  const hybrid=root.CrowdHybrid?.createHybrid({window,document,location});
   const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden';
   const first = selectors => [...document.querySelectorAll(selectors)].find(visible);
   const text = el => el?.innerText?.trim() || '';
@@ -30,6 +32,7 @@
     if (first('[class*="captcha"], [id*="captcha"], iframe[src*="captcha"], [class*="verify-slider"]')) return 'captcha';
     const modal = first('[role="dialog"], .error-page, .error-container, .login-container, .login-modal');
     const message = text(modal);
+    if(/^\/website-login\/error\/?$/.test(location.pathname) && /访问频繁|请求过于频繁|300013/.test(text(document.body)))return 'rate_limit';
     if (/访问频繁|操作频繁|请求过于频繁|稍后再试|访问受限/.test(message)) return 'rate_limit';
     if (first('.login-container input, .login-modal input, input[placeholder*="手机号"]') || /登录后查看|请先登录/.test(message)) return 'login_required';
     return null;
@@ -79,29 +82,52 @@
     // Prefer the visible overlay. Do not fall through to recommendation cards.
     return scopes.at(-1) || document;
   };
-  const commentPanel = () => [...noteScope().querySelectorAll('.comments-container, .comments-list, .comment-list')].find(visible);
+  const commentPanel = () => [...noteScope().querySelectorAll('.comments-container, .comments-list, .comment-list, .comments-el')].find(visible);
   function expandControl(panel) {
     return [...(panel?.querySelectorAll('.show-more, .show-more-container, .load-more, .more-replies, button') || [])].find(el =>
       visible(el) && !el.disabled && /^(?:展开(?:更多)?|查看更多|加载更多)\s*(?:\d+\s*条)?\s*(?:回复|评论)/.test(text(el)) &&
       (!el.getAttribute('href') || el.getAttribute('href').startsWith('#')));
   }
-  function comments(record) {
+  function commentScroller(panel) {
+    for(let node=panel;node&&node!==document.body;node=node.parentElement)
+      if(node.scrollHeight>node.clientHeight && /auto|scroll/.test(getComputedStyle(node).overflowY))return node;
+    return first('.note-scroller, .note-detail .scroll-container') || window;
+  }
+  function commentImage(img) {
+    const kind=img.matches('img.note-content-emoji')?'emoji':'image';
+    let url=img.currentSrc || img.src || '';
+    // Chrome upgrades this observed public CDN's HTTP markup to HTTPS for rendering.
+    if(kind==='image' && url.startsWith('http://sns-webpic-qc.xhscdn.com/'))url=url.replace(/^http:/,'https:');
+    return C.commentMediaURL(url,kind)?{kind,url,alt:img.getAttribute('alt')?.slice(0,100)||null}:null;
+  }
+  function comments(record, full = false) {
     const panel = commentPanel();
     const result = {items: [], coverage: 'visible_loaded_only', complete: false, panel_found: !!panel,
       loaded_count: 0, captured_count: 0, omitted_count: 0, truncated: false, more_available: !!expandControl(panel)};
     if (!panel) return result;
     // Own fields only: parent.innerText would incorrectly include all nested replies.
     const selector = panel.querySelector('.comment-item') ? '.comment-item' : '.comment-inner-container';
-    const nodes = [...panel.querySelectorAll(selector)].filter(visible);
+    const allNodes=[...panel.querySelectorAll(selector)], nodes=allNodes.filter(visible);
+    result.dom_census={document:workDocument,visible_count:nodes.length,hidden_count:allNodes.length-nodes.length,skipped_count:0,duplicate_count:0,unresolved_parent_count:0};
+    result.loading=[...panel.querySelectorAll('.loading, .loading-container, .spinner, [aria-busy="true"]')].some(visible);
     result.loaded_count = nodes.length;
-    const keys = new Map(nodes.map((node, index) => [node, 'comment-' + (index + 1)]));
+    const keys = new Map(nodes.map((node, index) => [node, 'comment-' + (index + 1)])), capturedKeys = new Map();
     const own = (node, selectors) => [...node.querySelectorAll(selectors)].find(el => visible(el) && el.closest(selector) === node);
     // Keep headroom below the existing client/SQL envelope limits, including long note evidence.
-    const budget = Math.min(20000, Math.max(0, 55000 - JSON.stringify(record).length));
+    const budget = full ? Infinity : Math.min(20000, Math.max(0, 55000 - JSON.stringify(record).length));
     let size = 0;
     for (const node of nodes) {
-      const original = text(own(node, '.content .note-text, .content, .comment-content, .comment-text'));
-      if (!original) continue;
+      const content=own(node, '.content .note-text, .content, .comment-content, .comment-text');
+      const original = text(content);
+      const images=full?[...node.querySelectorAll('img.note-content-emoji, .img-box img.inner')].filter(img=>img.closest(selector)===node && visible(img)):[];
+      const media=images.map(commentImage).filter(Boolean).slice(0,20);
+      for(const img of images)if(!commentImage(img)) {
+        const url=img.currentSrc || img.src || '';
+        if(!url || /^(?:data:|blob:)/.test(url))result.media_pending=true;
+        else result.truncated=true;
+      }
+      if(images.length>20)result.truncated=true;
+      if (!original && !media.length) continue;
       const ancestor = node.parentElement?.closest(selector);
       const group = node.closest('.parent-comment');
       const parent = ancestor || (group && group.querySelector(selector) !== node ? group.querySelector(selector) : null);
@@ -117,17 +143,46 @@
         text: original.slice(0, 2000), original_length: original.length, truncated: original.length > 2000,
         like_count: parseCount(likeLabel), like_label: likeLabel.slice(0, 80) || null,
         published_label: text(own(node, '.date, .time')).slice(0, 100) || null};
-      if (parentKey && !result.items.some(p => p.key === parentKey)) item.parent_key = null;
+      if (parentKey && !capturedKeys.has(parentKey)) item.parent_key = null;
+      if(media.length){item.media=media;item.content_kind=original?'mixed':'media_only';}
       const length = JSON.stringify(item).length;
-      if (result.items.length >= 50 || size + length > budget) { result.truncated = true; break; }
-      result.items.push(item); size += length;
+      if ((!full && result.items.length >= 50) || size + length > budget) { result.truncated = true; break; }
+      result.items.push(item); capturedKeys.set(item.key,item); size += length;
       result.truncated ||= item.truncated;
     }
     result.captured_count = result.items.length;
     result.omitted_count = nodes.length - result.items.length;
+    result.identity_uncertain=result.items.some(item=>!item.comment_id);
+    const capturedIDs=new Set(result.items.map(item=>item.comment_id));
+    result.dom_census.skipped_count=result.omitted_count;
+    result.dom_census.duplicate_count=result.items.length-capturedIDs.size;
+    const box = commentScroller(panel), bounds = panel.getBoundingClientRect();
+    const viewport = box === window ? {top:0,bottom:innerHeight} : box.getBoundingClientRect();
+    const scroll = box === window ? document.scrollingElement : box;
+    const roots=[...panel.querySelectorAll('.parent-comment > .comment-item')];
+    const replyGroups=[...panel.querySelectorAll('.parent-comment')].map(group=>{
+      const root=group.querySelector(selector),label=text(root?.querySelector('.reply .count'));
+      const declared=/^\d+$/.test(label)?Number(label):label==='回复'?0:null;
+      const loaded=[...group.querySelectorAll(selector)].filter(node=>node!==root && visible(node)).length;
+      return {root,declared,loaded,expand:!!expandControl(group)};
+    }).filter(group=>visible(group.root));
+    result.reply_coverage={root_count:replyGroups.length,declared_count:replyGroups.every(group=>group.declared!==null)?replyGroups.reduce((n,group)=>n+group.declared,0):null,
+      loaded_count:replyGroups.reduce((n,group)=>n+group.loaded,0),pending_groups:replyGroups.filter(group=>group.declared!==null && group.loaded<group.declared).length,
+      loading_groups:replyGroups.filter(group=>group.declared!==null && group.loaded<group.declared && !group.expand).length};
+    // Reply controls disappear during their request; their declared count still exposes unfinished loading.
+    result.loading ||= result.reply_coverage.loading_groups>0;
+    const lastRoot=roots[roots.length-1],lastBounds=lastRoot?.getBoundingClientRect();
+    result.progress = {top:Math.round(scroll.scrollTop),height:scroll.scrollHeight,client:scroll.clientHeight,
+      page_visible:!document.hidden,last_root_comment_id:lastRoot?.id||null,last_root_vertical_percent:lastBounds?.height?Math.round(Math.max(0,Math.min(lastBounds.bottom,viewport.bottom)-Math.max(lastBounds.top,viewport.top))/lastBounds.height*100):null,
+      at_end:scroll.scrollTop+scroll.clientHeight>=scroll.scrollHeight-3 && bounds.bottom<=viewport.bottom+3,
+      end_marker:!![...panel.querySelectorAll('.end-container')].find(el=>visible(el)&&/^-?\s*THE END\s*-?$/i.test(text(el))),
+      expand_count:[...panel.querySelectorAll('.show-more, .show-more-container, .load-more, .more-replies, button')].filter(el=>visible(el)&&/^(?:展开(?:更多)?|查看更多|加载更多)\s*(?:\d+\s*条)?\s*(?:回复|评论)/.test(text(el))).length,
+      empty:!![...panel.querySelectorAll('.empty-container,.empty-comment,.no-comment,.no-comments')].find(el=>visible(el)&&/荒地|暂无评论|没有评论/.test(text(el)))};
+    for (const item of result.items) item.parent_comment_id = capturedKeys.get(item.parent_key)?.comment_id || null;
+    result.dom_census.unresolved_parent_count=result.items.filter(item=>item.is_reply && (!item.parent_comment_id || !capturedIDs.has(item.parent_comment_id))).length;
     return result;
   }
-  function note() {
+  function note(fullComments = false) {
     let identity;
     try { identity = platform.noteURL(location.href); } catch (_) { return {ready: false}; }
     const body = noteBody();
@@ -166,10 +221,39 @@
       evidence: {text: raw, original_length: original.length, truncated: original.length > raw.length,
         selector: body ? (body.id ? '#' + body.id : '.' + String(body.className).trim().replace(/\s+/g, '.')) : null,
         parser_version: C.VERSION, source: 'rendered_public_dom'}};
-    record.extra.comments = comments(record);
+    record.extra.comments = comments(record,fullComments);
     return {ready: true, record, author_navigation: author ? authorLink.href : null};
   }
-  function probe(action) {
+  let observed = null;
+  function readyNote() {
+    const page = note();
+    if (!page.ready || document.readyState === 'loading') return {ready:false, reason:'body_pending'};
+    const scope = noteScope(), body = noteBody();
+    const loading = [...scope.querySelectorAll('[aria-busy="true"], .loading, .skeleton')].some(ownPost);
+    const collapsed = [...scope.querySelectorAll('[aria-expanded="false"], .show-more, .expand-text')].some(el => ownPost(el) && /全文|展开|更多/.test(text(el)));
+    const style = body && getComputedStyle(body);
+    const clipped = body && body.scrollHeight > body.clientHeight+2 &&
+      (/hidden|clip/.test(style.overflowY) || Number.parseInt(style.webkitLineClamp)>0);
+    const declared = scope.getAttribute?.('data-note-id');
+    if (declared && declared !== page.record.standard.note_id) return {ready:false, reason:'body_pending'};
+    // A title alone can precede the body. An explicit body node or loaded media
+    // distinguishes an empty-body post from a detail which has not rendered yet.
+    const loadedMedia = [...scope.querySelectorAll('.note-slider img, .note-content img, .note-video video, video')].some(el => visible(el) &&
+      (el.tagName === 'IMG' ? el.complete && el.naturalWidth>0 : el.readyState>=1));
+    if (loading || collapsed || clipped || (!page.record.evidence.text && !loadedMedia)) return {ready:false, reason:'body_pending'};
+    const fingerprint = JSON.stringify([page.record.standard.note_id,page.record.standard.title,page.record.evidence.text,!!body,page.record.extra.media_present,declared]);
+    const now = Date.now();
+    if (!observed || observed.fingerprint !== fingerprint || observed.scope !== scope) {
+      // A same-document route which still shows the old body is not a new note.
+      const stale = observed && (observed.stale || observed.id !== page.record.standard.note_id) &&
+        observed.body === page.record.evidence.text && declared !== page.record.standard.note_id;
+      observed = {fingerprint,scope,id:page.record.standard.note_id,body:page.record.evidence.text,at:now,stale};
+    }
+    if (observed.stale || now-observed.at < 300) return {ready:false, reason:'body_pending'};
+    page.record.extra.body_observation = {status:page.record.evidence.text ? 'rendered_stable' : 'empty_body',loading:false,collapsed:false};
+    return page;
+  }
+  function probe(action, boundWork = false) {
     // Opt-in diagnostics use categories/counts, never page text or navigation tokens.
     if (action === 'diagnostics') return {ready: true, page: {
       kind: /^\/search_result\/?$/.test(location.pathname) ? 'search' : /^\/(explore|discovery\/item|search_result)\/[a-f0-9]{24}\/?$/i.test(location.pathname) ? 'note' : 'other',
@@ -178,19 +262,38 @@
       search_note_links: Math.min([...document.querySelectorAll('a[href*="/search_result/"]')].filter(visible).length, 500)
     }};
     const blocked = gate(); if (blocked) return {ready: false, gate: blocked};
+    if (action === 'note_ready') return readyNote();
     if (action === 'profile') return profile();
+    if (action === 'comment_read') return note(true);
     if (action === 'comments') {
       try { platform.noteURL(location.href); } catch (_) { return {ready: false}; }
       const panel = commentPanel(), expand = expandControl(panel);
-      if (expand) { expand.scrollIntoView({block: 'center'}); expand.click(); }
+      const pendingImage=[...(panel?.querySelectorAll('img.note-content-emoji, .img-box img.inner')||[])].find(img=>visible(img) && visible(img.closest('.comment-item, .comment-inner-container')) && !commentImage(img) && (!img.src || /^(?:data:|blob:)/.test(img.src)));
+      if(pendingImage){pendingImage.scrollIntoView({block:'center',behavior:'instant'});return {ready:true};}
+      if(boundWork&&panel&&!expand&&document.hidden){
+        const box=commentScroller(panel),scroll=box===window?document.scrollingElement:box;
+        const ended=[...panel.querySelectorAll('.end-container')].some(el=>visible(el)&&/^-?\s*THE END\s*-?$/i.test(text(el)));
+        const page=note(true),captured=page.ready?page.record.extra.comments:null;
+        const complete=Number.isInteger(page.record?.standard.comment_count)&&captured?.captured_count===page.record.standard.comment_count&&!captured.truncated;
+        if(scroll.scrollTop+scroll.clientHeight>=scroll.scrollHeight-3&&!ended&&!complete)return {ready:true,needs_visible_page:true};
+      }
+      if (expand) { expand.scrollIntoView({block: 'center',behavior:'instant'}); expand.click(); }
       else if (panel) {
-        const box = panel.scrollHeight > panel.clientHeight && /auto|scroll/.test(getComputedStyle(panel).overflowY) ? panel : first('.note-scroller, .note-detail .scroll-container') || window;
+        const box = commentScroller(panel);
         const viewport = box === window ? {top: 0, bottom: innerHeight} : box.getBoundingClientRect();
         const bounds = panel.getBoundingClientRect();
-        if (bounds.top >= viewport.bottom || bounds.bottom <= viewport.top) panel.scrollIntoView({block: 'start'});
-        else box.scrollBy({top: Math.round((box === window ? innerHeight : box.clientHeight) * .6), behavior: 'smooth'});
+        if (bounds.top >= viewport.bottom || bounds.bottom <= viewport.top) panel.scrollIntoView({block: 'start',behavior:'instant'});
+        // Background tabs can suspend smooth-scroll animation before the pagination threshold.
+        else {
+          const scroll=box===window?document.scrollingElement:box;
+          const atBottom=scroll.scrollTop+scroll.clientHeight>=scroll.scrollHeight-3;
+          const ended=[...panel.querySelectorAll('.end-container')].some(el=>visible(el)&&/^-?\s*THE END\s*-?$/i.test(text(el)));
+          // A clamped scroll does not trigger the next page; return upward in this admitted action, downward in the next.
+          if(atBottom&&!ended)box.scrollBy({top:-Math.round((box===window?innerHeight:box.clientHeight)*.2),behavior:'instant'});
+          else box.scrollTo({top:scroll.scrollHeight,behavior:'instant'});
+        }
       }
-      else (first('.note-scroller, .note-detail .scroll-container') || window).scrollBy({top: Math.round(innerHeight * .6), behavior: 'smooth'});
+      else (first('.note-scroller, .note-detail .scroll-container') || window).scrollBy({top: Math.round(innerHeight * .8), behavior: 'instant'});
       return {ready: true};
     }
     if (action === 'scroll') {
@@ -206,16 +309,60 @@
     return note();
   }
   // The browser/native transport only needs this uniform page-probe contract.
-  root.CrowdPage = {platform: platform.id, capabilities: platform.capabilities, probe};
+  function hybridProbe(action,boundWork=false){
+    const page=probe(action,boundWork);
+    if(page.ready&&page.record){
+      const value=hybrid?.snapshot(page.record.standard.note_id,page.record,workDocument);
+      if(value){
+        page.structured=value;if(value.gate)return {ready:false,gate:value.gate};
+        const d=value.observer_diagnostics;
+        // A declared reply gap is coverage evidence, not proof of an in-flight request.
+        if(action==='comment_read'&&boundWork&&value.observer_status==='installed'&&value.errors.length===0&&d?.matched_requests>0&&d.matched_requests===d.responses){
+          const panel=commentPanel();
+          if(panel&&page.record.extra.comments)page.record.extra.comments.loading=[...panel.querySelectorAll('.loading, .loading-container, .spinner, [aria-busy="true"]')].some(visible);
+        }
+      }
+    }
+    return page;
+  }
+  root.CrowdPage = {platform: platform.id, capabilities: platform.capabilities, probe:hybridProbe};
   if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+    workDocument=crypto.randomUUID();
     chrome.runtime.onMessage.addListener((message, sender, reply) => {
-      if (sender.id !== chrome.runtime.id || message.type !== 'crowd_probe') return;
-      try { reply(probe(message.action)); } catch (e) { reply({ready: false, error: e.message}); }
+      if (sender.id !== chrome.runtime.id) return;
+      if (message.type === 'crowd_bind') {workToken=message.token;hybrid?.bind(workToken,workDocument);reply({bound:true,document:workDocument});changed();return;}
+      if (message.type !== 'crowd_probe') return;
+      if (message.action === 'ownership') {reply({token:workToken,document:workDocument});return;}
+      if(['sdk_plan','sdk_action'].includes(message.action)){
+        const blocked=gate();if(blocked){reply({ready:false,gate:blocked,sdk_status:'blocked'});return;}
+        const q=message.sdk;if(!q||message.token!==workToken||message.document!==workDocument||q.binding?.document!==workDocument||q.binding?.nonce!==workToken){reply({ready:false,sdk_status:'unavailable'});return;}
+        const plan=hybrid?.sdkPlan();if(!plan){reply({ready:true,sdk_status:message.action==='sdk_action'?'not_sent':'unavailable'});return;}
+        if(message.action==='sdk_action'&&JSON.stringify(plan)!==JSON.stringify(q.operation)){reply({ready:false,sdk_status:'stale'});return;}
+        hybrid.sdkCommand(q).then(status=>reply({ready:true,sdk_status:status,gate:hybrid.sdkGate(),sdk_plan:status==='available'?plan:null})).catch(()=>reply({ready:false,sdk_status:'unknown'}));return true;
+      }
+
+      try { reply(hybridProbe(message.action,!!workToken)); } catch (e) { reply({ready: false, error: e.message}); }
     });
     // Register at document_start: a parser-blocking script must not hide an
     // already rendered search or gate from the worker. Probes decide readiness.
-    const notify = () => chrome.runtime.sendMessage({type: 'page_ready'}).catch(() => {});
+    let timer, observer;
+    const notifyUntil = Date.now()+180000;
+    const notify = () => {
+      timer=null;
+      let target = null;
+      try { target = platform.noteURL(location.href).id; } catch (_) {}
+      if (target && !gate() && !readyNote().ready) {
+        if (Date.now()<notifyUntil) changed();
+        return;
+      }
+      chrome.runtime.sendMessage({type:'page_ready',token:workToken,document:workDocument, target, keyword:target ? null : new URL(location.href).searchParams.get('keyword')}).catch(() => {});
+    };
+    const changed = () => {if(!timer&&Date.now()<notifyUntil)timer=setTimeout(notify,350);};
     notify();
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', notify, {once: true});
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', changed, {once:true});
+    changed();
+    observer = new MutationObserver(changed);
+    observer.observe(document, {childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','aria-busy','aria-expanded','data-note-id']});
+    setTimeout(() => {observer.disconnect(); clearTimeout(timer);},180000);
   }
 })(globalThis);

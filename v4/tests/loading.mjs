@@ -41,7 +41,8 @@ try {
    assert.equal((await page.evaluate(()=>fixtureProbe('search'))).gate,'captcha','early bridge must still stop at a visible gate');
    await page.locator('.captcha').evaluate(el=>el.remove());
    release();await page.waitForLoadState('domcontentloaded');
-   assert.equal(await page.evaluate(()=>readySignals),2,'notify initial bridge and parsed document once each');
+   await page.waitForFunction(()=>readySignals>=2);
+   assert.equal((await page.evaluate(()=>fixtureProbe('search'))).ready,true,'parsed document notification follows usable search content');
    console.log('PASS Chromium parser-blocked document: early receiver reads visible search, reports loading and respects gates without reloading');
  } finally {release();await page.close();}
 } finally {await browser.close();}

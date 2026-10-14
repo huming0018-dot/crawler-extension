@@ -3,20 +3,24 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
 const c=vm.createContext({console,Date});for(const f of ['updater.js','trace.js'])vm.runInContext(fs.readFileSync('v4/src/'+f,'utf8'),c);
 (async()=>{
  const data={},storage={get:async k=>data[k],set:async(k,v)=>{data[k]=structuredClone(v);}},calls=[];
- let releaseWriter;const agent={active:new Promise(r=>releaseWriter=r),maintenance:false};
+ let slots=[];let releaseWriter;const agent={active:new Promise(r=>releaseWriter=r),maintenance:false,read:async()=>({work_slots:slots})};
  let updateAlarm=null,alarmCreations=0;
- const chrome={runtime:{sendNativeMessage:async(host,m)=>{calls.push(m);return {status:m.action==='apply'?'pending_reload':'applied',version:'4.2.1'};},reload:()=>calls.push('reload')},alarms:{get:async()=>updateAlarm,create:async(_,info)=>{alarmCreations++;updateAlarm=info;},clear:async()=>{updateAlarm=null;}}};
- const updater=new c.CrowdUpdater({chrome,storage,agent,version:'4.2.0',releaseHash:async()=>'0'.repeat(64)});
+ const otherAlarms=new Map();
+ const chrome={runtime:{sendNativeMessage:async(host,m)=>{calls.push(m);return {status:m.action==='apply'?'pending_reload':'applied',version:'4.2.1'};},reload:()=>calls.push('reload')},alarms:{get:async name=>name==='crowd_update'?updateAlarm:otherAlarms.get(name),create:async(name,info)=>{alarmCreations++;if(name==='crowd_update')updateAlarm=info;else otherAlarms.set(name,info);},clear:async name=>{if(name==='crowd_update')updateAlarm=null;else otherAlarms.delete(name);}}};
+ const updater=new c.CrowdUpdater({chrome,storage,agent,version:'4.2.0',releaseHash:async()=>'0'.repeat(64),isBusy:async()=>slots.length>0});
  data['agent:user']={enabled:false,outbox:[{request:'original',record:'original evidence'}]};const before=structuredClone(data['agent:user']);
  const applying=updater.check();await new Promise(r=>setImmediate(r));assert.equal(agent.maintenance,true);assert.equal(calls.length,0,'must wait for pending agent writes');
  releaseWriter();await applying;assert.equal(calls[0].action,'apply');assert.equal(calls[1],'reload');assert.deepEqual(data['agent:user'],before,'update cannot mutate consent/evidence/run state');
  await updater.setEnabled(false);await updater.check();assert.equal(calls.length,2,'opt-out prevents native apply');
+ slots=[{id:'active-slot'}];await assert.rejects(updater.setEnabled(true),/executor_busy/);assert.equal(data.updater_enabled,false);slots=[];
+ let busy=false;const coordinated=new c.CrowdUpdater({chrome,storage,agent,version:'4.2.0',releaseHash:async()=>'0'.repeat(64),isBusy:async()=>busy});
+ data.updater_enabled=true;let releaseBusy;agent.active=new Promise(r=>releaseBusy=r);const coordinatedCheck=coordinated.check();await new Promise(r=>setImmediate(r));busy=true;releaseBusy();await coordinatedCheck;assert.equal(calls.length,2,'busy after writer drain cannot apply');agent.active=null;
  data.updater_enabled=true;chrome.runtime.sendNativeMessage=async()=>({status:'error',error:'invalid_signature'});await updater.check();assert.equal(data.updater_status.error,'invalid_signature');assert.equal(agent.maintenance,false);
  chrome.runtime.sendNativeMessage=async(host,m)=>m.action==='apply'?{status:'error',error:'version_mismatch'}:{status:'rolled_back',version:'4.1.3'};
  const priorReloads=calls.filter(x=>x==='reload').length;await updater.check();assert.equal(calls.filter(x=>x==='reload').length,priorReloads+1,'after watchdog rollback reload the restored disk version');
  chrome.runtime.sendNativeMessage=async()=>({status:'ready',version:'4.2.0'});
  await updater.bootstrap();await updater.bootstrap();
- assert.equal(alarmCreations,1,'worker restarts must not postpone an existing update alarm');
+ const creationsBefore=alarmCreations;await updater.bootstrap();assert.equal(alarmCreations,creationsBefore,'worker restarts must not postpone an existing update alarm');
  const settingsCalls=[];
  chrome.runtime.sendNativeMessage=async(_,m)=>{settingsCalls.push(m);return {status:m.action==='settings'?'configured':'ready',version:'4.2.3',protocol:2};};
  await updater.bootstrap();assert.equal(settingsCalls.at(-1).action,'settings');assert.equal(settingsCalls.at(-1).enabled,true);

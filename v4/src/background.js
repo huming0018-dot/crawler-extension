@@ -1,5 +1,5 @@
 /* Windows/macOS Chrome & Edge MV3. No automatic start on installation. */
-if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'join.js', 'updater.js', 'trace.js', 'kol.js', 'session-health.js');
+if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'api.js', 'agent.js', 'pool.js', 'work-tabs.js', 'join.js', 'updater.js', 'local-test.js', 'trace.js', 'kol.js', 'session-health.js');
 const storage = CrowdCore.accountStorage({
   async get(key) { return (await chrome.storage.local.get(key))[key]; },
   async set(key, value) { await chrome.storage.local.set({[key]: value}); }
@@ -43,29 +43,48 @@ async function navigationDocument(id, tab) {
   }
   return {document_kind:kind(current), pending_kind:tab?.pendingUrl ? kind(tab.pendingUrl) : 'none'};
 }
-let pendingTabCreation = null;
+let pendingTabCreation = null, fastTickTimer = null, fastTickAt = null, fastUploadTimer = null, fastUploadAt = null;
 const runtime = {
+  localTest:chrome.runtime.id==='ipccepibnkcfpikgebdaanimocdappfk',
+  poolAllowed:async()=>chrome.runtime.id!=='licijehcpohikchlnkbpjdjdfkcocndg' && !!chrome.storage.session && (await storage.get('updater_enabled')===false || chrome.runtime.id==='ipccepibnkcfpikgebdaanimocdappfk' && (await storage.get('local_updater_ready'))?.version===CrowdCore.VERSION),
+  closeSlot:slot=>workTabs.close(slot),
+  async close(expectedOwner=null){await workTabs.close(undefined,expectedOwner);if(!expectedOwner)await this.closeLegacy();},
   splitCapture: true,
+  fastCapture: true,
   trace:(stage,options)=>trace.event(stage,options),
   storage, now: Date.now, random: Math.random, uuid: () => crypto.randomUUID(),
+  owner:async()=>(await storage.get('session'))?.user?.id,
   sourceHealth:platform=>platformHealth.require(platform),
   // Align the next wake with the durable deadline, not an unrelated 30s grid.
   // Keep a repeating fallback for worker crashes; poll waits at least once/minute
   // so sleep detection and independent control refresh keep their semantics.
   async schedule(when, replace = false) {
-    const now = Date.now();
+    const now = Date.now(), deadline=Number.isFinite(when)?when:now+30000;
+    // Short active waits use a timer; durable alarms still recover worker suspension.
+    if(replace && fastTickTimer){clearTimeout(fastTickTimer);fastTickTimer=null;fastTickAt=null;}
+    const delay=Math.max(250,deadline-now);
+    if(delay<=25000 && (fastTickAt==null || now+delay<fastTickAt)) {
+      clearTimeout(fastTickTimer);fastTickAt=now+delay;
+      fastTickTimer=setTimeout(()=>{fastTickTimer=null;fastTickAt=null;agent.tick().then(()=>localTests.run()).catch(console.error);},delay);
+    }
     const at = Math.max(now + 30000, Math.min(Number.isFinite(when) ? when : now + 30000, now + 60000));
     const alarm = await chrome.alarms.get('crowd_tick');
     // Early page events must not postpone an already scheduled deadline.
     if (replace || alarm?.periodInMinutes !== .5 || !Number.isFinite(alarm.scheduledTime) || alarm.scheduledTime < now || alarm.scheduledTime > at + 1000)
       await chrome.alarms.create('crowd_tick', {when: at, periodInMinutes: .5});
   },
-  cancel: () => chrome.alarms.clear('crowd_tick'),
-  async scheduleDelivery() {
+  cancel: () => {clearTimeout(fastTickTimer);fastTickTimer=null;fastTickAt=null;return chrome.alarms.clear('crowd_tick');},
+  async scheduleDelivery(when) {
+    const now=Date.now(),delay=Math.max(250,(Number.isFinite(when)?when:now+1000)-now);
+    if(delay<=25000 && (fastUploadAt==null || now+delay<fastUploadAt)) {
+      clearTimeout(fastUploadTimer);fastUploadAt=now+delay;
+      fastUploadTimer=setTimeout(()=>{fastUploadTimer=null;fastUploadAt=null;agent.tick(false,true).then(()=>localTests.run()).catch(console.error);},delay);
+    }
     if (!await chrome.alarms.get('crowd_upload')) await chrome.alarms.create('crowd_upload', {periodInMinutes: 1});
   },
-  cancelDelivery: () => chrome.alarms.clear('crowd_upload'),
-  async open(url, kolMode = false) {
+  cancelDelivery: () => {clearTimeout(fastUploadTimer);fastUploadTimer=null;fastUploadAt=null;return chrome.alarms.clear('crowd_upload');},
+  async open(url, kolMode = false, slot = null) {
+    if(slot)return workTabs.open(url,slot);
     const validate = value => kolMode ? CrowdKOL.targetURL(value) : CrowdCore.navigationURL(value);
     validate(url);
     await trace.event('open_requested');
@@ -103,7 +122,8 @@ const runtime = {
     } catch (_) { await trace.event('update_failed'); throw new Error('navigation_failed'); }
     finally { pendingTabCreation = null; }
   },
-  async probe(action) {
+  async probe(action,slot = null) {
+    if(slot)return workTabs.read(action,slot);
     const id = await storage.get('work_tab');
     if (!id) return {ready: false, reopen: true};
     try {
@@ -117,7 +137,7 @@ const runtime = {
       return probe.response || {ready: false, reason: probe.status === 'timed_out' ? 'probe_timeout' : tab.status === 'loading' ? 'page_loading' : 'content_unavailable'};
     } catch (_) { return {ready: false, reopen: true}; }
   },
-  async close() {
+  async closeLegacy() {
     const id = await storage.get('work_tab');
     if (id) {
       try { const tab=await chrome.tabs.get(id); CrowdKOL.targetURL(tab.url); await chrome.tabs.remove(id); } catch (_) {
@@ -127,6 +147,8 @@ const runtime = {
     }
   }
 };
+const workTabs=new CrowdWorkTabs({chrome,storage,owner:async()=>(await storage.get('session'))?.user?.id,probe:probeTab,uuid:()=>crypto.randomUUID(),presentationAllowed:async()=>{const state=await agent.read();return !agent.pendingStop&&!agent.stopping&&!agent.stopActive&&!agent.maintenance&&state.enabled===true;}});
+async function workingTab(){if((await storage.get('session'))?.user?.id){const owned=await workTabs.first();if(owned)return owned;}return storage.get('work_tab');}
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
 const kol = new CrowdKOL.Agent({storage,now:Date.now,uuid:()=>crypto.randomUUID(),
   sourceHealth:platform=>platformHealth.require(platform),
@@ -284,13 +306,16 @@ api.rpc=async(name,params={},...rest)=>{
   }catch(e){if(submit)await trace.event('submit_failed',options);throw e;}
 };
 let pendingCommands=0;
-const updater = new CrowdUpdater({chrome,storage,agent,isBusy:()=>pendingCommands>0||!!kol.active,version:CrowdCore.VERSION,releaseHash:async()=>{
+const localTests=new CrowdLocalTest({storage,id:chrome.runtime.id,version:CrowdCore.VERSION,owner:runtime.owner,agent,
+ isBusy:async()=>pendingCommands>0 || !!kol.active || (await kol.read()).enabled || agent.maintenance,
+ start:async valid=>{await platformHealth.check(true);if(!await valid())throw Error('cancelled');await agent.start(true,{valid});}});
+const updater = new CrowdUpdater({chrome,storage,agent,isBusy:async()=>{const s=await agent.read();return pendingCommands>0||!!kol.active||!!agent.pendingStop||!!agent.stopping||!!agent.stopActive||!!agent.poolJobs?.size||!!(s.enabled&&s.work_slots?.length);},version:CrowdCore.VERSION,releaseHash:async()=>{
   const data=await (await fetch(chrome.runtime.getURL('release.json'))).arrayBuffer();
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(b=>b.toString(16).padStart(2,'0')).join('');
 }});
 let diagnosticReport;
 const diagnosticKey = (id, suffix) => 'diagnostics:' + id + ':' + suffix;
-const diagnosticErrors = ['navigation_failed','navigation_uncommitted','page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','backend_login_required','user_login','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt'];
+const diagnosticErrors = ['navigation_failed','navigation_uncommitted','page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','backend_login_required','user_login','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt','test_completed','test_comments_partial','test_expired','test_quota','test_no_task','test_partial','test_new_run_required','parallel_unavailable','pool_recovery_required','executor_busy','update_in_progress','cancelled'];
 const navigationErrors = ['ERR_NAME_NOT_RESOLVED','ERR_INTERNET_DISCONNECTED','ERR_CONNECTION_TIMED_OUT','ERR_TIMED_OUT','ERR_CONNECTION_RESET','ERR_CONNECTION_REFUSED','ERR_CONNECTION_CLOSED','ERR_ADDRESS_UNREACHABLE','ERR_NETWORK_CHANGED','ERR_TUNNEL_CONNECTION_FAILED','ERR_PROXY_CONNECTION_FAILED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID','ERR_SSL_PROTOCOL_ERROR','ERR_BLOCKED_BY_CLIENT','ERR_BLOCKED_BY_ADMINISTRATOR','ERR_ABORTED'];
 let navigationQueue = Promise.resolve();
 async function clearNavigation(restart = false) {
@@ -312,7 +337,7 @@ for (const [event, stage] of Object.entries({onBeforeNavigate:'started',onCommit
     navigationQueue = navigationQueue.then(async () => {
       if (ownership) { try { await ownership; } catch (_) { return; } }
       const settings = await diagnosticSettings();
-      if (!settings.enabled || details.tabId !== await storage.get('work_tab')) return;
+      if (!settings.enabled || details.tabId !== await workingTab()) return;
       try { const u = new URL(details.url); if (u.protocol !== 'https:' || !['www.xiaohongshu.com','m.xiaohongshu.com','www.bilibili.com','space.bilibili.com'].includes(u.hostname)) return; } catch (_) { return; }
       const code = String(details.error || '').replace(/^net::/, '');
       const key = diagnosticKey(settings.id, 'navigation'), previous = await storage.get(key);
@@ -367,7 +392,7 @@ async function reportDiagnostics() {
         }
         let snapshot = null;
         if (settings.enabled) {
-          const s = await agent.read(), id = await storage.get('work_tab');
+          const s = await agent.read(), id = await workingTab();
           let tab = null, page = null, tabStatus = 'missing', probeStatus = 'unknown', probeError = 'unknown', navDocument = {document_kind:'unavailable',pending_kind:'none'};
           try {
             if (id) {
@@ -393,6 +418,7 @@ async function reportDiagnostics() {
           const age = at => Number.isFinite(at) ? Math.min(86400, Math.max(0, Math.floor((Date.now() - at) / 1000))) : null;
           snapshot = {version: CrowdCore.VERSION, enabled: s.enabled === true,kol:kolDiagnosticState(await kol.read()),
             trace:await trace.snapshot(),update_state:(await updater.status()).state||'unknown',
+            updater_enabled:(await updater.status()).enabled===true,auto_test_enabled:(await localTests.status()).enabled===true,
             document_kind:navDocument.document_kind, pending_kind:navDocument.pending_kind,
             nav_stage: navigation?.stage || 'unknown', nav_error: navigation?.error || null,
             nav_age_s: age(navigation?.at),
@@ -400,7 +426,7 @@ async function reportDiagnostics() {
             page_failures: number(s.page_failures, 3), last_tick_age_s: age(s.last_tick),
             next_in_s: Math.min(86400, Math.max(0, Math.ceil(((s.next_at || 0) - Date.now()) / 1000))),
             probe_status: probeStatus, probe_error: probeError,
-            phase: oneOf(s.phase, ['idle','search','search_done','note','reopen_note','enrich'], 'idle'),
+            phase: oneOf(s.phase, ['idle','search','search_done','note','reopen_note','enrich','parallel'], 'idle'),
             error: s.last_error ? oneOf(s.last_error, diagnosticErrors, 'unexpected_error') : null,
             task_id: Number.isSafeInteger(s.task?.id) ? s.task.id : null,
             queued: number(s.outbox.length, 99999), rejected: number(s.rejected.length, 99999),
@@ -437,13 +463,16 @@ async function setDiagnostics(enabled) {
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (sender.id !== chrome.runtime.id) return;
   if (message.type === 'page_ready') {
-    storage.get('work_tab').then(async id => { if (id === sender.tab?.id) {if((await kol.read()).enabled)return kol.tick();return agent.tick();} }).catch(console.error); return;
+    (async()=>{
+      if((await agent.read()).work_slots?.length){const slot=await workTabs.ready(sender,message);if(slot){agent.poolReadySlots ||= new Set();agent.poolReadySlots.add(slot);agent.poolWake=true;return agent.tick();}}
+      if(await storage.get('work_tab')===sender.tab?.id){if((await kol.read()).enabled)return kol.tick();return agent.pageReady(message.target,message.keyword);}
+    })().catch(console.error); return;
   }
   const allowed = [chrome.runtime.getURL('src/controller.html')];
   if (!allowed.includes(sender.url) || sender.tab?.url?.startsWith(CrowdCore.HOST)) return;
   const mutating=!['state','stop','export','update_check','update_settings'].includes(message.type);
   if(mutating)pendingCommands++;
-  (async () => {
+  const operation=(async () => {
     if (agent.maintenance && !['state','stop','export'].includes(message.type)) throw new Error('update_in_progress');
     switch (message.type) {
       case 'kol_rpc': {
@@ -476,9 +505,13 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'kol_delete_target': await kol.stop();return kol.rpc('delete_target',message.payload||{});
       case 'kol_delete_content': return kol.rpc('delete_content',message.payload||{});
       case 'update_settings': await updater.setEnabled(message.enabled); return {};
-      case 'update_check': await updater.check(); return {};
-      case 'state': { const settings = await diagnosticSettings(); return {platform_health:await platformHealth.publicState(),updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message})), progress:await api.rpc('progress').catch(()=>null)}; }
+      case 'update_check': {const result=await updater.check();if(result?.blocked)throw Error(result.blocked);return {};}
+      case 'local_test_updates': await localTests.settings(message.enabled);return {};
+      case 'state': { const settings = await diagnosticSettings(); return {local_test:localTests.allowed(),local_test_updates:await localTests.status(),parallel_requested:(await agent.preferences())?.parallelism,parallel_allowed:await runtime.poolAllowed(),platform_health:await platformHealth.publicState(),updater:await updater.status(),agent: await agent.read(), session: !!(await storage.get('session')), invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: await api.rpc('status').catch(e => ({error: e.message})), progress:await api.rpc('progress').catch(()=>null)}; }
       case 'rating': await agent.queueRating(message.proof, message.score, message.reason); agent.tick(false,true).catch(console.error); return {};
+      case 'parallelism': {
+        await agent.requestParallelism(message.value);return {};
+      }
       case 'profiles': {
         if(typeof message.enabled !== 'boolean')throw new Error('invalid_request');
         await kol.stop('preferences_changed',true);
@@ -491,7 +524,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         await setDiagnostics(message.enabled); return {};
       }
       case 'inspect_work_page': {
-        const id = await storage.get('work_tab'); if (!id) throw new Error('work_page_missing');
+        const id = await workingTab(); if (!id) throw new Error('work_page_missing');
         const tab = await chrome.tabs.update(id, {active: true}); await chrome.windows.update(tab.windowId, {focused: true}); return {};
       }
       case 'receive_invite': await storage.set('pending_invite', CrowdJoin.invite(message.invite, CROWD_CONFIG.portal)); return {};
@@ -510,8 +543,10 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         const s = await agent.read(); s.consent = CrowdCore.CONSENT; await agent.save(s); return {};
       }
       case 'start': await platformHealth.check(true);await kol.stop('legacy_collection',true);await agent.start(); return {};
-      case 'stop': await kol.stop('user_stopped',true);await agent.stop('user_stopped', {drain:true}); return {};
+      case 'test_start': await platformHealth.check(true);await kol.stop('legacy_collection',true);await agent.start(true); return {};
+      case 'stop': await localTests.cancel();await kol.stop('user_stopped',true);await agent.stop('user_stopped', {drain:true}); return {};
       case 'logout': {
+        await localTests.cancel();
         await kol.stop('logged_out',false);
         await agent.stop('logged_out');
         const settings = await diagnosticSettings();
@@ -523,7 +558,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         // Keep the actual challenge/note page. Opening help is a user action,
         // not evidence that either platform or backend authentication failed.
         await kol.stop('user_login',true,{keepPage:true});await agent.stop('user_login', {keepPage: true,drain:true});
-        const id = await storage.get('work_tab');
+        const id = await workingTab();
         if (id) {
           try {
             const tab = await chrome.tabs.get(id), url = new URL(tab.pendingUrl || tab.url);
@@ -538,7 +573,17 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       }
       default: throw new Error('unknown_command');
     }
-  })().finally(()=>{if(mutating)pendingCommands--;}).then(data => reply({ok: true, data}), e => reply({ok: false, error: e.message}));
+  })();
+  if(message.type==='stop'){
+    const stopped=Promise.allSettled([agent.pendingStop,operation]).then(results=>{
+      const failed=results.some(result=>result.status==='rejected');
+      if(agent.pendingStop===stopped)agent.updateStopFailed=failed;
+      if(failed)throw Error('executor_busy');
+    }).finally(()=>{if(agent.pendingStop===stopped)agent.pendingStop=null;});
+    agent.pendingStop=stopped;
+    stopped.catch(()=>{});
+  }
+  operation.finally(()=>{if(mutating)pendingCommands--;}).then(data => reply({ok: true, data}), e => reply({ok: false, error: e.message}));
   return true;
 });
 chrome.runtime.onMessageExternal?.addListener((message, sender, reply) => {
@@ -555,8 +600,9 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === 'crowd_platform_health') monitorPlatformHealth().catch(console.error);
   if (alarm.name === 'crowd_kol'&&!agent.maintenance) kol.tick().catch(console.error);
   if (alarm.name === 'crowd_update') updater.check().catch(console.error);
-  if (alarm.name === 'crowd_tick') agent.tick().catch(console.error);
-  if (alarm.name === 'crowd_upload') agent.tick(false, true).catch(console.error);
+  if (alarm.name === 'crowd_update_bootstrap') updater.bootstrap().then(()=>localTests.run()).catch(console.error);
+  if (alarm.name === 'crowd_tick') agent.tick().then(()=>localTests.run()).catch(console.error);
+  if (alarm.name === 'crowd_upload') agent.tick(false, true).then(()=>localTests.run()).catch(console.error);
   if (alarm.name === 'crowd_diagnostics') reportDiagnostics().catch(console.error);
 });
 chrome.runtime.onStartup.addListener(async () => { await agent.repairDelivery(); await agent.tick(true); await kol.tick(); await repairDiagnostics(); await reportDiagnostics(); });
@@ -572,8 +618,9 @@ chrome.runtime.onInstalled.addListener((details = {reason: 'install'}) => {
   })().catch(console.error);
 });
 chrome.tabs.onRemoved.addListener(id => {
+  if(workTabs)workTabs.removed(id).catch(()=>{});
   storage.get('work_tab').then(owned => { if (owned === id) return storage.set('work_tab', null); }).catch(console.error);
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable
 // running state on every load; initial installation and user stops remain idle.
-updater.bootstrap().then(()=>repairPlatformHealth().catch(()=>{})).then(()=>monitorPlatformHealth().catch(()=>{})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>kol.tick()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);
+updater.bootstrap().then(()=>repairPlatformHealth().catch(()=>{})).then(()=>monitorPlatformHealth().catch(()=>{})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>kol.tick()).then(()=>localTests.run()).then(repairDiagnostics).then(reportDiagnostics).catch(console.error);

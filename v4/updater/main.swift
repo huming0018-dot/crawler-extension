@@ -4,9 +4,19 @@ import Darwin
 
 // The host accepts fixed verbs only. Paths, keys and endpoints never come from a browser message.
 let fm = FileManager.default
+#if LOCAL_TEST
+let extensionID = localTestExtensionID
+let hostName = "com.crowd.v4.local_test_updater"
+let channelURL = localTestChannelURL
+#else
 let extensionID = "licijehcpohikchlnkbpjdjdfkcocndg"
 let hostName = "com.crowd.v4.updater"
+#if PARTICIPANT
+let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-participants.json"
+#else
 let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-kol.json"
+#endif
+#endif
 let origin = "chrome-extension://\(extensionID)/"
 struct Failure: Error { let code: String; init(_ code: String) { self.code = code } }
 func require(_ value: Bool, _ code: String) throws { if !value { throw Failure(code) } }
@@ -14,9 +24,29 @@ func json(_ data: Data) throws -> [String: Any] { guard let v = try JSONSerializ
 func read(_ url: URL) throws -> [String:Any] { try json(Data(contentsOf:url)) }
 func write(_ value: [String:Any], _ url: URL) throws { try JSONSerialization.data(withJSONObject:value, options:[.sortedKeys]).write(to:url, options:.atomic); try fm.setAttributes([.posixPermissions:0o600], ofItemAtPath:url.path) }
 func digest(_ data: Data) -> String { SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined() }
+// Normalize only the reviewed optional local-test MAIN registration. Every other
+// field remains subject to the original complete manifest and capability checks.
+func manifestCapabilityShape(_ manifest: [String:Any]) throws -> [String:Any] {
+ var shape=manifest
+ for field in ["version","background"] {shape[field]=nil}
+ #if LOCAL_TEST || PARTICIPANT
+ let isolated:[String:Any]=["matches":["https://www.xiaohongshu.com/*","https://m.xiaohongshu.com/*"],"js":["src/core.js","src/content.js"],"run_at":"document_start"]
+ let main:[String:Any]=["matches":["https://www.xiaohongshu.com/explore/*","https://www.xiaohongshu.com/discovery/item/*","https://www.xiaohongshu.com/search_result/*"],"js":["src/main-observer.js"],"run_at":"document_start","world":"MAIN","all_frames":false]
+ guard let scripts=manifest["content_scripts"] as? [[String:Any]],scripts.count==1 || scripts.count==2 else {throw Failure("permission_change")}
+ let expected=scripts.count==1 ? [isolated] : [isolated,main]
+ let actualBytes=try JSONSerialization.data(withJSONObject:scripts,options:[.sortedKeys])
+ let expectedBytes=try JSONSerialization.data(withJSONObject:expected,options:[.sortedKeys])
+ try require(actualBytes==expectedBytes,"permission_change")
+ shape["content_scripts"]=[isolated]
+ #endif
+ return shape
+}
 func version(_ text: String) throws -> [Int] { let a=text.split(separator:"."); try require(a.count==3 && a[0]=="4" && a.allSatisfy{!$0.isEmpty && $0.allSatisfy(\.isNumber)},"invalid_version"); let n=a.compactMap{Int($0)}; try require(n.count==3 && n.allSatisfy{$0<65536} && n.map(String.init).joined(separator:".")==text,"invalid_version"); return n }
 func greater(_ a: String, _ b: String) throws -> Bool { try version(a).lexicographicallyPrecedes(version(b)) == false && a != b }
 func run(_ executable: String, _ args: [String]) throws -> Data {
+ #if TESTING
+ if executable=="/bin/launchctl" && ProcessInfo.processInfo.environment["CROWD_TEST_INSTALL_HOME"] != nil {return Data()}
+ #endif
  let process=Process(), pipe=Pipe(); process.executableURL=URL(fileURLWithPath:executable); process.arguments=args; process.standardOutput=pipe; process.standardError=FileHandle.nullDevice
  try process.run(); let output=pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit(); try require(process.terminationStatus==0,"operation_failed"); return output
 }
@@ -41,11 +71,24 @@ func configuredDirectory() throws -> URL {
  let c=try read(configURL); guard let p=c["directory"] as? String else {throw Failure("not_configured")}
  let dir=URL(fileURLWithPath:p).standardizedFileURL; try require(p.hasPrefix("/") && dir.path != root.path && !root.path.hasPrefix(dir.path+"/"),"unsafe_path"); try safePath(dir)
  let manifest=try read(dir.appendingPathComponent("manifest.json")); let v=manifest["version"] as? String ?? ""; _=try version(v)
- try require(manifest["key"] as? String == c["extension_key"] as? String,"wrong_extension")
+ #if LOCAL_TEST
+ try require(dir.path==URL(fileURLWithPath:localTestDirectory).standardizedFileURL.path && c["extension_id"] as? String==extensionID && manifest["key"]==nil,"wrong_extension")
+ #else
+ guard let encoded=manifest["key"] as? String,let key=Data(base64Encoded:encoded),let configuredKey=c["extension_key"] as? String else {throw Failure("wrong_extension")}
+ let id=SHA256.hash(data:key).prefix(16).flatMap{[Int($0>>4),Int($0&15)]}.map{String(UnicodeScalar(97+$0)!)}.joined()
+ try require(encoded==configuredKey && id==extensionID,"wrong_extension")
+ #endif
  return dir
 }
 func state() throws -> [String:Any] { fm.fileExists(atPath:stateURL.path) ? try read(stateURL) : [:] }
-func paths(_ dir: URL) -> (URL, URL) { (dir.deletingLastPathComponent().appendingPathComponent(".crowd-v4-stage"),dir.deletingLastPathComponent().appendingPathComponent(".crowd-v4-backup")) }
+func paths(_ dir: URL) -> (URL, URL) {
+ #if LOCAL_TEST
+ let prefix=".crowd-v4-local-test"
+ #else
+ let prefix=".crowd-v4"
+ #endif
+ return (dir.deletingLastPathComponent().appendingPathComponent(prefix+"-stage"),dir.deletingLastPathComponent().appendingPathComponent(prefix+"-backup"))
+}
 func rollback(_ dir: URL, _ s: inout [String:Any]) throws -> Bool {
  guard s["pending"] as? String != nil else {return false}
  let (stage, backup)=paths(dir)
@@ -83,13 +126,31 @@ func handle(_ message: [String:Any], prepareOnly: Bool = false, unattended: Bool
    }
    try require(loaded==pending && local==pending && message["release_sha256"] as? String==s["pending_digest"] as? String,"handshake_mismatch")
    try require(digest(Data(contentsOf:dir.appendingPathComponent("release.json")))==s["pending_digest"] as? String,"handshake_mismatch")
+   #if LOCAL_TEST
+   s["loaded_digest"]=s["pending_digest"]
+   #endif
    s["sequence"]=s["pending_sequence"];s["loaded_version"]=loaded;s["status"]="applied";s["pending"]=nil;s["pending_sequence"]=nil;s["pending_digest"]=nil;s["applied_at"]=nil;s["awaiting_launch"]=nil
    try write(s,stateURL);if fm.fileExists(atPath:backup.path){try fm.removeItem(at:backup)}
    let cache=root.appendingPathComponent("cache");if fm.fileExists(atPath:cache.path){try safePath(cache);try fm.removeItem(at:cache)}
   }
+  #if LOCAL_TEST
+  let loadedDigest=digest(try Data(contentsOf:dir.appendingPathComponent("release.json")))
+  try require(loaded==local && message["release_sha256"] as? String==loadedDigest,"handshake_mismatch")
+  if s["status"] as? String=="applied" {
+   try require(loaded==local && message["release_sha256"] as? String==s["loaded_digest"] as? String && digest(Data(contentsOf:dir.appendingPathComponent("release.json")))==s["loaded_digest"] as? String,"handshake_mismatch")
+  }
+  return ["status":s["status"] as? String ?? "ready","version":local,"protocol":2,"profile":"local-test","release_sha256":loadedDigest]
+  #else
   return ["status":s["status"] as? String ?? "ready","version":local,"protocol":2]
+  #endif
  }
- if action=="status" {return ["status":s["pending"] == nil ? (s["status"] as? String ?? "ready") : "pending_reload","version":local,"protocol":2]}
+ if action=="status" {
+  var result:[String:Any] = ["status":s["pending"] == nil ? (s["status"] as? String ?? "ready") : "pending_reload","version":local,"protocol":2]
+  if let at=s["last_poll_at"] as? Double,at.isFinite,at>0 {result["last_poll_at"]=at}
+  if let value=s["poll_status"] as? String,["current","downloaded","pending_reload","error"].contains(value){result["poll_status"]=value}
+  if let value=s["poll_error"] as? String {result["poll_error"]=["invalid_signature","hash_mismatch","permission_change","replayed_release","recovery_required","busy","operation_failed","invalid_manifest","invalid_url","wrong_extension"].contains(value) ? value : "operation_failed"}
+  return result
+ }
  try require(action=="apply","invalid_request");try require(local==loaded,"version_mismatch")
  if s["pending"] != nil {return ["status":"pending_reload","version":local]}
  let temp=root.appendingPathComponent("download-"+UUID().uuidString);try fm.createDirectory(at:temp,withIntermediateDirectories:false);defer{try? fm.removeItem(at:temp)}
@@ -135,14 +196,13 @@ func handle(_ message: [String:Any], prepareOnly: Bool = false, unattended: Bool
  try require(newManifest["version"] as? String==next && newManifest["key"] as? String==oldManifest["key"] as? String,"wrong_extension")
  let worker="src/background_v"+next.replacingOccurrences(of:".",with:"_")+".js"
  try require((newManifest["background"] as? [String:String])==["service_worker":worker],"invalid_package")
- let rescue="try { importScripts('background.js'); } catch (_) { chrome.runtime.sendNativeMessage('com.crowd.v4.updater', {action:'rollback',version:'"+next+"'}).then(r=>{if(r.status==='rolled_back')chrome.runtime.reload();}).catch(()=>{}); }\n"
+ let rescue="try { importScripts('background.js'); } catch (_) { chrome.runtime.sendNativeMessage('"+hostName+"', {action:'rollback',version:'"+next+"'}).then(r=>{if(r.status==='rolled_back')chrome.runtime.reload();}).catch(()=>{}); }\n"
  try require(try String(contentsOf:stage.appendingPathComponent(worker),encoding:.utf8)==rescue,"invalid_package")
- var oldShape=oldManifest,newShape=newManifest
- for field in ["version","background"] {oldShape[field]=nil;newShape[field]=nil}
+ let oldShape=try manifestCapabilityShape(oldManifest),newShape=try manifestCapabilityShape(newManifest)
  try require(try JSONSerialization.data(withJSONObject:oldShape,options:[.sortedKeys])==JSONSerialization.data(withJSONObject:newShape,options:[.sortedKeys]),"permission_change")
  // New capabilities require a reviewed bootstrap, never silent permission expansion.
  for field in ["permissions","host_permissions","externally_connectable","content_scripts"] {
-  let a=try JSONSerialization.data(withJSONObject:oldManifest[field] ?? [],options:[.sortedKeys,.fragmentsAllowed]);let b=try JSONSerialization.data(withJSONObject:newManifest[field] ?? [],options:[.sortedKeys,.fragmentsAllowed]);try require(a==b,"permission_change")
+  let a=try JSONSerialization.data(withJSONObject:oldShape[field] ?? [],options:[.sortedKeys,.fragmentsAllowed]);let b=try JSONSerialization.data(withJSONObject:newShape[field] ?? [],options:[.sortedKeys,.fragmentsAllowed]);try require(a==b,"permission_change")
  }
  // Keep a verified package while a browser owns the live directory. The
  // browser revalidates this signed cache before applying it, including offline.
@@ -175,23 +235,94 @@ func scheduledPoll() throws {
  let result=try handle(["action":"apply","version":local],prepareOnly: try !supportsOffline || browserRunning(),unattended:true)
  var current=try state();current["last_poll_at"]=Date().timeIntervalSince1970;current["poll_status"]=result["status"];current["poll_error"]=nil;try write(current,stateURL)
 }
+func checkParticipantInstallation(_ directory: String) throws {
+ #if PARTICIPANT
+ let dir=URL(fileURLWithPath:directory).standardizedFileURL;try safePath(dir)
+ let manifest=try read(dir.appendingPathComponent("manifest.json"))
+ let installedVersion=manifest["version"] as? String ?? "";_=try version(installedVersion)
+ let expectedWorker="src/background_v"+installedVersion.replacingOccurrences(of:".",with:"_")+".js"
+ try require((manifest["background"] as? [String:String])==["service_worker":expectedWorker],"permission_change")
+ guard let expectedData=Data(base64Encoded:participantManifestShapeBase64) else {throw Failure("invalid_package")}
+ let expected=try json(expectedData),actual=try manifestCapabilityShape(manifest)
+ try require(try JSONSerialization.data(withJSONObject:actual,options:[.sortedKeys])==JSONSerialization.data(withJSONObject:expected,options:[.sortedKeys]),"permission_change")
+ #else
+ throw Failure("unsupported_profile")
+ #endif
+}
+func installationHome() -> URL {
+ #if TESTING
+ if let value=ProcessInfo.processInfo.environment["CROWD_TEST_INSTALL_HOME"] {return URL(fileURLWithPath:value)}
+ #endif
+ return fm.homeDirectoryForCurrentUser
+}
+func reconnect(_ browser: String) throws {
+ #if PARTICIPANT
+ let support=installationHome().appendingPathComponent("Library/Application Support/CrowdV4Updater")
+ let configuration=support.appendingPathComponent("config.json");try safePath(support);try safePath(configuration)
+ guard let directory=try read(configuration)["directory"] as? String else {throw Failure("not_configured")}
+ try install(directory,browser)
+ #else
+ throw Failure("unsupported_profile")
+ #endif
+}
 func install(_ directory: String, _ browser: String) throws {
+ #if PARTICIPANT
+ try checkParticipantInstallation(directory)
+ #endif
  try require(["Google Chrome","Microsoft Edge"].contains(browser),"unsupported_browser")
  let dir=URL(fileURLWithPath:directory).standardizedFileURL;try safePath(dir)
  let manifest=try read(dir.appendingPathComponent("manifest.json"));_=try version(manifest["version"] as? String ?? "")
+ #if LOCAL_TEST
+ try require(dir.path==URL(fileURLWithPath:localTestDirectory).standardizedFileURL.path && manifest["key"]==nil,"wrong_extension")
+ let supportName="CrowdV4LocalTestUpdater"
+ #else
  guard let encoded=manifest["key"] as? String,let key=Data(base64Encoded:encoded) else {throw Failure("wrong_extension")}
  let id=SHA256.hash(data:key).prefix(16).flatMap{[Int($0>>4),Int($0&15)]}.map{String(UnicodeScalar(97+$0)!)}.joined()
  try require(id==extensionID,"wrong_extension")
- let home=fm.homeDirectoryForCurrentUser, support=home.appendingPathComponent("Library/Application Support"), dest=support.appendingPathComponent("CrowdV4Updater")
+ let supportName="CrowdV4Updater"
+ #endif
+ let home=installationHome(), support=home.appendingPathComponent("Library/Application Support"), dest=support.appendingPathComponent(supportName)
  if fm.fileExists(atPath:dest.path){try safePath(dest);if fm.fileExists(atPath:dest.appendingPathComponent("config.json").path){try require(try read(dest.appendingPathComponent("config.json"))["directory"] as? String==dir.path,"different_installation")}}
  else {try fm.createDirectory(at:dest,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])}
  let installLock=open(dest.appendingPathComponent("update.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600)
  try require(installLock>=0,"lock_failed");defer{close(installLock)}
  try require(flock(installLock,LOCK_EX|LOCK_NB)==0,"busy")
  let binary=dest.appendingPathComponent("crowd-v4-updater")
+ #if PARTICIPANT
+ let oldStateURL=dest.appendingPathComponent("state.json")
+ if fm.fileExists(atPath:oldStateURL.path){try safePath(oldStateURL);let oldState=try read(oldStateURL);try require(oldState["pending"]==nil && oldState["staging_at"]==nil,"recovery_required")}
+ let browserRoot=support.appendingPathComponent(browser=="Google Chrome" ? "Google/Chrome":"Microsoft Edge")
+ let rollbackURLs=[binary,dest.appendingPathComponent("config.json"),browserRoot.appendingPathComponent("NativeMessagingHosts/"+hostName+".json"),home.appendingPathComponent("Library/LaunchAgents/"+hostName+".recovery.plist"),home.appendingPathComponent("Library/LaunchAgents/"+hostName+".ota.plist")]
+ var originals:[(URL,Data?,Any?)]=[]
+ let migrationBackup=dest.appendingPathComponent("migration-backup-"+UUID().uuidString)
+ try fm.createDirectory(at:migrationBackup,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+ for (index,file) in rollbackURLs.enumerated(){
+  let data:Data?
+  if fm.fileExists(atPath:file.path){try safePath(file);data=try Data(contentsOf:file);try data!.write(to:migrationBackup.appendingPathComponent(String(index)),options:.atomic)}else{data=nil}
+  let mode=fm.fileExists(atPath:file.path) ? (try fm.attributesOfItem(atPath:file.path))[.posixPermissions] : nil
+  originals.append((file,data,mode))
+ }
+ if fm.fileExists(atPath:oldStateURL.path){try Data(contentsOf:oldStateURL).write(to:migrationBackup.appendingPathComponent("state.json"),options:.atomic)}
+ try write(["schema":1,"created_at":Date().timeIntervalSince1970,"files":rollbackURLs.enumerated().map{["slot":String($0.offset),"path":$0.element.path]}],migrationBackup.appendingPathComponent("backup.json"))
+ var installationComplete=false
+ defer {
+  if !installationComplete {
+   for (file,data,mode) in originals {if let data=data{try? data.write(to:file,options:.atomic);if let mode=mode{try? fm.setAttributes([.posixPermissions:mode],ofItemAtPath:file.path)}}else if fm.fileExists(atPath:file.path){try? fm.removeItem(at:file)}}
+  }
+ }
+ #endif
  try Data(contentsOf:executable).write(to:binary,options:.atomic);try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:binary.path)
  let prior=(try? read(dest.appendingPathComponent("config.json"))) ?? [:]
- try write(["directory":dir.path,"extension_key":encoded,"scheduled_enabled":prior["scheduled_enabled"] as? Bool ?? false],dest.appendingPathComponent("config.json"))
+ var config=prior;config["directory"]=dir.path;config["scheduled_enabled"]=prior["scheduled_enabled"] as? Bool ?? false
+ #if LOCAL_TEST
+ config["extension_id"]=extensionID
+ #else
+ config["extension_key"]=encoded
+ #endif
+ try write(config,dest.appendingPathComponent("config.json"))
+ #if TESTING
+ if ProcessInfo.processInfo.environment["CROWD_TEST_INSTALL_HOME"] != nil && ProcessInfo.processInfo.environment["CROWD_TEST_INSTALL_FAILURE"]=="after_config" {throw Failure("injected_install_failure")}
+ #endif
  let browserSupport=support.appendingPathComponent(browser=="Google Chrome" ? "Google/Chrome":"Microsoft Edge"), hosts=browserSupport.appendingPathComponent("NativeMessagingHosts")
  if fm.fileExists(atPath:hosts.path){try safePath(hosts)}else{try fm.createDirectory(at:hosts,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])}
  try write(["name":hostName,"description":"Verified updates for the existing crowd v4 extension","path":binary.path,"type":"stdio","allowed_origins":[origin]],hosts.appendingPathComponent(hostName+".json"))
@@ -206,16 +337,21 @@ func install(_ directory: String, _ browser: String) throws {
  try PropertyListSerialization.data(fromPropertyList:ota,format:.xml,options:0).write(to:otaPlist,options:.atomic)
  _=try? run("/bin/launchctl",["bootout","gui/\(getuid())",otaPlist.path])
  _=try run("/bin/launchctl",["bootstrap","gui/\(getuid())",otaPlist.path])
+ #if PARTICIPANT
+ installationComplete=true
+ #endif
  FileHandle.standardError.write(Data("更新助手已接通；只更新原 v4 插件，不关闭浏览器。\n".utf8))
 }
 func output(_ value: [String:Any]) {if let data=try? JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]){var n=UInt32(data.count).littleEndian;FileHandle.standardOutput.write(Data(bytes:&n,count:4));FileHandle.standardOutput.write(data)}}
 func exactRead(_ count: Int) throws -> Data {var data=Data();while data.count<count {let chunk=FileHandle.standardInput.readData(ofLength:count-data.count);if chunk.isEmpty {throw Failure("invalid_message")};data.append(chunk)};return data}
 do {
+ if CommandLine.arguments.count==3 && CommandLine.arguments[1]=="--reconnect" {try reconnect(CommandLine.arguments[2]);exit(0)}
+ if CommandLine.arguments.count==3 && CommandLine.arguments[1]=="--check-install" {try checkParticipantInstallation(CommandLine.arguments[2]);exit(0)}
  if CommandLine.arguments.count==4 && CommandLine.arguments[1]=="--install" {try install(CommandLine.arguments[2],CommandLine.arguments[3]);exit(0)}
  try require(CommandLine.arguments.count==2 && (CommandLine.arguments[1]==origin || CommandLine.arguments[1]=="--recover" || CommandLine.arguments[1]=="--poll"),"invalid_origin")
  let fd=open(root.appendingPathComponent("update.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600);try require(fd>=0,"lock_failed");defer{close(fd)};try require(flock(fd,LOCK_EX|LOCK_NB)==0,"busy")
  if CommandLine.arguments[1]=="--poll" {
-  do {try scheduledPoll()} catch {var current=(try? state()) ?? [:];current["last_poll_at"]=Date().timeIntervalSince1970;current["poll_error"]=(error as? Failure)?.code ?? "operation_failed";try? write(current,stateURL);throw error}
+  do {try scheduledPoll()} catch {var current=(try? state()) ?? [:];current["last_poll_at"]=Date().timeIntervalSince1970;current["poll_status"]="error";current["poll_error"]=(error as? Failure)?.code ?? "operation_failed";try? write(current,stateURL);throw error}
  } else if CommandLine.arguments[1]=="--recover" {
   let dir=try configuredDirectory();var s=try state()
   if let pending=s["pending"] as? String,try read(dir.appendingPathComponent("manifest.json"))["version"] as? String != pending {_=try rollback(dir,&s)}

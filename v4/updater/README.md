@@ -1,5 +1,13 @@
 # v4 Mac 自动更新
 
+## 本机 keyless 测试安装
+
+仅本人固定测试ID `ipccepibnkcfpikgebdaanimocdappfk` 使用编译时 `LOCAL_TEST` profile。`build.py` 需要同时传入 `--local-test-directory`（原目录绝对路径）、`--local-test-id`、`--local-test-public-key`（独立Ed25519公钥）、`--local-test-channel`（独立HTTPS local-test-channel.json）。默认构建仍为正式profile，不能接纳keyless目录。
+
+本机profile使用独立native host、安装目录、系统任务和备份名称；消息不接收路径/脚本/启动命令。第一次seed迁移保留原安装路径、身份、权限与队列，后续同shape keyless包由独立公钥验签。首次ready核对加载版本/摘要；签名升级applied才会给插件内的本机自动两篇测试发一次性票据。自动测试需本人在插件UI明确开启，Stop/退出会关闭，不从远程或普通网页启动。
+
+`test_local_host.py` 在临时目录编译并验收keyless签名更新、origin/path约束、摘要握手、回滚、防重放和权限拒绝。`--source-v4` 可指定旧权限seed源码。它不安装真实宿主或系统任务，不操作浏览器，不等同真实采集验收。
+
 ## 4.2.5 权限通道
 
 4.2.5 接通包安装的助手固定读取同仓库 `channel-kol.json`，用于已经明确授权小红书与 B 站域名的新版本。旧 `channel.json` 保持 4.2.3，避免向旧权限安装反复推送必然被拒绝的包。4.2.4 及更早助手需要一次接通包迁移；之后同权限、同插件公钥的新版本可继续签名 OTA。权限扩大仍拒绝自动更新；签名、文件摘要、握手、回滚和原身份保护不变。助手自身仍不通过扩展包更新。

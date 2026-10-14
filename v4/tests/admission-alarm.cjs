@@ -11,7 +11,7 @@ assert.ok(start>=0&&end>start);
   let now=Date.now(),alarm=null,opens=0,searches=0,probes=0;
   let state={...CrowdCore.initial(),enabled:true,consent:CrowdCore.CONSENT,rejected:[{request:'retained-proof'}]};
   const chrome={alarms:{get:async()=>alarm,create:async(_,v)=>{alarm={...v,scheduledTime:v.when};}}};
-  const schedule=vm.runInNewContext('({'+background.slice(start,end).trim()+'}).schedule',{chrome,Date:{now:()=>now},Math,Number});
+  const schedule=vm.runInNewContext('({'+background.slice(start,end).trim()+'}).schedule',{chrome,Date:{now:()=>now},Math,Number,fastTickTimer:null,fastTickAt:null,setTimeout:()=>1,clearTimeout:()=>{},agent:{tick:async()=>{}},localTests:{run:async()=>{}}});
   const runtime={storage:{get:async()=>structuredClone(state),set:async(_,s)=>state=structuredClone(s)},now:()=>now,
    schedule,cancel:async()=>{alarm=null;},open:async()=>{opens++;},probe:async()=>{probes++;return {ready:false,reason:'page_loading'};}};
   const api={rpc:async(name,p)=>{

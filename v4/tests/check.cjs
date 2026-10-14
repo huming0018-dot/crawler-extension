@@ -15,7 +15,7 @@ async function agentChecks() {
  const storage={get:async k=>structuredClone(state[k]),set:async(k,v)=>{state[k]=structuredClone(v);}};
  const task={id:1,query:'测试餐厅',received:0,target:1,lease_token:randomUUID(),lease_until:new Date(now+1200000).toISOString()};
  const api={rpc:async(name,p)=>{
-  if(name==='guard')return {version:1,ttl_ms:600000,paused:false,allowed:true,reason:null,wait_ms:0,gap_ms:30000,caps:{search:30,detail:60,comment:120,scroll:120},counts:{search:0,detail:0,comment:0,scroll:0},session_count:0};
+  if(name==='guard')return {version:1,ttl_ms:600000,paused:['captcha','rate_limit'].includes(p.p_action),allowed:!['captcha','rate_limit'].includes(p.p_action),reason:['captcha','rate_limit'].includes(p.p_action)?p.p_action:null,wait_ms:['captcha','rate_limit'].includes(p.p_action)?1800000:0,gap_ms:30000,caps:{search:30,detail:60,comment:120,scroll:120},counts:{search:0,detail:0,comment:0,scroll:0},session_count:0};
   if(name==='status')return {participant:{status:'approved'}};
   if(name==='claim')return {task:structuredClone(task)};
   if(name==='submit'){uploads.push(p);return {inserted:true,duplicate:false,task_received:1,request:p.p_request,gate:'received'};}
@@ -33,8 +33,8 @@ async function agentChecks() {
  now+=30000; await a.tick(); assert.equal(uploads.length,0,'first note cannot skip dwell');
  now+=30000; await a.tick(); assert.equal(uploads.length,0);
  // Simulate service worker termination by rebuilding the agent from persisted storage.
- a=new CrowdAgent(runtime,api); now+=30000; await a.tick(); assert.equal(state.agent.outbox.length,1);
- state.agent.next_at=now+600000; await a.tick(); assert.equal(uploads.length,1,'outbox flushes during cooldown'); assert.equal(state.agent.outbox.length,0);
+ a=new CrowdAgent(runtime,api); now+=30000; await a.tick(); assert.equal(state.agent.outbox.length,0);assert.equal(uploads.length,1,'durable capture sends in the same tick');
+ state.agent.next_at=now+600000; await a.tick(); assert.equal(uploads.length,1,'acknowledged capture is not sent again'); assert.equal(state.agent.outbox.length,0);
  assert.equal(uploads[0].p_record.standard.url.includes('xsec_token'),false);
  state.agent={...C.initial(),enabled:true,consent:C.CONSENT,task:structuredClone(task),phase:'note',page_deadline:now+60000,note_id:id,loaded_at:now-100000,scrolls:2,dwell_ms:45000};
  gate='rate_limit';await a.tick();assert.equal(state.agent.enabled,false);assert.equal(uploads.length,1);

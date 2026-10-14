@@ -1,7 +1,7 @@
 /* One contract for desktop and native containers. No page receives credentials. */
 (function (root) {
   'use strict';
-  const VERSION = '4.2.7', CONSENT = 'crowd-public-v4';
+  const VERSION = '4.2.60', CONSENT = 'crowd-public-v4';
   const HOST = 'https://www.xiaohongshu.com';
   const publicOrigin = u => u.protocol === 'https:' && ['www.xiaohongshu.com', 'm.xiaohongshu.com'].includes(u.hostname) && !u.username && !u.password && !u.port;
   function noteURL(value) {
@@ -29,7 +29,7 @@
     capabilities: Object.freeze({search: true, note: true, comments: true, profile: true}),
     searchURL(query) {
       if (typeof query !== 'string' || !query.trim()) throw new Error('invalid_search_query');
-      return HOST + '/search_result?keyword=' + encodeURIComponent(query) + '&source=web_search_result_notes';
+      return HOST + '/search_result?keyword=' + encodeURIComponent(query) + '&type=51';
     }
   })});
   function platform(id = 'xiaohongshu') {
@@ -77,6 +77,15 @@
     if (JSON.stringify(record).length > 60000) throw new Error('record_too_large');
     return record;
   }
+  function commentMediaURL(value, kind) {
+    if(typeof value!=='string' || value.length>2048 || /[\s?#]/.test(value) || !value.startsWith('https://'))return null;
+    try {
+      const u=new URL(value);if(u.username || u.password || u.port || u.href!==value)return null;
+      if(kind==='emoji' && /^https:\/\/picasso-static\.xiaohongshu\.com\/[^\s?#]+$/.test(value))return value;
+      if(kind==='image' && /^https:\/\/sns-webpic-qc\.xhscdn\.com\/[^\s?#]+\/comment(?:_uhdr)?\/[a-zA-Z0-9_-]+![a-zA-Z0-9_-]+$/.test(value))return value;
+    }catch(_){}
+    return null;
+  }
   function receipt(value, request) {
     // A transport success is not an ingestion receipt. Unknown shapes stay queued.
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_receipt');
@@ -101,5 +110,5 @@
     async function keyFor(key) { return key === 'agent' ? 'agent:' + ((await raw.get('session'))?.user?.id || 'signed-out') : key; }
     return {async get(key) { return raw.get(await keyFor(key)); }, async set(key, value) { return raw.set(await keyFor(key), value); }};
   }
-  root.CrowdCore = {VERSION, CONSENT, HOST, platform, taskPlatform, profileURL, noteURL, navigationURL, between, initial, validate, receipt, quotaRetry, accountStorage};
+  root.CrowdCore = {VERSION, CONSENT, HOST, platform, taskPlatform, profileURL, noteURL, navigationURL, between, initial, validate, commentMediaURL, receipt, quotaRetry, accountStorage};
 })(globalThis);

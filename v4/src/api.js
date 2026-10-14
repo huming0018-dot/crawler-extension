@@ -1,5 +1,7 @@
 (function (root) {
   'use strict';
+  const clock=()=>root.performance?.now?.() ?? Date.now();
+  const elapsed=start=>Math.max(0,Math.round(clock()-start));
   class CrowdAPI {
     constructor(config, storage, fetcher = (...args) => root.fetch(...args)) {
       this.config = config; this.storage = storage; this.fetcher = fetcher;
@@ -8,23 +10,27 @@
       if (u.protocol !== 'https:' || !u.hostname.endsWith('.supabase.co')) throw new Error('invalid_backend');
       if (!config.key || config.key.startsWith('sb_secret_')) throw new Error('public_key_required');
     }
-    async request(path, body, token, signal) {
+    async request(path, body, token, signal, metrics = null) {
+      const requestAt=metrics?clock():0;
       const timeout = new AbortController();
       const abort = () => timeout.abort();
       signal?.addEventListener('abort', abort, {once: true});
       if (signal?.aborted) abort();
       const timer = setTimeout(abort, 20000);
       try {
+        const encoded=JSON.stringify(body),fetchAt=metrics?clock():0;
         const response = await this.fetcher(this.config.url + path, {method: 'POST', signal: timeout.signal,
           headers: {apikey: this.config.key, 'Content-Type': 'application/json',
-            ...(token ? {Authorization: 'Bearer ' + token} : {})}, body: JSON.stringify(body)});
-        const data = await response.json();
+            ...(token ? {Authorization: 'Bearer ' + token} : {})}, body:encoded});
+        if(metrics)metrics.fetch_ms=elapsed(fetchAt);
+        const jsonAt=metrics?clock():0;const data = await response.json();
+        if(metrics)metrics.json_ms=elapsed(jsonAt);
         if (!response.ok) {
           const err = new Error(data.msg || data.message || data.error_description || 'http_' + response.status);
           err.status = response.status; err.code = data.code; throw err;
         }
         return data;
-      } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+      } finally {if(metrics)metrics.request_ms=elapsed(requestAt);clearTimeout(timer);signal?.removeEventListener('abort',abort);}
     }
     async login(email, password, signup = false) {
       const revision = ++this.authRevision;
@@ -52,9 +58,10 @@
         return data;
       } finally { clearTimeout(timer); }
     }
-    async session(signal) {
+    async session(signal, metrics = null) {
       const revision = this.authRevision;
-      let s = await this.storage.get('session');
+      const readAt=metrics?clock():0;let s = await this.storage.get('session');
+      if(metrics)metrics.session_read_ms=elapsed(readAt);
       if (signal?.aborted || revision !== this.authRevision) throw new Error('cancelled');
       if (!s?.refresh_token) throw Object.assign(new Error('backend_login_required'), {status: 401});
       if (!s.access_token || !Number.isFinite(s.expires_at) || s.expires_at < Date.now() + 60000) {
@@ -79,15 +86,19 @@
           })().finally(() => { if (this.refreshing === entry) this.refreshing = null; });
           this.refreshing = entry;
         }
-        s = await this.refreshing.promise;
+        const refreshAt=metrics?clock():0;try{s=await this.refreshing.promise;}finally{if(metrics)metrics.refresh_ms=elapsed(refreshAt);}
       }
       if (signal?.aborted || revision !== this.authRevision) throw new Error('cancelled');
       return s;
     }
-    async rpc(name, params = {}, signal) {
-      const s = await this.session(signal);
-      try { return await this.request('/rest/v1/rpc/crowd_v4_' + name, params, s.access_token, signal); }
-      catch (error) { if (error.status === 401 || error.message === 'login_required') error.message = 'backend_login_required'; throw error; }
+    async rpc(name, params = {}, signal, metrics = null) {
+      const rpcAt=metrics?clock():0;
+      try{
+        const sessionAt=metrics?clock():0;let s;
+        try{s=await this.session(signal,metrics);}finally{if(metrics)metrics.session_ms=elapsed(sessionAt);}
+        return await this.request('/rest/v1/rpc/crowd_v4_' + name,params,s.access_token,signal,metrics);
+      }catch(error){if(error.status===401||error.message==='login_required')error.message='backend_login_required';throw error;}
+      finally{if(metrics)metrics.rpc_ms=elapsed(rpcAt);}
     }
     async logout() {
       ++this.authRevision;

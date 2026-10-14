@@ -27,6 +27,11 @@ def call(action,version='4.2.0',**extra):
     result=json.loads(p.stdout[4:]);return result
 publish(new)
 assert call('status')['status']=='ready'
+# A formal host must never accept a keyless test installation through nil equality.
+manifest_path=directory/'manifest.json';original_manifest=manifest_path.read_text();original_config=dict(config)
+m=json.loads(original_manifest);m.pop('key');manifest_path.write_text(json.dumps(m));config.pop('extension_key');(helper/'config.json').write_text(json.dumps(config))
+assert call('status')['error']=='wrong_extension'
+manifest_path.write_text(original_manifest);config=original_config;(helper/'config.json').write_text(json.dumps(config))
 r=call('apply');assert r=={'status':'pending_reload','version':'4.2.1'},r
 assert (work/'.crowd-v4-backup').exists()
 assert call('ack','4.2.1',release_sha256='0'*64)['error']=='handshake_mismatch'
