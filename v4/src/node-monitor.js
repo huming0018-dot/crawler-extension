@@ -89,7 +89,7 @@
      dropped+=value.rows.length-998;row.node_seq++;
      rows=[...value.rows.slice(-998),{event_id:this.uuid(),node_seq:value.seq+1,run_id:row.run_id,step:'telemetry_gap',status:'skipped',at_ms:at,duration_ms:null,error_code:null},row];
     }
-    if(!await this.same(s))return;await this.storage.set(this.key(s.id),{...value,seq:row.node_seq,rows,dropped});
+    if(!await this.same(s))return;await this.storage.set(this.key(s.id),{...value,seq:row.node_seq,rows,dropped});return true;
    }).catch(()=>{});
   }
   async flush(signal){

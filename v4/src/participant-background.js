@@ -228,7 +228,11 @@ workTabs.riskObserved=evidence=>risk.captureMetadata(evidence);
 
 const localTests=new CrowdLocalTest({storage,id:chrome.runtime.id,version:CrowdCore.VERSION,owner:runtime.owner,agent,riskCheck:(s,owner,valid)=>risk.preflight(s,owner,valid),isBusy:async()=>pendingCommands>0 || agent.maintenance,start:valid=>agent.start(true,{valid})});
 const recovery=new CrowdRecovery({id:chrome.runtime.id,owner:runtime.owner,storage,agent,api,tabs:workTabs,prefs:()=>localTests.status(),busy:()=>pendingCommands>0||!!agent.active||!!agent.maintenance});
-const updater = new CrowdUpdater({chrome,storage,agent,isBusy:async()=>{
+const updater = new CrowdUpdater({chrome,storage,agent,reportOTA:async fields=>{
+  const settings=await diagnosticSettings();
+  if(!settings.enabled||!settings.id)return false;
+  const recorded=await nodeMonitor.event('ota',fields);if(recorded)queueNodeFlush();return recorded===true;
+},isBusy:async()=>{
   const s=await agent.read();
   const uncertain=s.sdk_unknown||s.sdk_pending||s.pending_risk||s.pending_observation_batch||['sending','unknown'].includes(s.risk_report?.state);
   const parked=s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&s.last_error==='test_completed'&&!s.outbox?.length&&!s.work_slots?.length&&!uncertain;
