@@ -186,8 +186,20 @@ function queuePlatformHealth(){if(platformHealthTimer)return;platformHealthTimer
 const trace = new CrowdTrace({storage,settings:diagnosticSettings,uuid:()=>crypto.randomUUID()});
 const baseRPC=api.rpc.bind(api);
 const originalRPC=async(...args)=>{if(await legacyInstallation)throw Error('legacy_migration_required');return baseRPC(...args);};
+let releaseHashPromise=null;
+async function cachedReleaseHash(){
+  if(!releaseHashPromise)releaseHashPromise=(async()=>{
+    const response=await fetch(chrome.runtime.getURL('release.json'));
+    if(response.ok===false)throw Error('release_digest_unavailable');
+    const data=await response.arrayBuffer();
+    return [...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(b=>b.toString(16).padStart(2,'0')).join('');
+  })().catch(error=>{releaseHashPromise=null;throw error;});
+  return releaseHashPromise;
+}
 const nodeMonitor=new CrowdNodeMonitor({storage,api:{rpc:originalRPC},settings:diagnosticSettings,
-  state:async()=>{const state=await agent.read(),health=(await platformHealth.publicState()).xiaohongshu;return {enabled:state.enabled===true,
+  state:async()=>{const state=await agent.read(),health=(await platformHealth.publicState()).xiaohongshu;let release_digest;
+    try{release_digest=await cachedReleaseHash();}catch(_){console.warn('release_digest_unavailable');}
+    return {release_digest,enabled:state.enabled===true,
     login_state:['login_required','backend_login_required'].includes(state.last_error)||health.status==='logged_out'?'needs_login':
       ['captcha','identity_verification_required','platform_identity_changed'].includes(state.last_error)||['challenge','account_changed'].includes(health.status)?'verification':health.status==='authenticated'?'ready':'unknown'};},
   uuid:()=>crypto.randomUUID(),version:CrowdCore.VERSION});
@@ -237,10 +249,7 @@ const updater = new CrowdUpdater({chrome,storage,agent,reportOTA:async fields=>{
   const uncertain=s.sdk_unknown||s.sdk_pending||s.pending_risk||s.pending_observation_batch||['sending','unknown'].includes(s.risk_report?.state);
   const parked=s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&s.last_error==='test_completed'&&!s.outbox?.length&&!s.work_slots?.length&&!uncertain;
   return !!recovery.active||pendingCommands>0||!!agent.pendingStop||!!agent.stopping||!!agent.stopActive||!!agent.poolJobs?.size||!!(s.enabled&&s.work_slots?.length)||!!(s.pilot_waiting&&!parked&&(uncertain||s.outbox?.length||s.work_slots?.length||s.enrichment||['search','note','reopen_note','enrich','parallel'].includes(s.phase)));
-},version:CrowdCore.VERSION,releaseHash:async()=>{
-  const data=await (await fetch(chrome.runtime.getURL('release.json'))).arrayBuffer();
-  return [...new Uint8Array(await crypto.subtle.digest('SHA-256',data))].map(b=>b.toString(16).padStart(2,'0')).join('');
-}});
+},version:CrowdCore.VERSION,releaseHash:cachedReleaseHash});
 let diagnosticReport;
 const diagnosticKey = (id, suffix) => 'diagnostics:' + id + ':' + suffix;
 const diagnosticErrors = ['navigation_failed','navigation_uncommitted','page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','login_required','backend_login_required','user_login','captcha','rate_limit','approval_required','consent_required','user_stopped','logged_out','system_suspended','lease_lost','daily_quota','review_local_rejections','backend_unavailable','control_unavailable','global_pause','action_budget','action_gap','session_rest','known_note','note_busy','invalid_receipt','test_completed','test_comments_partial','test_expired','test_quota','test_no_task','test_partial','test_new_run_required','parallel_unavailable','pool_recovery_required','executor_busy','update_in_progress','cancelled'];

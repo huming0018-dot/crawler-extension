@@ -118,6 +118,7 @@
     await this.telemetry('started');
     const r=await this.send('apply');
     await this.storage.set('updater_status',{state:r.status,version:this.version,target:r.version,checked_at:Date.now()});
+    if(r.status==='current'&&r.version===this.version)await this.telemetry('skipped');
     if(r.status==='pending_reload') {
      await this.telemetry('waiting');
      // Evidence/session/consent/stop state stay in extension storage. Reload self only.
