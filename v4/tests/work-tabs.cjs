@@ -21,6 +21,10 @@ for(const file of ['core','work-tabs'])vm.runInThisContext(fs.readFileSync('v4/s
  const a=data['work_tabs:one'].a.tab,originalURL=tabs.get(a).url;tabs.get(a).url=CrowdCore.HOST+'/explore/'+'c'.repeat(24);
  await assert.rejects(()=>restart.open(urls[1],'a'),/pool_recovery_required/);assert.equal(tabs.get(a).url,CrowdCore.HOST+'/explore/'+'c'.repeat(24),'profile navigation cannot overwrite a user-taken SPA page');tabs.get(a).url=originalURL;
  const document=tabs.get(a).document;tabs.get(a).document=crypto.randomUUID();await assert.rejects(()=>restart.open(urls[1],'a'),/pool_recovery_required/);tabs.get(a).document=document;
+ // Login recovery is explicit and only rebonds the same tab/session/URL after principal verification.
+ tabs.get(a).document=crypto.randomUUID();tabs.get(a).token=null;await restart.rebindAfterLogin(async()=>true);assert.equal((await restart.read('note_ready','a')).ready,true);assert.equal(created,2);
+ tabs.get(a).url=CrowdCore.HOST+'/explore/'+'c'.repeat(24);await assert.rejects(()=>restart.rebindAfterLogin(async()=>true),/pool_recovery_required/);tabs.get(a).url=originalURL;
+ await assert.rejects(()=>restart.rebindAfterLogin(async()=>false),/cancelled/);
  const b=data['work_tabs:one'].b.tab;tabs.get(b).token='unowned';tabs.get(b).document=crypto.randomUUID();
  await assert.rejects(()=>restart.read('note_ready','b'),/pool_recovery_required/);assert.equal(tabs.get(b).token,'unowned','cannot rebind unowned same-URL document');
  await restart.close('b');assert.equal(removed.includes(b),false);assert.equal(data['work_tabs:one'].b.state,'retired');assert.equal(data['work_tabs:one'].b.retired_reason,'close_identity');
@@ -32,5 +36,10 @@ for(const file of ['core','work-tabs'])vm.runInThisContext(fs.readFileSync('v4/s
  assert.deepEqual(removed,beforeRemoved,'retiring an old browser session never touches reused user tab IDs');
  assert.equal(data['work_tabs:one'].a,undefined);assert.equal(data['work_tabs:one'].b,undefined);
  await make().close('c');assert.equal(data['work_tabs:one'].c.state,'retired','uncertain creation retired without touching a tab');
+ // OTA may clear storage.session and leave a 62 content receiver. Retire metadata only.
+ session={};const oldTab=999;tabs.set(oldTab,{id:oldTab,url:urls[0],document:'old-document',token:'old-token'});const originalOld=structuredClone(tabs.get(oldTab));
+ data['work_tabs:one'].search={session:'before-ota',tab:oldTab,url:urls[0],document:'old-document',token:'old-token',state:'opened'};
+ for(const method of ['get','update','sendMessage','remove']){const original=chrome.tabs[method];chrome.tabs[method]=async(id,...args)=>{assert.notEqual(id,oldTab,'never read/adopt/navigate/bind/close old tab ID');return original(id,...args);};}
+ const fresh=make();await fresh.retireLoginPage(async()=>true);const countBefore=created;await fresh.open(CrowdCore.HOST+'/search_result?keyword=original','search');assert.equal(created,countBefore+1);assert.deepEqual(tabs.get(oldTab),originalOld);assert.ok(Object.values(data['work_tabs:one']).some(e=>e.tab===oldTab&&e.retired_reason==='first_login_update'));await fresh.read('ownership','search');
  console.log('PASS owned work tabs: two direct navigations, one browser session, bound worker recovery, same-URL ownership mismatch retained, owner/signed-out isolation, stale tab IDs and uncertain creation refuse duplication');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -129,6 +129,34 @@
       if(action==='comments'&&response.response?.needs_visible_page===true&&!entry.presentation){await this.present(slot,entry,ownerKey);return {ready:true};}
       return response.response || {ready:false,reason:tab.status==='loading'?'page_loading':'content_unavailable'};
     }
+    async retireLoginPage(valid) {
+      const key=await this.key();if(!await valid())throw Error('cancelled');
+      await this.write(entries=>{
+        const old=entries.search;if(!old)return;
+        entries['login-retired-'+this.uuid()]={...old,state:'retired',retired_reason:'first_login_update'};
+        entries.search={...old,state:'retired',retired_reason:'first_login_update'};
+      },key);
+    }
+    async rebindAfterLogin(valid) {
+      const key=await this.key(),session=await this.session();
+      for(const [slot,entry] of Object.entries(await this.entries())) {
+        if(!await valid())throw Error('cancelled');
+        if(entry.state==='retired')continue;
+        const {tab,pending}=await this.target(slot);
+        if(pending||tab.pendingUrl||entry.session!==session)throw this.failure('login_page_changed');
+        const proof=(await this.probe(entry.tab,'ownership')).response;
+        if(!proof?.document)throw this.failure('login_page_unavailable');
+        if(proof.document===entry.document&&proof.token===entry.token)continue;
+        // A new document in the same owned tab may lose its token after login.
+        // A conflicting token is another capture owner, never ours to overwrite.
+        if(proof.token&&proof.token!==entry.token)throw this.failure('token_changed');
+        if(!await valid())throw Error('cancelled');await this.assertKey(key);
+        const bound=await this.chrome.tabs.sendMessage(entry.tab,{type:'crowd_bind',token:entry.token});
+        if(bound?.document!==proof.document)throw this.failure('login_document_changed');
+        if(!await valid())throw Error('cancelled');
+        await this.write(entries=>{if(entries[slot]?.token!==entry.token||entries[slot]?.document!==entry.document)throw Error('cancelled');entries[slot]={...entry,document:bound.document,instance:this.instance};},key);
+      }
+    }
     async present(slot,entry,ownerKey) {
       const jobKey=ownerKey+':'+slot;
       if(this.presentationJobs.has(jobKey))return this.presentationJobs.get(jobKey);

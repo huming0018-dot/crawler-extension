@@ -15,7 +15,7 @@ COMMON = ('core.js','identity.js','api.js','agent.js','pool.js','work-tabs.js','
     'controller.css','native-runtime.js','updater.js','trace.js','structured.js','site-sdk.js',
     'passive.js','hybrid.js','main-observer.js')
 PROFILES = {
-    'participant': ('participant-background.js','participant-controller.html','participant-controller.js','participant-policy.js','node-monitor.js'),
+    'participant': ('participant-background.js','participant-controller.html','participant-controller.js','participant-policy.js','node-monitor.js','session-health.js','participant-session.js','session-content.js'),
     'kol': ('background.js','controller.html','controller.js','local-test.js','kol.js','kol-content.js','kol-ui.js','kol-controller.js','session-health.js'),
     'experiment': ('experiment-background.js','experiment-controller.html','experiment-controller.js','local-test.js','recovery.js','risk.js'),
 }
@@ -66,7 +66,7 @@ def build(output,local_test=False,profile='participant'):
         'js':['src/main-observer.js'],'run_at':'document_start','world':'MAIN','all_frames':False}]
     if profile=='kol':manifest['content_scripts'].append({'matches':hosts[2:],'js':['src/core.js','src/kol.js','src/kol-content.js'],'run_at':'document_start'})
     files['src/main-observer.js']=b'\n'.join(files['src/'+name] for name in ['structured.js','site-sdk.js','passive.js','main-observer.js'])
-    files['src/content.js']=b'\n'.join(files['src/'+name] for name in ['structured.js','site-sdk.js','passive.js','hybrid.js','content.js'])
+    files['src/content.js']=b'\n'.join(files['src/'+name] for name in ['structured.js','site-sdk.js','passive.js','hybrid.js','content.js']+(['session-content.js'] if profile=='participant' else []))
     if profile=='kol':manifest['content_scripts']=json.loads((ROOT/'manifest.json').read_text())['content_scripts']
     manifest['externally_connectable']={'matches':[conf['portal']+'/*']}
     files['manifest.json']=(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n').encode()

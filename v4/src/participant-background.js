@@ -1,5 +1,5 @@
 /* Windows/macOS Chrome & Edge MV3. No automatic start on installation. */
-if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'identity.js', 'api.js', 'agent.js', 'pool.js', 'work-tabs.js', 'join.js', 'updater.js', 'participant-policy.js', 'trace.js', 'node-monitor.js');
+if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'identity.js', 'api.js', 'agent.js', 'pool.js', 'work-tabs.js', 'join.js', 'updater.js', 'participant-policy.js', 'trace.js', 'node-monitor.js', 'session-health.js', 'participant-session.js');
 const storage = CrowdCore.accountStorage({
   async get(key) { return (await chrome.storage.local.get(key))[key]; },
   async set(key, value) { await chrome.storage.local.set({[key]: value}); }
@@ -57,6 +57,8 @@ const runtime = {
   fastCapture:true,
   owner:async()=>(await storage.get('session'))?.user?.id,
   splitCapture: true,
+  sourceHealth:()=>participantSession.require(),
+  retireLoginPage:valid=>workTabs.retireLoginPage(valid),
   trace:(stage,options)=>trace.event(stage,options),
   storage, now: Date.now, random: Math.random, uuid: () => crypto.randomUUID(),
   // Align the next wake with the durable deadline, not an unrelated 30s grid.
@@ -113,15 +115,55 @@ const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime,
 // Legacy 3.x has the same extension ID but a different identity/outbox protocol.
 // Detect once per worker, preserve every legacy key, and never enroll over it.
 const legacyInstallation = CrowdIdentity.legacy(storage);
-const tickAgent=agent.tick.bind(agent);
-agent.tick=async(...args)=>{if(await legacyInstallation)return;return tickAgent(...args);};
+const tickAgent=agent.tick.bind(agent),startAgent=agent.start.bind(agent),stopAgent=agent.stop.bind(agent);
+const platformHealth=new CrowdPlatformHealth({storage,owner:runtime.owner,now:Date.now,probe:probePlatformSessions});
+const participantSession=new CrowdParticipantSession({storage,owner:runtime.owner,now:Date.now,health:platformHealth,agent,
+  start:startAgent,stop:stopAgent,bootstrap:valid=>agent.bootstrapLoginPage(valid),rebind:valid=>workTabs.rebindAfterLogin(valid),indicate:indicatePlatformSession});
+// Direct controller stops cancel persisted intent before any pending recovery can start.
+agent.stop=async(reason='user_stopped',options={})=>{await participantSession.intent(false);return stopAgent(reason,options);};
+agent.tick=async(...args)=>{
+  if(await legacyInstallation)return;
+  // Delivery has no platform source action and must not depend on a live login page.
+  if(!args[1])await participantSession.check();
+  const result=await tickAgent(...args);
+  if(!args[1])await participantSession.check();
+  return result;
+};
+async function probePlatformSessions(){
+  const owner=await runtime.owner();if(!owner)return {};
+  const work=await storage.get('work_tab');
+  const tabs=(await chrome.tabs.query({url:['https://www.xiaohongshu.com/*','https://m.xiaohongshu.com/*']})).filter(tab=>!tab.discarded).sort((a,b)=>Number(b.id===work)-Number(a.id===work)||(b.lastAccessed||0)-(a.lastAccessed||0)).slice(0,6);
+  const observations=[];
+  await Promise.all(tabs.map(async tab=>{let timer;try{
+    const page=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'crowd_session_probe'}),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),1500);})]);
+    if(page?.platform!=='xiaohongshu')return;
+    if(page.status==='authenticated'&&page.verification==='rendered_account_navigation'&&/^[a-f0-9]{24}$/.test(page.principal_id||'')){
+      const principal_ref=await runtime.leaseScope(owner+'\n'+'xiaohongshu'+'\n'+page.principal_id);
+      observations.push({status:'authenticated',principal_ref});
+    }else if(['logged_out','challenge','unknown'].includes(page.status))observations.push({status:page.status,reason:page.reason});
+  }catch(_){}finally{clearTimeout(timer);}}));
+  const loggedOut=observations.find(p=>p.status==='logged_out'),challenge=observations.find(p=>p.status==='challenge'),authenticated=observations.filter(p=>p.status==='authenticated');
+  return {xiaohongshu:(loggedOut&&authenticated.length||new Set(authenticated.map(p=>p.principal_ref)).size>1)?{status:'unknown'}:challenge||loggedOut||authenticated[0]||{status:tabs.length?'unknown':'no_page'}};
+}
+let indicatedPlatformSession=null;
+async function indicatePlatformSession({reason,pending,recovered_at}){
+  const text=reason==='login_required'?'登录':reason==='platform_identity_changed'?'换号':pending?'核验':recovered_at?'继续':'';
+  const mark=JSON.stringify({owner:await runtime.owner(),reason:reason||null,pending:pending===true,recovered:!!recovered_at});
+  if(mark!==indicatedPlatformSession){indicatedPlatformSession=mark;nodeMonitor.event('session',{status:reason?'waiting':'completed',error_code:reason||null}).then(queueNodeFlush);}
+  await chrome.action?.setBadgeText({text});await chrome.action?.setBadgeBackgroundColor({color:reason?'#b54708':'#23704c'});
+  await chrome.action?.setTitle({title:pending?'小红书登录待恢复；原账号核验后自动继续原任务':recovered_at?'原账号登录已恢复，继续上次任务':'众包公开笔记采集'});
+}
+async function repairPlatformHealth(){if(!await chrome.alarms.get('crowd_platform_health'))await chrome.alarms.create('crowd_platform_health',{periodInMinutes:.5});}
+let platformHealthTimer=null,lastHealthEvent=0;
+function queuePlatformHealth(){if(platformHealthTimer)return;platformHealthTimer=setTimeout(()=>{platformHealthTimer=null;lastHealthEvent=Date.now();legacyInstallation.then(legacy=>{if(!legacy)return participantSession.check(true);}).catch(console.error);},Math.max(300,3000-(Date.now()-lastHealthEvent)));}
+
 const trace = new CrowdTrace({storage,settings:diagnosticSettings,uuid:()=>crypto.randomUUID()});
 const baseRPC=api.rpc.bind(api);
 const originalRPC=async(...args)=>{if(await legacyInstallation)throw Error('legacy_migration_required');return baseRPC(...args);};
 const nodeMonitor=new CrowdNodeMonitor({storage,api:{rpc:originalRPC},settings:diagnosticSettings,
-  state:async()=>{const state=await agent.read();return {enabled:state.enabled===true,
+  state:async()=>{const state=await agent.read(),health=(await platformHealth.publicState()).xiaohongshu;return {enabled:state.enabled===true,
     login_state:['login_required','backend_login_required'].includes(state.last_error)?'needs_login':
-      ['captcha','identity_verification_required','platform_identity_changed'].includes(state.last_error)?'verification':'unknown'};},
+      ['captcha','identity_verification_required','platform_identity_changed'].includes(state.last_error)?'verification':health.status==='authenticated'?'ready':'unknown'};},
   uuid:()=>crypto.randomUUID(),version:CrowdCore.VERSION});
 let nodeFlushTimer=null;
 function queueNodeFlush(){
@@ -313,6 +355,9 @@ async function setDiagnostics(enabled) {
 }
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (sender.id !== chrome.runtime.id) return;
+  if(message.type==='platform_session_changed'){
+    try{const u=new URL(sender.url||sender.tab?.url);if(sender.tab&&u.protocol==='https:'&&['www.xiaohongshu.com','m.xiaohongshu.com'].includes(u.hostname))queuePlatformHealth();}catch(_){}return;
+  }
   if (message.type === 'page_ready') {
     (async()=>{if((await agent.read()).work_slots?.length){const slot=await workTabs.ready(sender,message);if(slot){agent.poolReadySlots ||= new Map();agent.poolReadySlots.set(slot,{generation:agent.generation,target:message.target});agent.poolWake=true;return agent.tick();}}if(await storage.get('work_tab')===sender.tab?.id)return agent.pageReady(message.target,message.keyword);})().catch(console.error);return;
   }
@@ -327,7 +372,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'update_settings': await updater.setEnabled(message.enabled); return {};
       case 'update_check': {const result=await updater.check();if(result?.blocked)throw Error(result.blocked);return {};}
       case 'local_test_updates': if(message.enabled===false)await recovery.cancel();await localTests.settings(message.enabled);return {};
-      case 'state': { const session=await storage.get('session'), legacy=await legacyInstallation; if(legacy)return {legacy_installation:true,session:!!session,invited:false,agent:CrowdCore.initial(),status:{error:'legacy_migration_required'},progress:null,diagnostics:{enabled:false},updater:{enabled:false,state:'legacy_hold'},local_test:false,local_test_updates:{enabled:false},risk_confirmation:{}}; const settings = await diagnosticSettings(); return {legacy_installation:legacy,node_monitor:await nodeMonitor.snapshot(),risk_confirmation:await risk.status(),recovery:!!session&&!legacy&&localTests.allowed()&&(await localTests.status()).enabled===true?await api.rpc('recovery_check',{p_action:'status'}).catch(()=>null):null,local_test:localTests.allowed(),local_test_updates:await localTests.status(),parallel_requested:(await agent.preferences())?.parallelism,parallel_allowed:await runtime.poolAllowed(),updater:legacy?{enabled:false,state:'legacy_hold'}:await updater.status(),agent: await agent.read(), session: !!session, invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: legacy?{error:'legacy_migration_required'}:session?await api.rpc('status').catch(e => ({error: e.message})):{}, progress:session&&!legacy?await api.rpc('progress').catch(()=>null):null}; }
+      case 'state': { const session=await storage.get('session'), legacy=await legacyInstallation; if(legacy)return {legacy_installation:true,session:!!session,invited:false,agent:CrowdCore.initial(),status:{error:'legacy_migration_required'},progress:null,diagnostics:{enabled:false},updater:{enabled:false,state:'legacy_hold'},local_test:false,local_test_updates:{enabled:false},risk_confirmation:{}}; const settings = await diagnosticSettings(); return {consent_scope:session?.user?.id||'signed-out',platform_session:await participantSession.status(),legacy_installation:legacy,node_monitor:await nodeMonitor.snapshot(),risk_confirmation:await risk.status(),recovery:!!session&&!legacy&&localTests.allowed()&&(await localTests.status()).enabled===true?await api.rpc('recovery_check',{p_action:'status'}).catch(()=>null):null,local_test:localTests.allowed(),local_test_updates:await localTests.status(),parallel_requested:(await agent.preferences())?.parallelism,parallel_allowed:await runtime.poolAllowed(),updater:legacy?{enabled:false,state:'legacy_hold'}:await updater.status(),agent: await agent.read(), session: !!session, invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: legacy?{error:'legacy_migration_required'}:session?await api.rpc('status').catch(e => ({error: e.message})):{}, progress:session&&!legacy?await api.rpc('progress').catch(()=>null):null}; }
       case 'rating': await agent.queueRating(message.proof, message.score, message.reason); agent.tick(false,true).catch(console.error); return {};
       case 'risk_confirm': return risk.confirm(message.confirmed);
       case 'parallelism': {await agent.requestParallelism(message.value);return {};}
@@ -355,14 +400,14 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         if (generation !== agent.generation) throw new Error('cancelled');
         await initializeParticipantDiagnostics(message.diagnostics);
         if (generation !== agent.generation) throw new Error('cancelled');
-        await agent.start(); return {};
+        await participantSession.start(); return {};
       }
       case 'login': await agent.stop(); return api.login(message.email, message.password, message.signup);
       case 'consent': {
         await agent.stop(); await api.rpc('register', {p_consent: CrowdCore.CONSENT});
         const s = await agent.read(); s.consent = CrowdCore.CONSENT; await agent.save(s); return {};
       }
-      case 'start': await agent.start(); return {};
+      case 'start': await participantSession.start(); return {};
       case 'test_start': await agent.start(true); return {};
       case 'stop': await recovery.cancel();await localTests.cancel();await agent.stop('user_stopped', {drain:true}); return {};
       case 'logout': {
@@ -377,8 +422,9 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'open_login': {
         // Keep the actual challenge/note page. Opening help is a user action,
         // not evidence that either platform or backend authentication failed.
-        await agent.stop('user_login', {keepPage: true});
-        const id = await workingTab();
+        const held=await participantSession.status();
+        if(!held.pending)await agent.stop('user_login', {keepPage:true,drain:true});
+        const id = await workingTab() || await storage.get('work_tab');
         if (id) {
           try {
             const tab = await chrome.tabs.get(id), url = new URL(tab.pendingUrl || tab.url);
@@ -419,6 +465,7 @@ chrome.runtime.onMessageExternal?.addListener((message, sender, reply) => {
 });
 chrome.alarms.onAlarm.addListener(async alarm => {
   if(await legacyInstallation)return;
+  if(alarm.name==='crowd_platform_health')participantSession.check(true).catch(console.error);
   if(alarm.name==='crowd_node_monitor')nodeMonitor.flush().catch(()=>{});
   if (alarm.name === 'crowd_update') updater.check().catch(console.error);
   if (alarm.name === 'crowd_update_bootstrap') updater.bootstrap().then(()=>localTests.run()).catch(console.error);
@@ -426,7 +473,7 @@ chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name === 'crowd_upload') agent.tick(false, true).then(()=>localTests.run()).catch(console.error);
   if (alarm.name === 'crowd_diagnostics') recovery.run().then(()=>localTests.run()).then(reportDiagnostics).catch(console.error);
 });
-chrome.runtime.onStartup.addListener(async () => { if(await legacyInstallation)return; await agent.repairDelivery(); await agent.tick(true); await repairDiagnostics(); await reportDiagnostics(); });
+chrome.runtime.onStartup.addListener(async () => { if(await legacyInstallation)return; await repairPlatformHealth(); await agent.repairDelivery(); await agent.tick(true); await repairDiagnostics(); await reportDiagnostics(); });
 chrome.runtime.onInstalled.addListener((details = {reason: 'install'}) => {
   (async () => {
     if(await legacyInstallation){await chrome.runtime.openOptionsPage?.();return;}
@@ -445,4 +492,4 @@ chrome.tabs.onRemoved.addListener(id => {
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable
 // running state on every load; initial installation and user stops remain idle.
-legacyInstallation.then(legacy=>{if(legacy)return;return updater.bootstrap().then(()=>chrome.alarms.create('crowd_node_monitor',{periodInMinutes:.5})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>localTests.run()).then(repairDiagnostics).then(()=>recovery.run()).then(()=>localTests.run()).then(reportDiagnostics);}).catch(console.error);
+legacyInstallation.then(legacy=>{if(legacy)return;return updater.bootstrap().then(repairPlatformHealth).then(()=>chrome.alarms.create('crowd_node_monitor',{periodInMinutes:.5})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>localTests.run()).then(repairDiagnostics).then(()=>recovery.run()).then(()=>localTests.run()).then(reportDiagnostics);}).catch(console.error);

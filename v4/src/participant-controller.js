@@ -1,6 +1,8 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let current, viewTicket = 0, actions = 0;
+let current, viewTicket = 0, actions = 0, consentScope;
+let consentDraft=false;
+$('agree').onchange=()=>{consentDraft=$('agree').checked;};
 const ratingDrafts = new Map();
 const labels = {parallel:'并行采集笔记详情',idle: '等待任务', search: '自动搜索', search_done: '选择下一篇笔记', note: '浏览与采集', reopen_note: '恢复笔记浏览', enrich:'补充评论与作者资料'};
 // Desktop extension diagnostics are explicit and separate from collection consent.
@@ -10,6 +12,8 @@ $('profiles_section').hidden = !!globalThis.CrowdNative;
 const errors = {test_comments_partial:'已停止：正文已完成，评论覆盖请查看下方状态',invalid_invite: '邀请无效，请重新打开邀请链接', invite_expired: '邀请已过期，请联系邀请人', invite_full: '本批参与名额已满', installation_already_joined: '本设备已加入另一批邀请，请继续原参与身份', portal_not_configured: '安装包尚未接通参与入口', release_not_ready: '此设备的正式安装渠道尚未开放', backend_unavailable: '暂时连接不上，请稍后重试，已有进度会保留', consent_required: '请先确认自愿参与', approval_required: '账户尚未获得中台审核批准', login_required: '请在下方或工作页面登录小红书后继续', captcha: '遇到验证，请在工作页面处理', rate_limit: '平台已限流，已暂停', user_stopped: '已停止', logged_out: '已退出', system_suspended: '系统暂停或本次批次结束，进度已保存，可重新启动', lease_lost: '任务已由其他设备领取，证据保留待审'};
 Object.assign(errors, {
   parallel_unavailable:'当前安装渠道尚未通过并行采集升级检查，请使用单页采集。',
+  identity_verification_required:'尚未确认小红书原账号。请打开原工作页并登录原账号；核验成功后会按原运行意图继续。',
+  platform_identity_changed:'当前小红书账号与原账号不同，已暂停。请切回原账号，原任务和记录保留。',
   pool_recovery_required:'并行工作页状态需要核对，已停止新访问，原记录保留。',
   executor_busy:'请先停止并完成待回传记录，再更改设置。',
   user_login: '已暂停并打开小红书工作页；处理完成后，回到这里点击「继续采集」。',
@@ -70,13 +74,17 @@ async function refresh() {
   $('profiles').checked=s.profiles===true;
   $('profiles').disabled=!!data.legacy_installation || !data.session || actions>0;
   $('welcome').textContent = errors[p.error] || errors[s.last_error] || (s.enabled ? (s.phase === 'idle' ? '自动任务已开启，正在等待下一步。' : '自动任务执行中，你可以随时停止。') : data.session ? '参与身份已就绪，可点击继续；无需再次报名。' : data.invited ? '邀请已接续，请确认是否参与。' : '请从邀请链接打开，无需注册中台账号。');
+  const platform=data.platform_session;
+  if(platform?.pending&&platform.desired_running&&!p.error)$('welcome').textContent=platform.reason==='platform_identity_changed'?'当前登录账号与原账号不同，已暂停。请切回原账号；原任务和记录保留。':platform.reason==='login_required'?'小红书已退出登录，采集暂停、原任务保留。请登录原账号；核验后自动继续。':'正在核验小红书原账号，采集暂停、原任务保留。核验通过后自动继续。';
+  else if(platform?.initial_confirmed_at&&s.enabled&&!s.last_error&&!p.error)$('welcome').textContent='首次登录已确认，继续已同意的原任务。';
+  else if(platform?.recovered_at&&s.enabled&&!s.last_error&&!p.error)$('welcome').textContent='原账号登录已恢复，继续上次任务。';
   const pilotWaiting=s.enabled && s.pilot_waiting===true && s.pilot_phase==='awaiting_acceptance';
   if(pilotWaiting)$('welcome').textContent='两条验收已回传，等待实验启动，之后自动继续。';
   $('start').hidden = !data.session || data.legacy_installation;
   $('first_diagnostics_label').hidden = !!data.session;
   $('consent').textContent = data.session ? '同意并继续' : '同意并开始';
   const fields = {'插件版本': CrowdCore.VERSION, '中台账户': p.error === 'backend_login_required' ? '需要恢复' : p.error === 'backend_permission_denied' ? '权限待核对' : data.session ? '已登录' : '未登录', '参与状态': p.participant?.status || p.error || '尚未报名', '自动执行': s.enabled ? '已开启' : '已停止', '当前阶段': s.phase === 'idle' && s.task ? '准备执行任务' : labels[s.phase] || s.phase,
-    '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': s.outbox.length + ' / ' + s.rejected.length, '最近待处理原因': s.rejected.length ? (errors[s.rejected.at(-1).reason] || s.rejected.at(-1).reason) : '无', '最早下一步': !s.enabled ? '已停止，不会自动执行' : s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
+    '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': s.outbox.length + ' / ' + s.rejected.length, '最近待处理原因': s.rejected.length ? (errors[s.rejected.at(-1).reason] || s.rejected.at(-1).reason) : '无', '最早下一步': !s.enabled ? data.platform_session?.pending&&data.platform_session.desired_running?'等待原账号核验，成功后自动继续':'已停止，不会自动执行' : s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
   if(pilotWaiting){fields['自动执行']='已启用，等待实验启动';fields['当前阶段']='两条验收已回传';fields['最早下一步']='实验启动后自动继续，无需再次点击';fields['最近提示']='等待实验启动；只检查运行状态，不访问采集来源。';}
   if(data.legacy_installation)Object.assign(fields,{'中台账户':'旧版参与身份（待接续）','参与状态':'旧版数据原样保留','任务':'请在原版查看','待回传 / 待处理':'请在原版查看','最近提示':errors.legacy_migration_required});
   $('status').replaceChildren();
@@ -85,7 +93,10 @@ async function refresh() {
   const coverage=s.comment_coverage?.filter(item=>item.visible_complete && !item.complete);
   if(coverage?.length)fields['评论覆盖'] = coverage.map(item=>'当前可见 '+item.captured+' 条已采尽；页面声明 '+item.reported+' 条，差额 '+item.count_gap+' 条原因未确认。').join('\n');
   for (const [name, value] of Object.entries(fields)) { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = String(value); $('status').append(dt, dd); }
-  $('agree').checked = s.consent === CrowdCore.CONSENT;
+  const scope=data.consent_scope || (data.session?'native-session':'signed-out');
+  if(scope!==consentScope){consentScope=scope;consentDraft=false;}
+  if(s.consent===CrowdCore.CONSENT)consentDraft=false;
+  $('agree').checked=s.consent===CrowdCore.CONSENT || consentDraft;
   $('diagnostics').checked = data.diagnostics?.enabled === true;
   $('diagnostics').disabled = !data.session || actions > 0;
   $('diagnostics_status').textContent = data.diagnostics?.pending_clear ? '诊断已关闭；联网后清除云端旧状态。' : data.diagnostics?.error ? '诊断暂未送达，联网后自动重试，不影响采集。' : data.diagnostics?.sent_at ? '最近诊断送达：' + new Date(data.diagnostics.sent_at).toLocaleTimeString('zh-CN') : data.diagnostics?.enabled ? '诊断已开启，正在准备发送。' : '诊断未开启。';
@@ -166,4 +177,4 @@ $('risk_confirm').onclick=()=>action(()=>send('risk_confirm',{confirmed:$('risk_
 $('inspect_work_page').onclick = () => action(() => send('inspect_work_page'));
 action();
 globalThis.addEventListener('crowd_invite', () => action());
-setInterval(() => { if (!document.hidden && !actions) refresh().catch(() => {}); }, 10000);
+setInterval(() => { if (!document.hidden && !actions) refresh().catch(() => {}); }, 5000);

@@ -237,7 +237,7 @@
       // Stop waits for the writer. Defer cleanup until tick releases that writer.
       this.testStop={generation:this.generation,reason,drain,keepPage:!drain};
     }
-    async start(test = false, {valid = async()=>true} = {}) {
+    async start(test = false, {valid = async()=>true, resumePlatform = false, resumeInitial = false} = {}) {
       const stopIntent=this.stopIntent || 0,requested=valid;
       valid=async()=>stopIntent===(this.stopIntent || 0) && await requested();
       test = test || this.r.localTest === true;
@@ -252,7 +252,7 @@
       if (this.maintenance) throw new Error('update_in_progress');
       if (generation !== this.generation || owner!==(await this.r.owner?.() || 'standalone')) throw new Error('cancelled');
       // Hold the same single-writer lock while status IO is pending.
-      if (this.active) return this.start(test,{valid});
+      if (this.active) return this.start(test,{valid,resumePlatform,resumeInitial});
       const prior = await this.read();
       if(['sending','unknown'].includes(prior.sdk_pending?.status))throw Error('sdk_unknown');
       if(prior.sdk_unknown===true)throw Error('sdk_unknown');
@@ -260,18 +260,18 @@
       if (generation !== this.generation || !await valid()) throw Error('cancelled');
       if (this.maintenance) throw Error('update_in_progress');
       if (this.stopping) throw Error('executor_busy');
-      if (this.active) return this.start(test,{valid});
+      if (this.active) return this.start(test,{valid,resumePlatform,resumeInitial});
       if (test && prior.test_run && ['waiting','active'].includes(prior.test_run.state) && this.r.now() >= prior.test_run.expires_at) {
         // An explicit new test retires expired work before opening its new boundary.
         // Stop preserves original delivery UUIDs; no old page is reopened here.
         await this.stop('test_expired',{drain:true,restart:true});
         if(!await valid())throw Error('cancelled');
-        return this.start(test,{valid});
+        return this.start(test,{valid,resumePlatform,resumeInitial});
       }
-      this.active = this.activate(generation,test,valid).finally(() => { this.active = null;const stop=this.testStop;this.testStop=null;if(stop?.generation===this.generation)this.stop(stop.reason,{drain:stop.drain!==false,keepPage:stop.keepPage===true}).catch(()=>{}); });
+      this.active = this.activate(generation,test,valid,resumePlatform,resumeInitial).finally(() => { this.active = null;const stop=this.testStop;this.testStop=null;if(stop?.generation===this.generation)this.stop(stop.reason,{drain:stop.drain!==false,keepPage:stop.keepPage===true}).catch(()=>{}); });
       return this.active;
     }
-    async activate(generation, test = false, valid = async()=>true) {
+    async activate(generation, test = false, valid = async()=>true, resumePlatform = false, resumeInitial = false) {
       const s = await this.read();
       if (s.consent !== C.CONSENT) throw new Error('consent_required');
       if(s.test_run && ['waiting','active'].includes(s.test_run.state) && this.r.now()>=s.test_run.expires_at){await this.endTest(s,'test_expired');return;}
@@ -293,6 +293,10 @@
 
       // Every explicit resume reconciles the assignment after durable deliveries.
       s.assignment_refresh = true;
+      if(resumePlatform&&s.task){
+        const empty=resumeInitial&&!s.received&&!s.note_id&&!s.note_url&&!s.enrichment&&!s.sdk_pending&&!s.sdk_unknown&&!s.risk_report&&['idle','search'].includes(s.phase)&&![s.outbox,s.rejected,s.history,s.seen,s.candidates,s.work_slots].some(a=>a?.length);
+        s.platform_resume_task={id:s.task.id,lease:s.task.lease_token,allow_renewal:empty===true};
+      }else delete s.platform_resume_task;
       if (test) {
         if (!s.test_run || !['waiting','active'].includes(s.test_run.state)) {
           s.comment_failures=0;s.comment_partial=false;s.structured_partial=false;s.comment_coverage=[];s.repaired=[];s.api_capture_ledger=[];s.comment_validation_failed=false;s.test_run={id:this.r.uuid(),limit:4,attempts:0,accepted:[],state:'waiting',created_at:this.r.now(),expires_at:Math.min(this.r.now()+900000,Math.floor((this.r.now()+8*3600000)/86400000)*86400000+86400000-8*3600000),day:new Date(this.r.now()+8*3600000).toISOString().slice(0,10)};
@@ -303,12 +307,49 @@
         // A completed/stopped bounded run never silently becomes unlimited.
         throw Error('test_new_run_required');
       }
-      if (s.enrichment) s.enrichment.stage='done';
-      if (s.phase === 'note') s.phase = 'reopen_note';
-      if (s.phase === 'search') { s.phase = 'idle'; s.search_round = 0; }
+      if (!resumePlatform) {
+        if (s.enrichment) s.enrichment.stage='done';
+        if (s.phase === 'note') s.phase = 'reopen_note';
+        if (s.phase === 'search') { s.phase = 'idle'; s.search_round = 0; }
+      } else {
+        // The same verified page resumes its checkpoint, never a second search/detail admission.
+        if(['search','note','reopen_note'].includes(s.phase))s.page_deadline=this.r.now()+180000;
+        if(s.phase==='note'){s.loaded_at=this.r.now();s.scrolls=0;}
+      }
       s.enabled = true; s.delivery_enabled = true; s.delivery_error = null; s.last_error = null; s.page_failures = 0; s.control_checked = 0; s.last_tick = this.r.now();
       // Continuing never clears a durable deadline or a pending risk report.
       await this.save(s); await this.schedule(s,this.r.now() + 1000);
+    }
+    async bootstrapLoginPage(valid) {
+      await this.initializeGeneration();
+      if(this.active||this.stopping||this.maintenance)throw Error('executor_busy');
+      const generation=this.generation,stopIntent=this.stopIntent||0;
+      const alive=()=>{if(generation!==this.generation||stopIntent!==(this.stopIntent||0))throw Error('cancelled');};
+      const check=async()=>{alive();if(!await valid())throw Error('cancelled');};
+      this.controller=new AbortController();const signal=this.controller.signal;
+      this.active=(async()=>{
+        const s=await this.read();await check();
+        if(s.consent!==C.CONSENT||s.enabled||!s.task||!['login_required','identity_verification_required'].includes(s.last_error)||s.first_login_page||s.received||s.note_id||s.note_url||s.enrichment||s.test_run||s.sdk_unknown||s.sdk_pending||s.risk_report||!['idle','search'].includes(s.phase)||[s.outbox,s.rejected,s.history,s.seen,s.candidates,s.work_slots].some(a=>a?.length))throw Error('pool_recovery_required');
+        // Durable intent precedes any RPC/navigation; a crashed or unknown attempt never repeats.
+        s.first_login_page={stage:'claiming',task_id:s.task.id};await this.save(s);await check();
+        const status=await this.api.rpc('status',{},signal);await check();
+        if(status.participant?.status!=='approved')throw Error('approval_required');
+        const claimed=await this.api.rpc('claim',{p_task:s.task.id},signal);await check();
+        if(claimed.error)throw Error(claimed.error);
+        const task=claimed.task;
+        if(task?.id!==s.task.id||task.query!==s.task.query||task.platform!==s.task.platform||task.received!==0)throw Error('lease_lost');
+        s.task=task;s.first_login_page.stage='admitting';await this.save(s);await check();
+        const admission=await this.control(s,'search',alive,signal);await check();
+        if(!admission.allowed||admission.paused||admission.reason)throw Error(admission.reason||'control_unavailable');
+        s.first_login_page.stage='opening';await this.save(s);await check();
+        // Retire metadata only. An old tab ID from another browser session is never touched.
+        await this.r.retireLoginPage(valid);await check();
+        await this.r.open(C.taskPlatform(task).searchURL(task.query));await check();
+        s.phase='search';s.search_round=0;s.page_deadline=this.r.now()+180000;s.next_at=this.r.now()+1000;s.wait_kind='page';
+        s.enabled=false;s.last_error='identity_verification_required';s.first_login_page.stage='opened';
+        await this.save(s);return;
+      })().finally(()=>{this.active=null;});
+      return this.active;
     }
     async stop(reason = 'user_stopped', options = {}) {
       if(!options.restart && !options.stoppedCheckpoint)this.stopIntent=(this.stopIntent || 0)+1;
@@ -459,6 +500,11 @@
           if(claimed.error==='daily_quota') {if(s.test_run){await this.endTest(s,'test_quota');return;}s.next_at=C.quotaRetry(claimed,now);s.last_error='daily_quota';await this.save(s);await this.schedule(s,s.next_at);return;}
           if(claimed.error)throw Error(claimed.error);
           let task=claimed.task;
+          const resumed=s.platform_resume_task;
+          if(resumed){
+            if(task?.id!==resumed.id||task?.query!==s.task?.query||task?.platform!==s.task?.platform)throw Error('lease_lost');
+            if(task.lease_token!==resumed.lease&&!resumed.allow_renewal)throw Error('pool_recovery_required');
+          }
           if(!task && s.task && !s.test_run?.task_ids) {
             if(s.work_slots?.length || s.enrichment || ['note','reopen_note'].includes(s.phase))throw Error('pool_recovery_required');
             const fresh=await this.api.rpc('claim',{p_task:null},signal);alive();
@@ -468,13 +514,13 @@
           if(!this.bindBatch(s,task,bound?requested:null)){await this.endTest(s,'test_no_task');return;}
           if(s.task?.id!==task?.id || s.task?.lease_token!==task?.lease_token || s.task?.query!==task?.query || s.task?.platform!==task?.platform) {
             if(s.work_slots?.length || s.enrichment || ['note','reopen_note'].includes(s.phase))throw Error('pool_recovery_required');
-            s.phase='idle';s.seen=[];s.candidates=[];s.search_round=0;s.note_url=null;s.note_id=null;
+            if(!resumed){s.phase='idle';s.seen=[];s.candidates=[];s.search_round=0;s.note_url=null;s.note_id=null;}
           } else if(task) {
             if(task.received<s.task.received)throw Error('backend_unavailable');
             const known=new Set(task.known_note_ids || []);
             s.candidates=s.candidates.filter(url=>!known.has(C.taskPlatform(task).noteURL(url).id) || task.repair_notes?.some(n=>n.record.standard.note_id===C.taskPlatform(task).noteURL(url).id));
           }
-          s.task=task || null;s.assignment_refresh=false;
+          s.task=task || null;s.assignment_refresh=false;delete s.platform_resume_task;
           if(s.test_run?.state==='waiting' && task?.repair_only){
             if(s.outbox.length || s.work_slots?.length || s.enrichment)throw Error('pool_recovery_required');
             s.test_run.goal=0;s.test_run.limit=0;s.phase='idle';s.seen=[];s.candidates=[];s.search_round=0;s.note_url=null;s.note_id=null;
@@ -747,6 +793,7 @@
           }
         }
         if (err.message==='navigation_uncommitted') await this.r.trace?.('navigation_timeout');
+        if (s.platform_resume_task&&err.message==='lease_lost') {s.enabled=false;await this.save(s);await this.r.cancel();return;}
         if (['sdk_unknown','test_expired','parallel_unavailable','pool_recovery_required','identity_verification_required','platform_identity_changed','navigation_failed', 'navigation_uncommitted', 'page_loading', 'page_timeout', 'content_unavailable', 'probe_timeout', 'captcha', 'rate_limit', 'login_required', 'backend_login_required', 'page_mismatch', 'approval_required', 'consent_required', 'review_local_rejections', 'unsupported_platform'].includes(err.message) || err.status === 401 || err.status === 403) {
           const backendError=err.status===401?'backend_login_required':err.status===403?'backend_permission_denied':null;
           if(s.test_run){await this.endTest(s,backendError||err.message,{drain:!backendError});return;}
