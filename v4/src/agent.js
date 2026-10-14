@@ -320,7 +320,7 @@
       // Continuing never clears a durable deadline or a pending risk report.
       await this.save(s); await this.schedule(s,this.r.now() + 1000);
     }
-    async bootstrapLoginPage(valid) {
+    async bootstrapLoginPage(valid, resumeKnownWait = false) {
       await this.initializeGeneration();
       if(this.active||this.stopping||this.maintenance)throw Error('executor_busy');
       const generation=this.generation,stopIntent=this.stopIntent||0;
@@ -329,7 +329,25 @@
       this.controller=new AbortController();const signal=this.controller.signal;
       this.active=(async()=>{
         const s=await this.read();await check();
-        if(s.consent!==C.CONSENT||s.enabled||!s.task||!['login_required','identity_verification_required'].includes(s.last_error)||s.first_login_page||s.received||s.note_id||s.note_url||s.enrichment||s.test_run||s.sdk_unknown||s.sdk_pending||s.risk_report||!['idle','search'].includes(s.phase)||[s.outbox,s.rejected,s.history,s.seen,s.candidates,s.work_slots].some(a=>a?.length))throw Error('pool_recovery_required');
+        const waits=new Set(['session_rest','action_gap','global_pause']),mark=s.first_login_page;
+        const retry=resumeKnownWait&&mark?.task_id===s.task?.id&&['admitting','waiting'].includes(mark?.stage)&&waits.has(s.last_error);
+        if(s.consent!==C.CONSENT||s.enabled||!s.task||(!retry&&(!['login_required','identity_verification_required'].includes(s.last_error)||mark))||s.received||s.note_id||s.note_url||s.enrichment||s.test_run||s.sdk_unknown||s.sdk_pending||s.risk_report||!['idle','search'].includes(s.phase)||[s.outbox,s.rejected,s.history,s.seen,s.candidates,s.work_slots].some(a=>a?.length))throw Error('pool_recovery_required');
+        const wait=async admission=>{
+          if(!waits.has(admission.reason)||!Number.isFinite(admission.wait_ms)||admission.wait_ms<0)throw Error(admission.reason||'control_unavailable');
+          const retry_at=this.r.now()+Math.max(1000,admission.wait_ms);
+          s.first_login_page={stage:'waiting',task_id:s.task.id,reason:admission.reason,retry_at};
+          s.enabled=false;s.last_error=admission.reason;s.next_at=Math.max(s.next_at||0,retry_at);s.wait_kind='action';s.action_not_before=s.next_at;
+          await this.save(s);await check();return {waiting:true,reason:admission.reason,retry_at};
+        };
+        if(retry){
+          if(mark.stage==='waiting'&&Number.isFinite(mark.retry_at)&&mark.retry_at>this.r.now())return {waiting:true,reason:s.last_error,retry_at:mark.retry_at};
+          // A 63 definite refusal did not persist its guard reply. Read control
+          // again; never treat the old control snapshot as a source receipt.
+          s.first_login_page={stage:'checking_wait',task_id:s.task.id};await this.save(s);await check();
+          const current=await this.control(s,'control',alive,signal);await check();
+          if(current.reason||current.paused)return wait(current);
+          // control's allowed=false is expected: only search can grant a visit.
+        }
         // Durable intent precedes any RPC/navigation; a crashed or unknown attempt never repeats.
         s.first_login_page={stage:'claiming',task_id:s.task.id};await this.save(s);await check();
         const status=await this.api.rpc('status',{},signal);await check();
@@ -340,7 +358,7 @@
         if(task?.id!==s.task.id||task.query!==s.task.query||task.platform!==s.task.platform||task.received!==0)throw Error('lease_lost');
         s.task=task;s.first_login_page.stage='admitting';await this.save(s);await check();
         const admission=await this.control(s,'search',alive,signal);await check();
-        if(!admission.allowed||admission.paused||admission.reason)throw Error(admission.reason||'control_unavailable');
+        if(!admission.allowed||admission.paused||admission.reason)return wait(admission);
         s.first_login_page.stage='opening';await this.save(s);await check();
         // Retire metadata only. An old tab ID from another browser session is never touched.
         await this.r.retireLoginPage(valid);await check();

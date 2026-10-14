@@ -13,7 +13,7 @@ function fixture(extra={}){
  const api={rpc:async(name,p)=>{calls.push({name,p});if(name==='status')return status?await status():{participant:{status:'approved'}};if(name==='guard')return {version:1,ttl_ms:60000,paused:false,allowed:true,reason:null,wait_ms:0,gap_ms:1000,caps:{search:30,detail:60,comment:120,scroll:120},counts:{search:0,detail:0,comment:0,scroll:0}};if(name==='claim')return {task:structuredClone(task)};throw Error('unexpected '+name);}};
  r.retireLoginPage=async()=>calls.push({name:'retire-metadata'});r.open=async()=>{calls.push({name:'open-new-owned'});};
  const agent=new CrowdAgent(r,api);let controller;
- const make=()=>new CrowdParticipantSession({bootstrap:valid=>agent.bootstrapLoginPage(valid),storage,owner:r.owner,now:r.now,health,agent,start:agent.start.bind(agent),stop:agent.stop.bind(agent),rebind:async()=>{calls.push({name:'rebind'});}});
+ const make=()=>new CrowdParticipantSession({bootstrap:(valid,retry)=>agent.bootstrapLoginPage(valid,retry),storage,owner:r.owner,now:r.now,health,agent,start:agent.start.bind(agent),stop:agent.stop.bind(agent),rebind:async()=>{calls.push({name:'rebind'});}});
  controller=make();r.sourceHealth=()=>controller.require();
  return {data,storage,task,agent,health,calls,schedules,make,get controller(){return controller;},restart(){controller=make();},page(p){pages={xiaohongshu:p};now+=60001;},probe(p){probe=p;},status(p){status=p;},advance(n){now+=n;},read:()=>agent.read(),async modify(p){const s=await agent.read();Object.assign(s,p);await agent.save(s);}};
 }
@@ -43,5 +43,31 @@ function fixture(extra={}){
  f.restart();await f.controller.check(true);f.restart();await f.controller.check(true);assert.equal(f.calls.filter(x=>x.name==='open-new-owned').length,1);assert.equal(f.calls.filter(x=>x.name==='claim').length,1);
  f.page({status:'authenticated',principal_ref:'a'.repeat(64)});await f.controller.check(true);assert.equal((await f.read()).enabled,true);assert.ok((await f.controller.status()).initial_confirmed_at);
  f=fixture({enabled:false,last_error:'login_required'});f.agent.r.open=async()=>{f.calls.push({name:'open-unknown'});throw Error('navigation_uncommitted');};f.page({status:'unknown'});await f.controller.check(true);assert.equal((await f.read()).enabled,false);f.restart();await f.controller.check(true);assert.equal(f.calls.filter(x=>x.name==='open-unknown').length,1);assert.equal((await f.read()).first_login_page.stage,'opening');
+ // A known guard refusal is durable waiting, including the 63 admitting/stale-control state.
+ for(const blockedReason of ['session_rest','action_gap','global_pause']){
+  f=fixture({enabled:false,last_error:'login_required'});f.page({status:'unknown'});
+  const rpc=f.agent.api.rpc;let blocked=true;
+  f.agent.api.rpc=async(name,p)=>{const v=await rpc(name,p);if(name==='guard')return {...v,allowed:false,reason:blocked?blockedReason:null,wait_ms:blocked?120000:0,...(p.p_action==='search'&&!blocked?{allowed:true}:{})};return v;};
+  await f.controller.check(true);s=await f.read();assert.equal(s.first_login_page.stage,'waiting');assert.equal(s.control.reason,blockedReason);assert.equal(s.last_error,blockedReason);assert.equal(s.enabled,false);assert.equal((await f.controller.status()).pending,true);assert.equal((await f.controller.status()).wait_until,s.first_login_page.retry_at);assert.equal(f.calls.length,3);
+  f.restart();await f.controller.check(true);await f.controller.start();assert.equal(f.calls.length,3,'worker restart and explicit Continue cannot skip known deadline');
+  blocked=false;f.advance(120001);await f.controller.check(true);s=await f.read();assert.equal(s.first_login_page.stage,'opened');assert.equal(s.enabled,false);assert.equal(s.task.id,19);assert.equal((await f.controller.status()).wait_until,null);
+  assert.deepEqual(f.calls.map(x=>x.name),['status','claim','guard','guard','status','claim','guard','retire-metadata','open-new-owned']);assert.deepEqual(f.calls.filter(x=>x.name==='guard').map(x=>x.p.p_action),['search','control','search']);assert.ok(f.calls.filter(x=>x.name==='claim').every(x=>x.p.p_task===19));
+  f.restart();await f.controller.check(true);assert.equal(f.calls.filter(x=>x.name==='open-new-owned').length,1);
+ }
+ async function waiting63(){
+  const f=fixture({enabled:false,last_error:'session_rest',first_login_page:{stage:'admitting',task_id:19},control:{version:1,allowed:true,reason:null}});f.page({status:'unknown'});
+  await f.storage.set('participant-session:fixture-owner',{initial_login:true,bootstrap_started:true,pending:false,desired_running:true,reason:'session_rest'});return f;
+ }
+ f=await waiting63();{const rpc=f.agent.api.rpc;f.agent.api.rpc=async(name,p)=>{const v=await rpc(name,p);return name==='guard'?{...v,allowed:false,reason:'session_rest',wait_ms:1800000}:v;};}
+ await f.controller.check(true);s=await f.read();assert.equal(s.first_login_page.stage,'waiting');assert.equal(s.control.allowed,false);assert.equal(s.control.reason,'session_rest');assert.deepEqual(f.calls.map(x=>[x.name,x.p?.p_action]),[['guard','control']],'63 old allowed=true is not a current admission');
+ f.restart();await f.controller.check(true);assert.equal(f.calls.length,1);await f.controller.intent(false);await f.agent.stop('user_stopped',{keepPage:true});f.advance(1800001);await f.controller.check(true);assert.equal(f.calls.length,1,'manual stop cancels all automatic admission');
+ // Unknown control/search results and risk responses must never repeat a source action.
+ f=await waiting63();f.agent.api.rpc=async(name,p)=>{f.calls.push({name,p});throw Error('network_unknown');};await f.controller.check(true);assert.equal((await f.read()).first_login_page.stage,'checking_wait');f.restart();await f.controller.check(true);await f.controller.start().catch(()=>{});assert.equal(f.calls.length,1);
+ for(const guardReason of ['captcha','rate_limit']){f=await waiting63();const rpc=f.agent.api.rpc;f.agent.api.rpc=async(name,p)=>{const v=await rpc(name,p);return name==='guard'?{...v,allowed:false,reason:guardReason,wait_ms:1000}:v;};await f.controller.check(true);assert.equal((await f.read()).last_error,guardReason);f.advance(2000);f.restart();await f.controller.check(true);assert.equal(f.calls.length,1);}
+ f=fixture({enabled:false,last_error:'login_required'});f.page({status:'unknown'});{const rpc=f.agent.api.rpc;f.agent.api.rpc=async(name,p)=>{if(name==='guard'){f.calls.push({name,p});throw Error('network_unknown');}return rpc(name,p);};}await f.controller.check(true);assert.equal((await f.read()).first_login_page.stage,'admitting');assert.equal((await f.read()).last_error,'control_unavailable');f.restart();await f.controller.check(true);assert.equal(f.calls.length,3);
+ for(const sourceReason of ['captcha','rate_limit']){f=await waiting63();f.page({status:'challenge',reason:sourceReason});await f.controller.check(true);assert.equal((await f.read()).last_error,sourceReason);assert.equal(f.calls.length,0,'visible platform risk stops before control recheck');}
+ // Stop wins an in-flight read-only recheck; no later exact claim or page open.
+ f=await waiting63();let controlRelease;{const rpc=f.agent.api.rpc;f.agent.api.rpc=async(name,p)=>{const v=await rpc(name,p);return name==='guard'?new Promise(resolve=>{controlRelease=()=>resolve({...v,allowed:false,reason:null});}):v;};}
+ const checking=f.controller.check(true);while(!controlRelease)await pause();await f.controller.intent(false);const halted=f.agent.stop('user_stopped',{keepPage:true});controlRelease();await Promise.all([checking,halted]);assert.equal((await f.read()).enabled,false);assert.equal((await f.controller.status()).desired_running,false);assert.equal(f.calls.length,1);
  console.log('PASS actual agent + platform health: durable same-account resume, stable task/outbox, manual-stop RPC race, unknown/different account, backend/test/unknown/risk blocks, expired lease hold, first-login exact renewal without fallback');
 })().catch(e=>{console.error(e);process.exitCode=1;});

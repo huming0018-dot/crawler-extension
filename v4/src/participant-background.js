@@ -118,7 +118,7 @@ const legacyInstallation = CrowdIdentity.legacy(storage);
 const tickAgent=agent.tick.bind(agent),startAgent=agent.start.bind(agent),stopAgent=agent.stop.bind(agent);
 const platformHealth=new CrowdPlatformHealth({storage,owner:runtime.owner,now:Date.now,probe:probePlatformSessions});
 const participantSession=new CrowdParticipantSession({storage,owner:runtime.owner,now:Date.now,health:platformHealth,agent,
-  start:startAgent,stop:stopAgent,bootstrap:valid=>agent.bootstrapLoginPage(valid),rebind:valid=>workTabs.rebindAfterLogin(valid),indicate:indicatePlatformSession});
+  start:startAgent,stop:stopAgent,bootstrap:(valid,retry)=>agent.bootstrapLoginPage(valid,retry),rebind:valid=>workTabs.rebindAfterLogin(valid),indicate:indicatePlatformSession});
 // Direct controller stops cancel persisted intent before any pending recovery can start.
 agent.stop=async(reason='user_stopped',options={})=>{await participantSession.intent(false);return stopAgent(reason,options);};
 agent.tick=async(...args)=>{
