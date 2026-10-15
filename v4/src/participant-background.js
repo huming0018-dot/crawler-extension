@@ -200,8 +200,7 @@ const nodeMonitor=new CrowdNodeMonitor({storage,api:{rpc:originalRPC},settings:d
   state:async()=>{const state=await agent.read(),health=(await platformHealth.publicState()).xiaohongshu;let release_digest;
     try{release_digest=await cachedReleaseHash();}catch(_){console.warn('release_digest_unavailable');}
     return {release_digest,enabled:state.enabled===true,
-    login_state:['login_required','backend_login_required'].includes(state.last_error)||health.status==='logged_out'?'needs_login':
-      ['captcha','identity_verification_required','platform_identity_changed'].includes(state.last_error)||['challenge','account_changed'].includes(health.status)?'verification':health.status==='authenticated'?'ready':'unknown'};},
+    login_state:CrowdNodeMonitor.loginState(state,health,Date.now())};},
   uuid:()=>crypto.randomUUID(),version:CrowdCore.VERSION});
 let nodeFlushTimer=null;
 function queueNodeFlush(){

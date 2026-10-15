@@ -10,6 +10,19 @@
  const TRACE={worker_started:['session','started'],admission_requested:['session','started'],admission_allowed:['session','completed'],admission_denied:['session','waiting'],open_requested:['navigation','started'],tab_created:['navigation','started'],tab_reused:['navigation','started'],update_accepted:['navigation','started'],update_failed:['navigation','failed'],nav_started:['navigation','started'],nav_committed:['navigation','started'],nav_dom_ready:['navigation','completed'],nav_complete:['navigation','completed'],nav_failed:['navigation','failed'],probe_ready:['detail','completed'],probe_missing:['detail','waiting'],probe_timeout:['detail','failed'],navigation_timeout:['navigation','failed'],submit_requested:['upload','started'],submit_accepted:['receipt','completed'],submit_rejected:['receipt','failed'],submit_failed:['upload','failed']};
  const missing=error=>error?.code==='PGRST202';
  class CrowdNodeMonitor {
+  // Registration is a bounded current observation, not an execution resume proof.
+  static loginState(state={},health={},now=Date.now()){
+   const backend=[state?.last_error,state?.delivery_error];
+   if(backend.includes('backend_login_required'))return 'needs_login';
+   if(backend.includes('backend_permission_denied'))return 'verification';
+   const fresh=value=>Number.isSafeInteger(now)&&Number.isSafeInteger(value)&&value>0&&now>=value&&now-value<=120000;
+   if(!fresh(health?.checked_at))return 'unknown';
+   if(health.status==='logged_out')return 'needs_login';
+   if(['challenge','account_changed'].includes(health.status))return 'verification';
+   if(health.status==='authenticated'&&!health.reason&&fresh(health.observed_at))return 'ready';
+   return 'unknown';
+  }
+
   constructor({storage,api,settings,state=async()=>({enabled:false,login_state:'unknown'}),uuid,now=Date.now,version}){
    Object.assign(this,{storage,api,settings,state,uuid,now,version});this.queue=Promise.resolve();this.registered=null;this.registering=null;this.flushing=null;this.legacy=false;
   }
