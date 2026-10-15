@@ -26,7 +26,7 @@ function fixture(){
  f.response={status:'applied',version:'4.2.68'};await f.make('4.2.68').bootstrap();assert(!f.data.updater_telemetry_applied,'opt-out does not consume applied telemetry marker');
  f.settings={id:account,enabled:true,revision:3};await f.make('4.2.68').bootstrap();assert.equal(f.rows.length,1,'later explicit opt-in can record actual applied status');
  f=fixture();f.settings={id:null,enabled:true,revision:2};await f.make().check();assert.equal(f.rows.length,0,'signed-out has no diagnostics');
- f=fixture();f.response={status:'error',error:'invalid_signature',url:'https://private',cookie:'secret'};await f.make().check();assert.deepEqual(f.rows.map(x=>x.status),['started','failed']);assert.equal(f.rows.at(-1).error_code,'unexpected_error');assert(!JSON.stringify(f.rows).includes('private'));assert(!JSON.stringify(f.rows).includes('secret'));
+ f=fixture();f.response={status:'error',error:'invalid_signature',url:'https://private',cookie:'secret'};await f.make().check();assert.deepEqual(f.rows.map(x=>x.status),['started','failed']);assert.equal(f.rows.at(-1).error_code,'ota_signature_invalid');assert(!JSON.stringify(f.rows).includes('private'));assert(!JSON.stringify(f.rows).includes('secret'));
  f=fixture();f.response={status:'error',error:'busy'};await f.make().check();assert.deepEqual(f.rows.map(x=>x.status),['started','waiting']);assert.equal(f.reloads,0);
  f=fixture();await f.make('4.2.67',async()=>{throw Error('telemetry failure');}).check();assert.equal(f.reloads,1);assert.equal(f.data.updater_status.state,'pending_reload','diagnostics failure cannot fail update');
  f=fixture();f.response={status:'pending_reload',version:'4.2.68',poll_status:'pending_reload'};const updater=f.make();await updater.status();updater.pollAt=0;await updater.status();assert.equal(f.rows.length,1,'unchanged poll result does not flood queue');
@@ -36,5 +36,12 @@ function fixture(){
  let enabled=false,recorded=0,flushes=0;
  const callback=vm.runInNewContext('('+match[1]+')',{diagnosticSettings:async()=>({enabled,id:account}),nodeMonitor:{event:async(step,fields)=>{assert.equal(step,'ota');assert.deepEqual(Object.keys(fields),['status']);recorded++;return true;}},queueNodeFlush:()=>flushes++});
  await callback({status:'started'});assert.equal(recorded,0);enabled=true;assert.equal(await callback({status:'started'}),true);assert.equal(recorded,1);assert.equal(flushes,1);
+
+ for(const code of ["ota_network_dns", "ota_network_connect", "ota_network_timeout", "ota_network_tls", "ota_network_http", "ota_network_transfer", "ota_io_permission", "ota_io_missing", "ota_io_space", "ota_io_failed", "ota_package_tool_failed", "ota_service_failed", "ota_process_terminated", "ota_process_launch_failed", "ota_unknown_exit"]){
+  f=fixture();f.response={status:'error',error:code,cookie:'PRIVATE_SECRET'};await f.make().check();assert.equal(f.rows.at(-1).error_code,code);assert.equal(f.data.updater_status.error,code);assert(!JSON.stringify(f.rows).includes('PRIVATE_SECRET'));
+ }
+ f=fixture();f.response={status:'error',error:'PRIVATE_SECRET'};await f.make().check();assert.equal(f.rows.at(-1).error_code,'ota_unknown');assert(!JSON.stringify(f.data).includes('PRIVATE_SECRET'));
+ f=fixture();await f.monitor.event('session',{status:'failed',error_code:'ota_network_dns'});assert.equal(f.rows.at(-1).error_code,'unexpected_error');
+ f=fixture();f.response={status:'ready',version:'4.2.67',poll_status:'error',poll_error:'ota_network_dns'};const changing=f.make();await changing.status();f.response={status:'ready',version:'4.2.67',poll_status:'error',poll_error:'ota_network_timeout'};changing.pollAt=0;await changing.status();assert.deepEqual(f.rows.map(x=>x.error_code),['ota_network_dns','ota_network_timeout'],'changed failure gets its own fixed-code event');
  console.log('PASS OTA telemetry: durable ACK, restart application, ready/mismatch exclusion, opt-in/signed-out, bounded fixed fields, busy/failure, failure isolation, poll dedup, real participant wiring');
 })().catch(error=>{console.error(error);process.exitCode=1});

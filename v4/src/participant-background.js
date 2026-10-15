@@ -353,7 +353,7 @@ async function reportDiagnostics() {
             updater_enabled:update.enabled===true,
             ota_last_poll_at:Number.isFinite(update.last_poll_at)&&update.last_poll_at>0&&update.last_poll_at<=4102444800?Math.floor(update.last_poll_at):null,
             ota_poll_status:oneOf(update.poll_status,['current','downloaded','pending_reload','error'],null),
-            ota_poll_error:oneOf(update.poll_error,['invalid_signature','hash_mismatch','permission_change','replayed_release','recovery_required','busy','operation_failed','invalid_manifest','invalid_url','wrong_extension','update_failed'],null),
+            ota_poll_error:oneOf(update.poll_error,['invalid_signature','hash_mismatch','permission_change','replayed_release','recovery_required','busy','operation_failed','invalid_manifest','invalid_url','wrong_extension','update_failed','ota_network_dns','ota_network_connect','ota_network_timeout','ota_network_tls','ota_network_http','ota_network_transfer','ota_io_permission','ota_io_missing','ota_io_space','ota_io_failed','ota_package_tool_failed','ota_service_failed','ota_process_terminated','ota_process_launch_failed','ota_unknown_exit','too_large','unsafe_archive','invalid_package','lock_failed','swap_failed','process_check_failed','handshake_mismatch','version_mismatch'],null),
             ota_poll_query_error:oneOf(update.poll_query_error,['busy','invalid_response','helper_unavailable'],null),auto_test_enabled:(await localTests.status()).enabled===true,
             document_kind:navDocument.document_kind, pending_kind:navDocument.pending_kind,
             nav_stage: navigation?.stage || 'unknown', nav_error: navigation?.error || null,

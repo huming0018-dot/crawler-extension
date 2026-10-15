@@ -4,6 +4,7 @@
  const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  const STEPS=new Set(['claim','session','navigation','list','detail','comments','media','subtitle','outbox','upload','receipt','stop','ota','telemetry_gap']);
  const STATUS=new Set(['started','completed','waiting','failed','skipped']);
+ const OTA_ERRORS=new Set(["ota_network_dns", "ota_network_connect", "ota_network_timeout", "ota_network_tls", "ota_network_http", "ota_network_transfer", "ota_io_permission", "ota_io_missing", "ota_io_space", "ota_io_failed", "ota_package_tool_failed", "ota_service_failed", "ota_process_terminated", "ota_process_launch_failed", "ota_unknown_exit", "ota_signature_invalid", "ota_hash_mismatch", "ota_permission_change", "ota_replayed_release", "ota_recovery_required", "ota_handshake_mismatch", "ota_version_mismatch", "ota_busy", "ota_invalid_package", "ota_invalid_url", "ota_wrong_extension", "ota_unknown", "ota_io_failed"]);
  const ERRORS=new Set(['login_required','backend_login_required','identity_verification_required','platform_identity_changed','captcha','rate_limit','navigation_failed','navigation_uncommitted','page_timeout','page_loading','content_unavailable','probe_timeout','page_mismatch','wrong_note','lease_lost','daily_quota','session_rest','action_gap','global_pause','user_stopped','backend_unavailable','control_unavailable','invalid_receipt','cancelled','unexpected_error']);
  const COUNTS=['contents','comments','replies','media','queued','received','pages','source_actions'];
  const TRACE={worker_started:['session','started'],admission_requested:['session','started'],admission_allowed:['session','completed'],admission_denied:['session','waiting'],open_requested:['navigation','started'],tab_created:['navigation','started'],tab_reused:['navigation','started'],update_accepted:['navigation','started'],update_failed:['navigation','failed'],nav_started:['navigation','started'],nav_committed:['navigation','started'],nav_dom_ready:['navigation','completed'],nav_complete:['navigation','completed'],nav_failed:['navigation','failed'],probe_ready:['detail','completed'],probe_missing:['detail','waiting'],probe_timeout:['detail','failed'],navigation_timeout:['navigation','failed'],submit_requested:['upload','started'],submit_accepted:['receipt','completed'],submit_rejected:['receipt','failed'],submit_failed:['upload','failed']};
@@ -81,7 +82,7 @@
     if(!row.run_id&&!['claim','session','stop','ota','telemetry_gap'].includes(row.step)){row.step='telemetry_gap';row.status='skipped';}
     if(!UUID.test(row.event_id)||!Number.isSafeInteger(row.node_seq))return;
     if(Number.isSafeInteger(fields.duration_ms)&&fields.duration_ms>=0&&fields.duration_ms<=86400000)row.duration_ms=fields.duration_ms;
-    if(fields.error_code)row.error_code=ERRORS.has(fields.error_code)?fields.error_code:'unexpected_error';
+    if(fields.error_code)row.error_code=(ERRORS.has(fields.error_code)||(step==='ota'&&OTA_ERRORS.has(fields.error_code)))?fields.error_code:'unexpected_error';
     const counts={};for(const name of COUNTS)if(Number.isSafeInteger(fields.counts?.[name])&&fields.counts[name]>=0&&fields.counts[name]<=100000)counts[name]=fields.counts[name];
     if(Object.keys(counts).length)row.counts=counts;
     let rows=[...value.rows,row],dropped=value.dropped||0;

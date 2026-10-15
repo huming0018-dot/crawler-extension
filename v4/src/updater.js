@@ -1,11 +1,16 @@
 /* Fixed native protocol; no scripts/paths/URLs are accepted from a message. */
 (function(root){
  'use strict';
+ const NATIVE_ERRORS=new Set(["invalid_signature", "hash_mismatch", "permission_change", "replayed_release", "recovery_required", "handshake_mismatch", "version_mismatch", "busy", "invalid_manifest", "invalid_package", "unsafe_archive", "too_large", "invalid_url", "wrong_extension", "operation_failed", "lock_failed", "swap_failed", "process_check_failed", "ota_network_dns", "ota_network_connect", "ota_network_timeout", "ota_network_tls", "ota_network_http", "ota_network_transfer", "ota_io_permission", "ota_io_missing", "ota_io_space", "ota_io_failed", "ota_package_tool_failed", "ota_service_failed", "ota_process_terminated", "ota_process_launch_failed", "ota_unknown_exit"]);
+ const OTA_ERRORS=new Set(["ota_network_dns", "ota_network_connect", "ota_network_timeout", "ota_network_tls", "ota_network_http", "ota_network_transfer", "ota_io_permission", "ota_io_missing", "ota_io_space", "ota_io_failed", "ota_package_tool_failed", "ota_service_failed", "ota_process_terminated", "ota_process_launch_failed", "ota_unknown_exit", "ota_signature_invalid", "ota_hash_mismatch", "ota_permission_change", "ota_replayed_release", "ota_recovery_required", "ota_handshake_mismatch", "ota_version_mismatch", "ota_busy", "ota_invalid_package", "ota_invalid_url", "ota_wrong_extension", "ota_unknown", "ota_io_failed"]);
+ const OTA_ERROR_MAP={"invalid_signature": "ota_signature_invalid", "hash_mismatch": "ota_hash_mismatch", "permission_change": "ota_permission_change", "replayed_release": "ota_replayed_release", "recovery_required": "ota_recovery_required", "handshake_mismatch": "ota_handshake_mismatch", "version_mismatch": "ota_version_mismatch", "busy": "ota_busy", "invalid_manifest": "ota_invalid_package", "invalid_package": "ota_invalid_package", "unsafe_archive": "ota_invalid_package", "too_large": "ota_invalid_package", "invalid_url": "ota_invalid_url", "wrong_extension": "ota_wrong_extension", "operation_failed": "ota_unknown", "lock_failed": "ota_io_failed", "swap_failed": "ota_io_failed", "process_check_failed": "ota_unknown"};
+ const safeNativeError=value=>NATIVE_ERRORS.has(value)?value:'update_failed';
+ const otaError=value=>OTA_ERRORS.has(value)?value:(typeof value==='string'&&Object.hasOwn(OTA_ERROR_MAP,value)?OTA_ERROR_MAP[value]:'ota_unknown');
  class CrowdUpdater {
   constructor({chrome,storage,agent,version,releaseHash,isBusy=()=>false,reportOTA=async()=>false}) {Object.assign(this,{chrome,storage,agent,version,releaseHash,isBusy,reportOTA});this.active=null;this.updatePeriod=60;}
-  async telemetry(status) {
+  async telemetry(status,error=null) {
    // Diagnostics failure cannot change signed update or restart behavior.
-   try {return await this.reportOTA({status,error_code:status==='failed'?'unexpected_error':null});}catch(_){return false;}
+   try {return await this.reportOTA({status,error_code:status==='failed'?otaError(error):null});}catch(_){return false;}
   }
   async applied(r) {
    try {
@@ -17,9 +22,9 @@
   async send(action, extra={}) {
    const message={action,version:this.version,...extra};if(action==='ack')message.release_sha256=await this.releaseHash();
    const host='com.crowd.v4.updater';
-   const result=await this.chrome.runtime.sendNativeMessage(host,message);
+   let result;try{result=await this.chrome.runtime.sendNativeMessage(host,message);}catch(_){throw Error('helper_unavailable');}
    if(!result || typeof result.status!=='string')throw Error('invalid_response');
-   if(result.status==='error')throw Error(['invalid_signature','hash_mismatch','permission_change','replayed_release','recovery_required','handshake_mismatch','version_mismatch','busy'].includes(result.error)?result.error:'update_failed');
+   if(result.status==='error')throw Error(safeNativeError(result.error));
    return result;
   }
   async status() {
@@ -28,14 +33,14 @@
    if(this.chrome.runtime.sendNativeMessage && !this.active && (!this.pollAt || Date.now()-this.pollAt>=60000)){
     this.pollAt=Date.now();
     try{const r=await this.send('status');
-     if(poll.poll_status!==r.poll_status){
-      if(r.poll_status==='error')await this.telemetry('failed');
+     if(poll.poll_status!==r.poll_status || (r.poll_status==='error' && poll.poll_error!==safeNativeError(r.poll_error))){
+      if(r.poll_status==='error')await this.telemetry('failed',r.poll_error);
       else if(['downloaded','pending_reload'].includes(r.poll_status))await this.telemetry('waiting');
      }
      poll={};
      if(Number.isFinite(r.last_poll_at)&&r.last_poll_at>0&&r.last_poll_at<=Date.now()/1000+60)poll.last_poll_at=r.last_poll_at;
      if(['current','downloaded','pending_reload','error'].includes(r.poll_status))poll.poll_status=r.poll_status;
-     if(typeof r.poll_error==='string')poll.poll_error=['invalid_signature','hash_mismatch','permission_change','replayed_release','recovery_required','busy','operation_failed','invalid_manifest','invalid_url','wrong_extension'].includes(r.poll_error)?r.poll_error:'update_failed';
+     if(typeof r.poll_error==='string')poll.poll_error=safeNativeError(r.poll_error);
      await this.storage.set('updater_poll',poll);
     }catch(e){poll={...poll,poll_query_error:['busy','invalid_response'].includes(e.message)?e.message:'helper_unavailable'};await this.storage.set('updater_poll',poll);}
    }
@@ -92,7 +97,7 @@
      if(!alarm || alarm.periodInMinutes!==this.updatePeriod)await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:this.updatePeriod});
     }
    }catch(e){if(!await this.recoverMismatch(e.message)){
-    await this.telemetry(e.message==='busy'?'waiting':'failed');
+    await this.telemetry(e.message==='busy'?'waiting':'failed',e.message);
     await this.storage.set('local_update_verified',null);
     await this.storage.set('local_updater_ready',null);
     await this.storage.set('updater_status',{state:e.message==='busy'?'checking':'helper_unavailable',error:e.message,version:this.version});
@@ -125,7 +130,7 @@
      await this.reloadSettled();
     }
    }catch(e){if(!await this.recoverMismatch(e.message)){
-    await this.telemetry(e.message==='busy'?'waiting':'failed');
+    await this.telemetry(e.message==='busy'?'waiting':'failed',e.message);
     await this.storage.set('updater_status',{state:'error',error:e.message,version:this.version,checked_at:Date.now()});
     // The OS poll may briefly own the host lock. Do not collide again at the
     // same hourly boundary or postpone a prepared update for another hour.

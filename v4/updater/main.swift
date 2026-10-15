@@ -43,12 +43,50 @@ func manifestCapabilityShape(_ manifest: [String:Any]) throws -> [String:Any] {
 }
 func version(_ text: String) throws -> [Int] { let a=text.split(separator:"."); try require(a.count==3 && a[0]=="4" && a.allSatisfy{!$0.isEmpty && $0.allSatisfy(\.isNumber)},"invalid_version"); let n=a.compactMap{Int($0)}; try require(n.count==3 && n.allSatisfy{$0<65536} && n.map(String.init).joined(separator:".")==text,"invalid_version"); return n }
 func greater(_ a: String, _ b: String) throws -> Bool { try version(a).lexicographicallyPrecedes(version(b)) == false && a != b }
+// Only fixed codes cross the native boundary. Never serialize NSError userInfo,
+// subprocess stderr, argv or paths: those can contain credentials and user data.
+func safeErrorCode(_ error: Error) -> String {
+ if let failure=error as? Failure {return failure.code}
+ let e=error as NSError
+ if e.domain==NSCocoaErrorDomain {
+  if [NSFileReadNoPermissionError,NSFileWriteNoPermissionError].contains(e.code){return "ota_io_permission"}
+  if [NSFileNoSuchFileError,NSFileReadNoSuchFileError].contains(e.code){return "ota_io_missing"}
+  if e.code==NSFileWriteOutOfSpaceError{return "ota_io_space"}
+  if e.code>=0 && e.code<=1023{return "ota_io_failed"}
+ }
+ if e.domain==NSPOSIXErrorDomain {
+  if [Int(EACCES),Int(EPERM)].contains(e.code){return "ota_io_permission"}
+  if e.code==Int(ENOENT){return "ota_io_missing"}
+  if e.code==Int(ENOSPC){return "ota_io_space"}
+  if [Int(EIO),Int(EROFS),Int(EMFILE),Int(ENFILE)].contains(e.code){return "ota_io_failed"}
+ }
+ return "operation_failed"
+}
+func commandError(_ executable: String, _ status: Int32, _ reason: Process.TerminationReason) -> String {
+ if reason != .exit{return "ota_process_terminated"}
+ if executable=="/usr/bin/curl" {
+  switch status {
+  case 5,6:return "ota_network_dns"
+  case 7:return "ota_network_connect"
+  case 28:return "ota_network_timeout"
+  case 35,51,58,59,60,77,80,82,83,90,91:return "ota_network_tls"
+  case 22:return "ota_network_http"
+  case 18,52,55,56,92,95,96:return "ota_network_transfer"
+  case 23,26:return "ota_io_failed"
+  case 63:return "too_large"
+  default:return "ota_unknown_exit"
+  }
+ }
+ if executable=="/usr/bin/unzip" || executable=="/usr/bin/ditto" {return "ota_package_tool_failed"}
+ if executable=="/bin/launchctl" {return "ota_service_failed"}
+ return "ota_unknown_exit"
+}
 func run(_ executable: String, _ args: [String]) throws -> Data {
  #if TESTING
  if executable=="/bin/launchctl" && ProcessInfo.processInfo.environment["CROWD_TEST_INSTALL_HOME"] != nil {return Data()}
  #endif
  let process=Process(), pipe=Pipe(); process.executableURL=URL(fileURLWithPath:executable); process.arguments=args; process.standardOutput=pipe; process.standardError=FileHandle.nullDevice
- try process.run(); let output=pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit(); try require(process.terminationStatus==0,"operation_failed"); return output
+ do {try process.run()} catch {let code=safeErrorCode(error);throw Failure(code=="operation_failed" ? "ota_process_launch_failed":code)}; let output=pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit(); try require(process.terminationStatus==0,commandError(executable,process.terminationStatus,process.terminationReason)); return output
 }
 func safePath(_ url: URL) throws {
  try require(url.path==url.resolvingSymlinksInPath().path,"unsafe_path")
@@ -145,10 +183,10 @@ func handle(_ message: [String:Any], prepareOnly: Bool = false, unattended: Bool
   #endif
  }
  if action=="status" {
-  var result:[String:Any] = ["status":s["pending"] == nil ? (s["status"] as? String ?? "ready") : "pending_reload","version":local,"protocol":2]
+  var result:[String:Any] = ["status":s["pending"] == nil ? (s["status"] as? String ?? "ready") : "pending_reload","version":local,"protocol":2,"diagnostics_schema":1]
   if let at=s["last_poll_at"] as? Double,at.isFinite,at>0 {result["last_poll_at"]=at}
   if let value=s["poll_status"] as? String,["current","downloaded","pending_reload","error"].contains(value){result["poll_status"]=value}
-  if let value=s["poll_error"] as? String {result["poll_error"]=["invalid_signature","hash_mismatch","permission_change","replayed_release","recovery_required","busy","operation_failed","invalid_manifest","invalid_url","wrong_extension"].contains(value) ? value : "operation_failed"}
+  if let value=s["poll_error"] as? String {result["poll_error"]=["invalid_signature","hash_mismatch","permission_change","replayed_release","recovery_required","busy","operation_failed","invalid_manifest","invalid_url","wrong_extension","ota_network_dns","ota_network_connect","ota_network_timeout","ota_network_tls","ota_network_http","ota_network_transfer","ota_io_permission","ota_io_missing","ota_io_space","ota_io_failed","ota_package_tool_failed","ota_service_failed","ota_process_terminated","ota_process_launch_failed","ota_unknown_exit","too_large","unsafe_archive","invalid_package","lock_failed","swap_failed","process_check_failed"].contains(value) ? value : "operation_failed"}
   return result
  }
  try require(action=="apply","invalid_request");try require(local==loaded,"version_mismatch")
@@ -351,7 +389,7 @@ do {
  try require(CommandLine.arguments.count==2 && (CommandLine.arguments[1]==origin || CommandLine.arguments[1]=="--recover" || CommandLine.arguments[1]=="--poll"),"invalid_origin")
  let fd=open(root.appendingPathComponent("update.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600);try require(fd>=0,"lock_failed");defer{close(fd)};try require(flock(fd,LOCK_EX|LOCK_NB)==0,"busy")
  if CommandLine.arguments[1]=="--poll" {
-  do {try scheduledPoll()} catch {var current=(try? state()) ?? [:];current["last_poll_at"]=Date().timeIntervalSince1970;current["poll_status"]="error";current["poll_error"]=(error as? Failure)?.code ?? "operation_failed";try? write(current,stateURL);throw error}
+  do {try scheduledPoll()} catch {var current=(try? state()) ?? [:];current["last_poll_at"]=Date().timeIntervalSince1970;current["poll_status"]="error";current["poll_error"]=safeErrorCode(error);try? write(current,stateURL);throw error}
  } else if CommandLine.arguments[1]=="--recover" {
   let dir=try configuredDirectory();var s=try state()
   if let pending=s["pending"] as? String,try read(dir.appendingPathComponent("manifest.json"))["version"] as? String != pending {_=try rollback(dir,&s)}
@@ -367,6 +405,6 @@ do {
  if CommandLine.arguments.dropFirst().first?.hasPrefix("--")==true {FileHandle.standardError.write(Data((e.code+"\n").utf8));exit(1)}
  output(["status":"error","error":e.code])
 } catch {
- if CommandLine.arguments.dropFirst().first?.hasPrefix("--")==true {FileHandle.standardError.write(Data("operation_failed\n".utf8));exit(1)}
- output(["status":"error","error":"operation_failed"])
+ if CommandLine.arguments.dropFirst().first?.hasPrefix("--")==true {FileHandle.standardError.write(Data((safeErrorCode(error)+"\n").utf8));exit(1)}
+ output(["status":"error","error":safeErrorCode(error)])
 }
