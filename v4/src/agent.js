@@ -71,7 +71,7 @@
         if(Number.isFinite(s.supplement_checked_at)&&this.r.now()>=s.supplement_checked_at&&this.r.now()-s.supplement_checked_at<60000)return false;
         s.supplement_checked_at=this.r.now();await this.save(s);alive();
         try{await this.control(s,'control',alive);alive();if(!await valid())return false;await this.save(s);if(s.acceptance_supplement?.state==='admitted')await this.schedule(s,this.r.now()+1000);return s.acceptance_supplement?.state==='admitted';}
-        catch(error){alive();return false;}
+        catch(error){alive();if(!await valid())return false;alive();await this.save(s);alive();return false;}
       })().finally(()=>{this.active=null;});return this.active;
     }
     async parkPilot(s, value, alive = ()=>{}) {
@@ -204,9 +204,22 @@
     }
     async control(s, action, alive, signal, note = null) {
       const before = this.r.now();
+      const checkingSupplement=action==='control'&&s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&s.received===2&&!s.task&&['test_completed','control_unavailable'].includes(s.last_error);
+      const recordDiagnostic=(kind,status=null,success=false,cause=null)=>{
+        const now=this.r.now(),delta=now-before;
+        const diagnostic={kind,http_status:Number.isInteger(status)&&status>=100&&status<=599?status:null,elapsed_ms:Number.isFinite(delta)?Math.min(300000,Math.max(0,Math.round(delta))):null,at_ms:Number.isSafeInteger(now)&&now>=0&&now<=4102444800000?now:null};
+        if(kind==='local_gate_failure')diagnostic.cause=['cancelled','task_reconciliation_required','admission_rejected'].includes(cause)?cause:'local_unknown';
+        s.control_diagnostic=diagnostic;
+        if(success)s.control_success_at=diagnostic.at_ms;else s.control_last_failure=diagnostic;
+      };
+      const rejectPolicy=kind=>{recordDiagnostic(kind);throw new Error('control_unavailable');};
       let value;const metrics=this.r.localTest===true&&s.test_run?.state==='active'?{}:null;
       try { value = await this.api.rpc('guard', {p_action: action, p_task: s.task?.id || null, p_note: note}, signal,metrics); }
-      catch (error) { if (error.status === 401 || error.status === 403) throw error; throw new Error('control_unavailable'); }
+      catch (error) {
+        const known=['timeout','cancelled','network_unknown','http_4xx','http_5xx','invalid_json'];
+        const d=error?.request_diagnostic;recordDiagnostic(known.includes(d?.kind)?d.kind:'network_unknown',error?.status??d?.http_status);
+        if (error.status === 401 || error.status === 403) throw error; throw new Error('control_unavailable');
+      }
       finally{
         if(metrics){
           metrics.control_total_ms=Math.max(0,this.r.now()-before);
@@ -223,6 +236,7 @@
       if(['awaiting_acceptance','active','closed'].includes(value?.pilot_phase))s.pilot_phase=value.pilot_phase;
       const terminal=value?.pilot_phase==='closed' && ['control','search','detail','comment','scroll'].includes(action)?'user_stopped':value?.error || (value?.allowed===false ? value.reason : null);
       if(['task_full','daily_quota','test_completed','user_stopped'].includes(terminal)) {
+        recordDiagnostic('terminal_response',null,true);
         if(await this.parkPilot(s,{error:terminal,pilot_phase:value.pilot_phase},alive))return {...value,allowed:false,paused:false,reason:terminal};
         s.last_error=terminal;
         if(terminal==='task_full') {s.assignment_refresh=true;s.next_at=this.r.now()+1000;}
@@ -231,7 +245,7 @@
         s.wait_kind=terminal==='daily_quota'?'budget':'action';s.control=null;s.control_expires=0;
         await this.save(s);alive();if(!s.enabled)await this.repairDelivery();return {...value,allowed:false,paused:false,reason:terminal};
       }
-      if (value?.error) throw new Error(value.error);
+      if (value?.error) {recordDiagnostic('backend_error');throw new Error(value.error);}
       // A broken/older backend cannot silently disable limits. No offline page actions.
       const scoped=s.test_run?.task_ids?.includes(s.task?.id) && JSON.stringify(s.task.acceptance_task_ids)===JSON.stringify(s.test_run.task_ids);
       const configuredCap=s.task?.daily_comment_cap, configuredGap=s.task?.action_gap_milliseconds;
@@ -246,9 +260,11 @@
         !Number.isFinite(value.wait_ms) || value.wait_ms < 0 || value.wait_ms > 172800000 ||
         !Number.isFinite(value.gap_ms) || value.gap_ms < minimumGap || value.gap_ms > 3600000 ||
         (value.action_wait_ms != null && (!Number.isFinite(value.action_wait_ms) || value.action_wait_ms < 0 || value.action_wait_ms > 172800000)) ||
-        Object.entries(caps).some(([key,max]) => !Number.isInteger(value.caps?.[key]) || value.caps[key] < 1 || value.caps[key] > max || !Number.isInteger(value.counts?.[key]) || value.counts[key] < 0) ||
-        (s.control && value.version < s.control.version) || this.r.now() - before > 30000 || this.r.now() < before)
-        throw new Error('control_unavailable');
+        Object.entries(caps).some(([key,max]) => !Number.isInteger(value.caps?.[key]) || value.caps[key] < 1 || value.caps[key] > max || !Number.isInteger(value.counts?.[key]) || value.counts[key] < 0))
+        rejectPolicy('policy_schema_invalid');
+      if(s.control && value.version < s.control.version)rejectPolicy('policy_version_regression');
+      if(this.r.now()-before>30000)rejectPolicy('response_slow');
+      if(this.r.now()<before)rejectPolicy('clock_regression');
       const idleRepair=this.r.localTest===true && scoped && s.enabled && s.task?.repair_only && ['waiting','active'].includes(s.test_run?.state) && s.phase==='idle' &&
         !s.outbox.length && !s.work_slots?.length && !s.enrichment && ['search','detail','comment'].every(key=>value.counts[key]<value.caps[key]);
       // A current server-clear retires a stale lab action wait; source risk waits remain.
@@ -263,7 +279,13 @@
       if((s.pilot_waiting===true||s.pilot_check_pending===true) && action==='control' && value.pilot_phase==='active' && value.reason===null && !value.paused && !s.pending_risk) {
         s.pilot_waiting=false;delete s.pilot_check_pending;s.assignment_refresh=true;s.next_at=this.r.now();s.wait_kind=null;s.last_error=null;
       }
-      if(action==='control')await this.acceptSupplement(s,value,alive);
+      let admitted;
+      if(action==='control'){
+        try{admitted=await this.acceptSupplement(s,value,alive);}
+        catch(error){recordDiagnostic('local_gate_failure',null,false,error?.message);throw error;}
+      }
+      if(checkingSupplement&&value.acceptance_supplement!=null&&admitted!==true)recordDiagnostic('local_gate_failure',null,false,'admission_rejected');
+      else recordDiagnostic('ok',null,true);
       s.control = value; s.control_task=s.task?.id || null; s.control_checked = this.r.now(); s.control_expires = before + value.ttl_ms;
       s.control_error = false;
       if (['captcha','rate_limit'].includes(action)) s.pending_risk = null;

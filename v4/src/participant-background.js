@@ -63,7 +63,7 @@ const runtime = {
   async retireSupplementPage(valid){
     const old=(await workTabs.entries()).search;if(!old||old.state==='retired')return;
     const marker=(await chrome.storage.session.get('crowd_work_session')).crowd_work_session;
-    if(old.state!=='opened'||typeof old.session!=='string'||!old.session||typeof marker!=='string'||!marker)throw Error('task_reconciliation_required');
+    if(!['opened','missing'].includes(old.state)||(old.state==='missing'&&old.session===marker)||typeof old.session!=='string'||!old.session||typeof marker!=='string'||!marker)throw Error('task_reconciliation_required');
     if(old.session!==marker)await workTabs.retireLoginPage(valid);
   },
   expectedPrincipal:async()=>(await platformHealth.read()).xiaohongshu?.expected_ref,

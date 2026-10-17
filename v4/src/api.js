@@ -11,25 +11,36 @@
       if (!config.key || config.key.startsWith('sb_secret_')) throw new Error('public_key_required');
     }
     async request(path, body, token, signal, metrics = null) {
-      const requestAt=metrics?clock():0;
+      const diagnosticAt=clock(),requestAt=metrics?diagnosticAt:0;let abortKind=null,httpStatus=null;
       const timeout = new AbortController();
-      const abort = () => timeout.abort();
+      const abort = () => {abortKind ||= 'cancelled';timeout.abort();};
       signal?.addEventListener('abort', abort, {once: true});
       if (signal?.aborted) abort();
-      const timer = setTimeout(abort, 20000);
+      const timer = setTimeout(()=>{abortKind ||= 'timeout';timeout.abort();}, 20000);
       try {
         const encoded=JSON.stringify(body),fetchAt=metrics?clock():0;
         const response = await this.fetcher(this.config.url + path, {method: 'POST', signal: timeout.signal,
           headers: {apikey: this.config.key, 'Content-Type': 'application/json',
             ...(token ? {Authorization: 'Bearer ' + token} : {})}, body:encoded});
         if(metrics)metrics.fetch_ms=elapsed(fetchAt);
-        const jsonAt=metrics?clock():0;const data = await response.json();
+        httpStatus=Number.isInteger(response.status)&&response.status>=100&&response.status<=599?response.status:null;
+        const jsonAt=metrics?clock():0;let data;
+        try{data=await response.json();}catch(error){
+          // HTTP failure remains HTTP even when an intermediary returned non-JSON.
+          if(!response.ok){const e=new Error('http_'+(httpStatus??'unknown'));e.status=httpStatus;throw e;}
+          if(error&&typeof error==='object')error.requestDiagnosticKind='invalid_json';throw error;
+        }
         if(metrics)metrics.json_ms=elapsed(jsonAt);
         if (!response.ok) {
-          const err = new Error(data.msg || data.message || data.error_description || 'http_' + response.status);
-          err.status = response.status; err.code = data.code; throw err;
+          const err = new Error(data?.msg || data?.message || data?.error_description || 'http_' + response.status);
+          err.status = response.status; err.code = data?.code; throw err;
         }
         return data;
+      } catch(error) {
+        const failure=error&&typeof error==='object'?error:new Error('request_failed');
+        const kind=abortKind||(httpStatus!==null&&httpStatus>=400?(httpStatus<500?'http_4xx':'http_5xx'):failure.requestDiagnosticKind==='invalid_json'?'invalid_json':'network_unknown');
+        failure.request_diagnostic={kind,http_status:httpStatus,elapsed_ms:Math.min(300000,elapsed(diagnosticAt))};
+        throw failure;
       } finally {if(metrics)metrics.request_ms=elapsed(requestAt);clearTimeout(timer);signal?.removeEventListener('abort',abort);}
     }
     async login(email, password, signup = false) {
