@@ -51,7 +51,7 @@
       return g&&typeof g==='object'&&!Array.isArray(g)&&Object.keys(g).length===keys.length&&keys.every(k=>Object.hasOwn(g,k))&&g.schema==='crowd-acceptance-extra1-v1'&&uuid(g.id)&&[19,20].includes(g.task_id)&&uuid(g.installation_id)&&g.baseline_received===2&&g.extra_limit===1&&g.remaining===1&&typeof g.expires_at==='string'&&Number.isFinite(Date.parse(g.expires_at))&&Date.parse(g.expires_at)>this.r.now()?g:null;
     }
     async acceptSupplement(s,value,alive) {
-      const g=this.supplementGrant(value);if(!g||value.pilot_phase!=='awaiting_acceptance'||value.reason!==null||value.allowed!==true||value.paused!==false||s.last_error!=='test_completed'||s.pilot_phase!=='awaiting_acceptance'||s.received!==2||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.id===g.id)return false;
+      const g=this.supplementGrant(value);if(!g||value.pilot_phase!=='awaiting_acceptance'||value.reason!==null||value.allowed!==true||value.paused!==false||(!['test_completed','control_unavailable'].includes(s.last_error)||s.pilot_waiting!==true)||s.pilot_phase!=='awaiting_acceptance'||s.received!==2||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.id===g.id)return false;
       const owner=await this.r.owner?.(),node=await this.r.storage.get('node-monitor:'+owner),expected=await this.r.expectedPrincipal?.();alive();
       if(!owner||owner!==s.owner_id||node?.installation_id!==g.installation_id||!/^[a-f0-9]{64}$/.test(expected||''))return false;
       const health=await this.r.sourceHealth?.('xiaohongshu');alive();
@@ -67,7 +67,7 @@
       const alive=()=>{if(generation!==this.generation||stop!==(this.stopIntent||0))throw Error('cancelled');};
       this.active=(async()=>{
         const s=await this.read();if(!await valid())return false;
-        if(s.consent!==C.CONSENT||s.last_error!=='test_completed'||s.pilot_phase!=='awaiting_acceptance'||s.received!==2||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.state==='consumed')return false;
+        if(s.consent!==C.CONSENT||(!['test_completed','control_unavailable'].includes(s.last_error)||s.pilot_waiting!==true)||s.pilot_phase!=='awaiting_acceptance'||s.received!==2||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.state==='consumed')return false;
         if(Number.isFinite(s.supplement_checked_at)&&this.r.now()>=s.supplement_checked_at&&this.r.now()-s.supplement_checked_at<60000)return false;
         s.supplement_checked_at=this.r.now();await this.save(s);alive();
         try{await this.control(s,'control',alive);alive();if(!await valid())return false;await this.save(s);if(s.acceptance_supplement?.state==='admitted')await this.schedule(s,this.r.now()+1000);return s.acceptance_supplement?.state==='admitted';}

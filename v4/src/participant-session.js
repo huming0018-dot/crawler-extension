@@ -65,7 +65,7 @@
    }
    // Explicit extra-one permission is the only automatic wake from completed acceptance.
    // A prior user stop, unsafe queue or account mismatch never enters this path.
-   if(this.r.supplement&&s.last_error==='test_completed'&&s.pilot_phase==='awaiting_acceptance'&&s.received===2&&!s.task&&!this.r.agent.recoveryUnsafe(s)){
+   if(this.r.supplement&&['test_completed','control_unavailable'].includes(s.last_error)&&s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&s.received===2&&!s.task&&!this.r.agent.recoveryUnsafe(s)){
     const resumed=await this.r.supplement(valid);if(!await valid())return;
     s=await this.r.agent.read();if(resumed){p={...p,desired_running:true,pending:false,reason:null};await this.save(owner,p);}
    }
