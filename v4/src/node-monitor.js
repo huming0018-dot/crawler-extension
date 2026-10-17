@@ -24,7 +24,7 @@
   }
 
   constructor({storage,api,settings,state=async()=>({enabled:false,login_state:'unknown'}),uuid,now=Date.now,version}){
-   Object.assign(this,{storage,api,settings,state,uuid,now,version});this.queue=Promise.resolve();this.registered=null;this.registering=null;this.flushing=null;this.legacy=false;
+   Object.assign(this,{storage,api,settings,state,uuid,now,version});this.queue=Promise.resolve();this.registered=null;this.registering=null;this.flushing=null;this.legacy=false;this.registrationError=null;
   }
   serial(fn){const next=this.queue.then(fn);this.queue=next.catch(()=>{});return next;}
   async identity(){const s=await this.settings();if(!UUID.test(s.id||''))throw Error('backend_login_required');return s;}
@@ -57,10 +57,11 @@
       if(!Number.isSafeInteger(result.max_node_seq)||result.max_node_seq<0)throw Error('invalid_node_registration');
       await this.serial(async()=>{const v=await this.record(s);if(await this.same(s))await this.storage.set(this.key(s.id),{...v,seq:Math.max(v.seq,result.max_node_seq)});});
      }
-     if(!await this.same(s))throw Error('cancelled');this.legacy=false;this.registered={id:s.id,signature,at:this.now()};
+     if(!await this.same(s))throw Error('cancelled');this.legacy=false;this.registrationError=null;this.registered={id:s.id,signature,at:this.now()};
     }catch(error){
      // Only a confirmed absent RPC permits compatibility. Timeouts may have reached the server.
      if(missing(error)&&await this.same(s)){this.legacy=true;this.registered={id:s.id,signature,at:this.now()};return;}
+     try{if(await this.same(s))this.registrationError={id:s.id,revision:s.revision,code:['backend_login_required','login_required','invalid_node_registration','cancelled'].includes(error?.message)?error.message:'node_register_unavailable'};}catch(_){}
      throw error;
     }
    })().finally(()=>{this.registering=null;});return this.registering;
@@ -139,7 +140,9 @@
   async snapshot(){
    const s=await this.settings();if(!UUID.test(s.id||''))return {state:'signed_out',queued:0};
    const v=await this.serial(()=>this.record(s));
-   return {state:this.legacy?'backend_upgrade_required':s.enabled?'enabled':'disabled',queued:v.rows.length,dropped:v.dropped||0,last_sent_at:v.last_sent_at||null,error:v.last_error||null};
+   const registered=!this.legacy&&this.registered?.id===s.id&&Number.isSafeInteger(this.registered.at)&&this.registered.at>0&&this.registered.at<=this.now()?this.registered.at:null;
+   const registrationError=this.registrationError?.id===s.id&&this.registrationError.revision===s.revision?this.registrationError.code:null;
+   return {state:this.legacy?'backend_upgrade_required':s.enabled?'enabled':'disabled',queued:v.rows.length,dropped:v.dropped||0,last_sent_at:v.last_sent_at||null,error:v.last_error||null,installation_id:v.installation_id,last_registered_at:registered,registration_error:registrationError};
   }
  }
  root.CrowdNodeMonitor=CrowdNodeMonitor;
