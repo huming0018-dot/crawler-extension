@@ -1,0 +1,102 @@
+{
+  "repository": "huming0018-dot/china-travel-food",
+  "commit": "82cafb76d6b8c1f9709e1ecf53daf86ac4d50d67",
+  "purpose": "One-time baseline import. Future edits belong to this canonical repository.",
+  "files": [
+    {
+      "source": "crowd_extension/manifest.json",
+      "destination": "manifest.json",
+      "sha256": "631618ef049763f2bb3d8589b73b33451718e136ddcefad5dbe0a5c56224e4e2"
+    },
+    {
+      "source": "crowd_extension/icons/icon128.png",
+      "destination": "icons/icon128.png",
+      "sha256": "ffb0b1daacf53109336256a1b6ab0889cf89128661c831d78015e3048533033b"
+    },
+    {
+      "source": "crowd_extension/src/core.js",
+      "destination": "src/core.js",
+      "sha256": "0e1405856c9f441e30bf02f813d5cd6355edeeee99e8e5cbc9413624a88d2bf1"
+    },
+    {
+      "source": "crowd_extension/src/api.js",
+      "destination": "src/api.js",
+      "sha256": "8d5b34c5585618cbaad46beffcbc4917c6d462ba45ec5b89368a27d10ee71344"
+    },
+    {
+      "source": "crowd_extension/src/agent.js",
+      "destination": "src/agent.js",
+      "sha256": "ad1d3e0f674b98bc0f13e2f5357108f46f7ee678c0c20f626787bf860f092f4a"
+    },
+    {
+      "source": "crowd_extension/src/background.js",
+      "destination": "src/background.js",
+      "sha256": "16a89a35962a43f3b0ac75f2eb0399e727d2194e746a2a895839ff3843699a52"
+    },
+    {
+      "source": "crowd_extension/src/content.js",
+      "destination": "src/content.js",
+      "sha256": "a60e1356c7c4288ece35c73566c9823114d1fe85e0b6a9f565aacff85cc81e50"
+    },
+    {
+      "source": "crowd_extension/src/config.js",
+      "destination": "src/config.js",
+      "sha256": "3503c5250760320789b8a386b3b5f5b29f63b0f1b0a13c3dd0474647eeccf7cd"
+    },
+    {
+      "source": "crowd_extension/src/join.js",
+      "destination": "src/join.js",
+      "sha256": "af7851b828461f67671f72f3e6997becbf6cbd28b02b509bd392c0d8e0b63f2b"
+    },
+    {
+      "source": "crowd_extension/src/controller.js",
+      "destination": "src/controller.js",
+      "sha256": "62389f5c228f6e08a11c6d2d8e106700da1e44fd091f244d54c7478310c30685"
+    },
+    {
+      "source": "crowd_extension/src/controller.html",
+      "destination": "src/controller.html",
+      "sha256": "daa40bc29dbf40fb3b6d717516392656360c9ba879fd940bb2f8519eec30d124"
+    },
+    {
+      "source": "crowd_extension/src/controller.css",
+      "destination": "src/controller.css",
+      "sha256": "15825fb234a7c596da89c49b3c2415439ab64d50a5b71f797dee8d0ed8808429"
+    },
+    {
+      "source": "crowd_extension/src/native-runtime.js",
+      "destination": "src/native-runtime.js",
+      "sha256": "2558fcbcc102995776046ffe7cc6b55f80803acfb7016eda157bc486f1ed1eee"
+    },
+    {
+      "source": "crowd_extension/tests/check.cjs",
+      "destination": "tests/check.cjs",
+      "sha256": "51cd39c3dc9d07bc9e2f390242f98ecf65b36b98e5862d7979bbe96e1ee2a59a"
+    },
+    {
+      "source": "crowd_extension/tests/safety.cjs",
+      "destination": "tests/safety.cjs",
+      "sha256": "0830d8165fe7cf4c153c2a1a222b6b57bbca72250448e5fcb919b07cc2e4098a"
+    },
+    {
+      "source": "crowd_extension/tests/worker.cjs",
+      "destination": "tests/worker.cjs",
+      "sha256": "2e2f48c38ffc0b80acd866f922609db32138e3a8fdd56dc3f5e0ce9370e125cd"
+    },
+    {
+      "source": "crowd_extension/tests/native.cjs",
+      "destination": "tests/native.cjs",
+      "sha256": "42d07a3ac324557da2f0b2da71a769400dba9f881bfdb7e1a48c55f518176921"
+    },
+    {
+      "source": "crowd_extension/tests/browser.mjs",
+      "destination": "tests/browser.mjs",
+      "sha256": "0e02c00fdafb929cb781bc386fd307cf67b8048536d9fe50c1b6586d93aeac52"
+    },
+    {
+      "source": "app/supabase.public.json",
+      "destination": "public-config.json",
+      "sha256": "0dfb9a16366d4e83b44e797f91b153e6e24b9432487974310f06ba0a880f9eb6"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+'use strict';
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),crypto=require('node:crypto');
+for(const file of ['core','agent'])vm.runInThisContext(fs.readFileSync('v4/src/'+file+'.js','utf8'));
+function fixture(mode){
+ let now=Date.parse('2026-10-12T09:00:00Z'),actions=0;const C=CrowdCore,note='a'.repeat(24),items=n=>Array.from({length:n},(_,i)=>({key:'comment-'+(i+1),comment_id:'id-'+i,parent_key:null,parent_comment_id:null,is_reply:false,author_display:'reader',text:'comment-'+i,original_length:('comment-'+i).length,truncated:false,like_count:0,published_label:null}));
+ const record=()=>{const complete=mode==='travel'&&actions>=7,top=mode==='clamped'?100:mode==='oscillating'?(actions===0?0:actions%2?100:80):100+Math.min(actions,7)*100,n=complete?127:20;return {schema_version:4,standard:{platform:'xiaohongshu',note_id:note,url:C.HOST+'/explore/'+note,title:'拉面',captured_at:new Date(now).toISOString(),published_at:null,author_display:null,like_count:0,collect_count:null,comment_count:127},extra:{author_opinion_quotes:[],comments:{items:items(n),coverage:'visible_loaded_only',complete:false,truncated:false,more_available:false,captured_count:n,loaded_count:n,progress:{top,height:1200,client:100,at_end:complete,end_marker:complete,expand_count:0,empty:false}}},evidence:{text:'完整正文',original_length:4,truncated:false,parser_version:C.VERSION,source:'rendered_public_dom'}};};
+ const s={...C.initial(),timing_version:1,comment_partial:false,enabled:true,consent:C.CONSENT,task:{id:13,comments_capture:true,lease_token:'lease',lease_until:new Date(now+3600000).toISOString()},enrichment:{parent:crypto.randomUUID(),record:record(),stage:'comments',rounds:0,stalls:0,last:null},profiles:false},store={agent:s};
+ const r={now:()=>now,uuid:crypto.randomUUID,storage:{get:async k=>structuredClone(store[k]),set:async(k,v)=>{store[k]=structuredClone(v);}},probe:async action=>{if(action==='comments'){actions++;return {ready:true};}return {ready:true,record:record()};}};
+ const api={rpc:async name=>{if(name!=='guard')throw Error(name);return {version:1,ttl_ms:600000,paused:false,allowed:true,reason:null,wait_ms:0,gap_ms:2000,caps:{search:30,detail:60,comment:120,scroll:120},counts:{search:0,detail:1,comment:actions,scroll:0}};}};
+ return {s,r,api,actions:()=>actions,advance:()=>{now+=1000;}};
+}
+async function run(mode){const f=fixture(mode),a=new CrowdAgent(f.r,f.api);for(let i=0;i<80&&f.s.enrichment;i++){await a.enrich(f.s,()=>{},undefined);f.advance();}return f;}
+(async()=>{
+ const travel=await run('travel');assert.ok(travel.actions()>=7,'three unchanged reads while scrolling toward next-page threshold must not end collection');const pages=travel.s.outbox.filter(x=>x.kind==='comments');assert.ok(pages.length>=3);assert.ok(pages.every(x=>x.record.summary.complete));assert.equal(pages.flatMap(x=>x.record.items).length,127);assert.equal(travel.s.comment_partial,false);
+ for(const mode of['clamped','oscillating']){const f=await run(mode);assert.equal(f.s.enrichment,null,mode+' bounded stall must stop');assert.ok(f.actions()<=6,mode+' must not repeatedly reset on old positions');assert.equal(f.s.outbox.find(x=>x.kind==='comments').record.summary.complete,false);assert.equal(f.s.comment_partial,true);}
+ console.log('PASS actual enrich traverses >3 unchanged-content downward actions until new page; clamped and back/forth old scroll stop partial; complete requires 127 real item IDs and END');
+})().catch(e=>{console.error(e);process.exit(1);});
