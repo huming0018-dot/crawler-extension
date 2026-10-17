@@ -20,7 +20,20 @@
    const revision=++this.revision,owner=await this.r.owner();if(!owner)return;
    const job=this.tail.catch(()=>{}).then(async()=>{if(revision!==this.revision||owner!==await this.r.owner())return;const p=await this.record(owner);await this.save(owner,{...p,desired_running:enabled,pending:enabled?p.pending:false,reason:enabled?p.reason:null,recovered_at:null});});this.tail=job;await job;
   }
-  async status(){const owner=await this.r.owner();if(!owner)return {status:'not_checked',desired_running:false,pending:false};const p=await this.record(owner),h=(await this.r.health.publicState()).xiaohongshu,s=await this.r.agent.read();return {...h,verification_stage:s.verification_page?.stage||null,verification_manual:s.verification_page?.manual===true,verification_error:s.verification_page?.reason||null,task_closure:s.task_closure?.stage||null,desired_running:p.desired_running===true,pending:p.pending===true,reason:p.reason||h.reason||null,platform_reason:h.reason||null,recovered_at:p.recovered_at||null,initial_confirmed_at:p.initial_confirmed_at||null,wait_until:p.wait_until||null,initial_login:p.initial_login===true};}
+  async status(){
+   const owner=await this.r.owner();if(!owner)return {status:'not_checked',desired_running:false,pending:false};
+   const p=await this.record(owner),h=(await this.r.health.publicState()).xiaohongshu,s=await this.r.agent.read(),page=s.verification_page,now=this.r.now();
+   let verification_wait_status=null;
+   const openedAt=Number.isSafeInteger(page?.opened_at)&&page.opened_at>0&&page.opened_at<=now?page.opened_at:null;
+   if(page?.stage==='opened'){
+    const checkedAt=Number.isSafeInteger(h.checked_at)&&h.checked_at>0&&h.checked_at<=now?h.checked_at:null;
+    const fresh=openedAt!==null&&checkedAt!==null&&checkedAt>=openedAt&&now-checkedAt<=120000;
+    const known=fresh&&['login_required','platform_identity_changed','captcha','rate_limit'].includes(h.reason)?h.reason:null;
+    const stopped=['test_completed','user_stopped','logged_out','test_partial','test_expired','test_quota'].includes(s.last_error)||s.pilot_waiting===true||s.pilot_phase==='awaiting_acceptance'||!s.enabled&&p.pending!==true;
+    verification_wait_status=known||(openedAt!==null&&now-openedAt<120000&&!stopped?'checking':'not_verified');
+   }
+   return {...h,verification_stage:page?.stage||null,verification_opened_at:openedAt,verification_wait_status,verification_manual:page?.manual===true,verification_error:page?.reason||null,task_closure:s.task_closure?.stage||null,desired_running:p.desired_running===true,pending:p.pending===true,reason:p.reason||h.reason||null,platform_reason:h.reason||null,recovered_at:p.recovered_at||null,initial_confirmed_at:p.initial_confirmed_at||null,wait_until:p.wait_until||null,initial_login:p.initial_login===true};
+  }
   reason(entry){return entry?.reason || (entry?.status==='authenticated'&&entry.expected_ref&&entry.expected_ref===entry.observed_ref?null:'identity_verification_required');}
   async require(){const h=await this.r.health.check();const reason=this.reason(h.xiaohongshu);if(reason)throw Error(reason);return h.xiaohongshu;}
   async start(){await this.intent(true);return this.check(true,true);}

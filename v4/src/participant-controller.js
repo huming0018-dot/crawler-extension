@@ -106,10 +106,13 @@ async function refresh() {
     if(notice){fields['平台账号']=notice;$('welcome').textContent='两条验收已回传，等待实验启动。'+notice;}
   }
   if(platform?.verification_stage){
-    const label={intent:'正在准备恢复页面连接',claiming:'正在确认本次任务领取结果',admitting:'正在确认访问准入',opening:'正在确认新核验页是否已打开',waiting:errors[platform.verification_error]||'等待服务端准入',opened:platform.platform_reason==='login_required'?'请在新核验页登录原账号':'已打开自有核验页，正在确认原账号',confirmed:platform.verification_manual?'原账号核验通过；此登录操作不领取任务':'原账号核验通过，已接续本次任务',blocked:errors[platform.verification_error]||'核验暂时不能继续'};
+    const waitingLabels={checking:'已打开自有核验页，正在观察原账号（最多2分钟）',login_required:'原核验页显示需要登录，请本人登录原账号；原任务和停止状态保留',platform_identity_changed:'原核验页账号与原账号不同，请切回原账号；原任务和停止状态保留',captcha:'原核验页需要本人处理验证；原任务和停止状态保留',rate_limit:'原核验页显示限流；原任务和停止状态保留',not_verified:'原核验页已打开，但账号尚未核验；不会因此自动开始采集，请在原页面确认登录'};
+    const waitingLabel=typeof platform.verification_wait_status==='string'&&Object.prototype.hasOwnProperty.call(waitingLabels,platform.verification_wait_status)?waitingLabels[platform.verification_wait_status]:'原核验页已打开，但尚未取得本轮核验结果；原任务保留';
+    const label={intent:'正在准备恢复页面连接',claiming:'正在确认本次任务领取结果',admitting:'正在确认访问准入',opening:'正在确认新核验页是否已打开',waiting:errors[platform.verification_error]||'等待服务端准入',opened:waitingLabel,confirmed:platform.verification_manual?'原账号核验通过；此登录操作不领取任务':'原账号核验通过，已接续本次任务',blocked:errors[platform.verification_error]||'核验暂时不能继续'};
     fields['页面连接']=label[platform.verification_stage]||'原核验记录保留';
     if(platform.verification_stage==='confirmed'&&platform.verification_manual&&platform.platform_reason)fields['页面连接']=errors[platform.platform_reason]||'原账号需要重新核验';
   }
+  if(Number.isSafeInteger(p.received)&&p.received>0&&p.verified===0)fields['接收与核验说明']='服务端接收与有效核验分别统计；有效为0不等于已判无效，具体结论以逐条审核结果为准。';
   if(platform?.task_closure==='acknowledged')fields['上轮任务']='已获云端完成回执；未完成补充内容原样归档';
   if(!data.session && !data.legacy_installation){fields['最近提示']=data.entry_state==='identity_recovery_required'?errors.identity_recovery_required:data.invited?'请确认参与后开始。':errors.invite_required;if(data.entry_state==='identity_recovery_required'){fields['中台账户']='原参与身份待恢复';fields['参与状态']='原数据保留，暂不重新报名';}}
   if(data.legacy_installation)Object.assign(fields,{'中台账户':'旧版参与身份（待接续）','参与状态':'旧版数据原样保留','任务':'请在原版查看','待回传 / 待处理':'请在原版查看','最近提示':errors.legacy_migration_required});
