@@ -88,7 +88,9 @@ async function refresh() {
   else if(platform?.initial_confirmed_at&&s.enabled&&!s.last_error&&!p.error)$('welcome').textContent='首次登录已确认，继续已同意的原任务。';
   else if(platform?.recovered_at&&s.enabled&&!s.last_error&&!p.error)$('welcome').textContent='原账号登录已恢复，继续上次任务。';
   const pilotWaiting=s.enabled && s.pilot_waiting===true && s.pilot_phase==='awaiting_acceptance';
-  if(pilotWaiting)$('welcome').textContent='两条验收已回传，等待实验启动，之后自动继续。';
+  const supplementComplete=s.acceptance_supplement?.state==='consumed'&&s.acceptance_supplement.extra_limit===1&&s.acceptance_supplement.remaining===0&&s.received===3;
+  const waitingNotice=supplementComplete?'追加1条验收已获云端回执，采集已停止；原进度保留。':'两条验收已回传，等待实验启动，之后自动继续。';
+  if(pilotWaiting)$('welcome').textContent=waitingNotice;
   $('start').hidden = !data.session || data.legacy_installation;
   $('first_diagnostics_label').hidden = !!data.session;
   $('consent').textContent = data.session ? '同意并继续' : '同意并开始';
@@ -100,10 +102,10 @@ async function refresh() {
   fields['最近设备登记确认']=registeredAt?new Date(registeredAt).toLocaleString('zh-CN'):'本次插件运行尚未确认';
   const nodeErrors={backend_login_required:'中台会话需要恢复，原身份保留',login_required:'中台会话需要恢复，原身份保留',invalid_node_registration:'登记响应未通过校验',cancelled:'登记上下文已变更',node_register_unavailable:'设备登记暂未确认'};
   fields['设备连接诊断']=((typeof node.registration_error==='string'&&Object.prototype.hasOwnProperty.call(nodeErrors,node.registration_error)?nodeErrors[node.registration_error]:null)|| (node.state==='backend_upgrade_required'?'原中央登记接口尚未兼容':registeredAt?'上次登记已确认':'等待登记确认'))+(node.error==='telemetry_unavailable'?'；步骤回传暂未确认':'')+'；仅设备登记，不代表平台登录或新采集回执';
-  if(pilotWaiting){fields['自动执行']='已启用，等待实验启动';fields['当前阶段']='两条验收已回传';fields['最早下一步']='实验启动后自动继续，无需再次点击';fields['最近提示']='等待实验启动；只检查运行状态，不访问采集来源。';}
+  if(pilotWaiting){fields['自动执行']=supplementComplete?'采集已停止，回传和更新保持开启':'已启用，等待实验启动';fields['当前阶段']=supplementComplete?'追加1条验收已获回执':'两条验收已回传';fields['最早下一步']=supplementComplete?'本次追加验收已完成，无后续采集任务':'实验启动后自动继续，无需再次点击';fields['最近提示']=supplementComplete?'追加验收已完成；只检查运行状态，不访问采集来源。':'等待实验启动；只检查运行状态，不访问采集来源。';}
   if(pilotWaiting){
     const notice={login_required:'小红书已退出登录，请在原窗口登录原账号。',platform_identity_changed:'当前小红书账号已改变，请切回原账号。',captcha:'小红书需要本人完成验证。',rate_limit:'小红书已限流，请按原页面提示处理。'}[platform?.platform_reason];
-    if(notice){fields['平台账号']=notice;$('welcome').textContent='两条验收已回传，等待实验启动。'+notice;}
+    if(notice){fields['平台账号']=notice;$('welcome').textContent=waitingNotice+notice;}
   }
   if(platform?.verification_stage){
     const waitingLabels={checking:'已打开自有核验页，正在观察原账号（最多2分钟）',login_required:'原核验页显示需要登录，请本人登录原账号；原任务和停止状态保留',platform_identity_changed:'原核验页账号与原账号不同，请切回原账号；原任务和停止状态保留',captcha:'原核验页需要本人处理验证；原任务和停止状态保留',rate_limit:'原核验页显示限流；原任务和停止状态保留',not_verified:'原核验页已打开，但账号尚未核验；不会因此自动开始采集，请在原页面确认登录'};

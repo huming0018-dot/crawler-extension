@@ -45,6 +45,35 @@
       if (this.active) return;
       return this.tick();
     }
+    supplementGrant(value) {
+      const g=value?.acceptance_supplement,keys=['schema','id','task_id','installation_id','baseline_received','extra_limit','remaining','expires_at'];
+      const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+      return g&&typeof g==='object'&&!Array.isArray(g)&&Object.keys(g).length===keys.length&&keys.every(k=>Object.hasOwn(g,k))&&g.schema==='crowd-acceptance-extra1-v1'&&uuid(g.id)&&[19,20].includes(g.task_id)&&uuid(g.installation_id)&&g.baseline_received===2&&g.extra_limit===1&&g.remaining===1&&typeof g.expires_at==='string'&&Number.isFinite(Date.parse(g.expires_at))&&Date.parse(g.expires_at)>this.r.now()?g:null;
+    }
+    async acceptSupplement(s,value,alive) {
+      const g=this.supplementGrant(value);if(!g||value.pilot_phase!=='awaiting_acceptance'||value.reason!==null||value.allowed!==true||value.paused!==false||s.last_error!=='test_completed'||s.pilot_phase!=='awaiting_acceptance'||s.received!==2||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.id===g.id)return false;
+      const owner=await this.r.owner?.(),node=await this.r.storage.get('node-monitor:'+owner),expected=await this.r.expectedPrincipal?.();alive();
+      if(!owner||owner!==s.owner_id||node?.installation_id!==g.installation_id||!/^[a-f0-9]{64}$/.test(expected||''))return false;
+      const health=await this.r.sourceHealth?.('xiaohongshu');alive();
+      if(Date.parse(g.expires_at)<=this.r.now()||(await this.r.storage.get('node-monitor:'+owner))?.installation_id!==g.installation_id||owner!==await this.r.owner?.()||expected!==await this.r.expectedPrincipal?.()||health?.status!=='authenticated'||health.expected_ref!==expected||health.observed_ref!==expected||!Number.isSafeInteger(health.checked_at)||this.r.now()<health.checked_at||this.r.now()-health.checked_at>120000)return false;
+      if(!this.r.retireSupplementPage)return false;
+      await this.r.retireSupplementPage(async()=>{alive();return owner===await this.r.owner?.()&&!this.stopping&&!this.maintenance;});alive();
+      s.acceptance_supplement={...g,state:'admitted',baseline_history:[...s.history],admitted_at:this.r.now()};
+      s.enabled=true;s.delivery_enabled=true;s.pilot_waiting=false;delete s.pilot_check_pending;s.assignment_refresh=true;s.next_at=this.r.now();s.wait_kind=null;s.last_error=null;return true;
+    }
+    async checkAcceptanceSupplement(valid) {
+      await this.initializeGeneration();if(this.active||this.stopping||this.maintenance)return false;
+      const generation=this.generation,stop=this.stopIntent||0;
+      const alive=()=>{if(generation!==this.generation||stop!==(this.stopIntent||0))throw Error('cancelled');};
+      this.active=(async()=>{
+        const s=await this.read();if(!await valid())return false;
+        if(s.consent!==C.CONSENT||s.last_error!=='test_completed'||s.pilot_phase!=='awaiting_acceptance'||s.received!==2||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.state==='consumed')return false;
+        if(Number.isFinite(s.supplement_checked_at)&&this.r.now()>=s.supplement_checked_at&&this.r.now()-s.supplement_checked_at<60000)return false;
+        s.supplement_checked_at=this.r.now();await this.save(s);alive();
+        try{await this.control(s,'control',alive);alive();if(!await valid())return false;await this.save(s);if(s.acceptance_supplement?.state==='admitted')await this.schedule(s,this.r.now()+1000);return s.acceptance_supplement?.state==='admitted';}
+        catch(error){alive();return false;}
+      })().finally(()=>{this.active=null;});return this.active;
+    }
     async parkPilot(s, value, alive = ()=>{}) {
       if(value?.error!=='test_completed'||value.pilot_phase!=='awaiting_acceptance')return false;
       s.pilot_phase='awaiting_acceptance';s.pilot_waiting=true;delete s.pilot_check_pending;
@@ -234,6 +263,7 @@
       if((s.pilot_waiting===true||s.pilot_check_pending===true) && action==='control' && value.pilot_phase==='active' && value.reason===null && !value.paused && !s.pending_risk) {
         s.pilot_waiting=false;delete s.pilot_check_pending;s.assignment_refresh=true;s.next_at=this.r.now();s.wait_kind=null;s.last_error=null;
       }
+      if(action==='control')await this.acceptSupplement(s,value,alive);
       s.control = value; s.control_task=s.task?.id || null; s.control_checked = this.r.now(); s.control_expires = before + value.ttl_ms;
       s.control_error = false;
       if (['captcha','rate_limit'].includes(action)) s.pending_risk = null;
@@ -290,7 +320,7 @@
       return this.r.schedule(at,replace);
     }
     testGoal(s) {return s.test_run?.goal ?? 2;}
-    claimTask(s) {return s.task?.id || s.test_run?.task_ids?.find(id=>!s.test_run.finished_tasks?.includes(id)) || null;}
+    claimTask(s) {return (s.acceptance_supplement?.state==='admitted'?s.acceptance_supplement.task_id:null) || s.task?.id || s.test_run?.task_ids?.find(id=>!s.test_run.finished_tasks?.includes(id)) || null;}
     bindBatch(s,task,expected=null) {
       if(!s.test_run)return true;
       const ids=task?.acceptance_task_ids;
@@ -672,6 +702,10 @@
           if(claimed.error==='daily_quota') {if(s.test_run){await this.endTest(s,'test_quota');return;}s.next_at=C.quotaRetry(claimed,now);s.last_error='daily_quota';await this.save(s);await this.schedule(s,s.next_at);return;}
           if(claimed.error)throw Error(claimed.error);
           let task=claimed.task;
+          if(s.acceptance_supplement?.state==='admitted'){
+            const g=this.supplementGrant(claimed),a=s.acceptance_supplement;
+            if(!g||['schema','id','task_id','installation_id','baseline_received','extra_limit','expires_at'].some(k=>g[k]!==a[k])||task?.id!==g.task_id||task.received!==2||task.target!==3||task.remaining_today!==1||!['xiaohongshu','xhs',undefined].includes(task.platform))throw Error('task_reconciliation_required');
+          }
           const resumed=s.platform_resume_task;
           if(resumed){
             if(task?.id!==resumed.id||task?.query!==s.task?.query||task?.platform!==s.task?.platform)throw Error('lease_lost');
@@ -687,7 +721,7 @@
           if(!this.bindBatch(s,task,bound?requested:null)){await this.endTest(s,'test_no_task');return;}
           if(s.task?.id!==task?.id || s.task?.lease_token!==task?.lease_token || s.task?.query!==task?.query || s.task?.platform!==task?.platform) {
             if(s.work_slots?.length || s.enrichment || ['note','reopen_note'].includes(s.phase))throw Error('pool_recovery_required');
-            if(!resumed){s.phase='idle';s.seen=[];s.candidates=[];s.search_round=0;s.note_url=null;s.note_id=null;}
+            if(!resumed&&s.acceptance_supplement?.state!=='admitted'){s.phase='idle';s.seen=[];s.candidates=[];s.search_round=0;s.note_url=null;s.note_id=null;}
           } else if(task) {
             if(task.received<s.task.received)throw Error('backend_unavailable');
             const known=new Set(task.known_note_ids || []);
@@ -1130,6 +1164,7 @@
       const receipt = C.receipt(await this.api.rpc('submit', {p_request: item.request, p_task: item.task,
         p_lease: item.lease, p_record: item.record}, signal), item.request);
       alive();
+      if(s.acceptance_supplement?.state==='admitted'&&!receipt.error&&receipt.inserted===true&&(item.task!==s.acceptance_supplement.task_id||receipt.task_received!==3||s.acceptance_supplement.baseline_history.includes(item.record.standard.note_id)))throw Error('invalid_receipt');
       if (receipt.error === 'daily_quota') {
         item.retry_at = C.quotaRetry(receipt, now); s.last_error = 'daily_quota'; await this.save(s); await this.scheduleReceipt(s, item.retry_at); return;
       } else if (receipt.error === 'lease_expired') {
@@ -1165,6 +1200,11 @@
             if(s.task.remaining_today!=null)s.task.remaining_today=Math.max(0,s.task.remaining_today-newlyReceived);
           }
         }
+      }
+      const supplement=s.acceptance_supplement;
+      if(supplement?.state==='admitted'&&!receipt.error&&receipt.inserted===true&&receipt.duplicate!==true&&item.task===supplement.task_id&&!supplement.baseline_history.includes(item.record.standard.note_id)){
+        supplement.state='consumed';supplement.remaining=0;supplement.request=item.request;supplement.consumed_at=this.r.now();
+        await this.parkPilot(s,{error:'test_completed',pilot_phase:'awaiting_acceptance'},alive);
       }
       // Failed records remain exportable; bounded by stopping, never by deleting evidence.
       if (receipt.error && s.rejected.length >= 20) throw new Error('review_local_rejections');

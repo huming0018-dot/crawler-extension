@@ -60,6 +60,12 @@ const runtime = {
   splitCapture: true,
   sourceHealth:()=>participantSession.require(),
   retireLoginPage:valid=>workTabs.retireLoginPage(valid),
+  async retireSupplementPage(valid){
+    const old=(await workTabs.entries()).search;if(!old||old.state==='retired')return;
+    const marker=(await chrome.storage.session.get('crowd_work_session')).crowd_work_session;
+    if(old.state!=='opened'||typeof old.session!=='string'||!old.session||typeof marker!=='string'||!marker)throw Error('task_reconciliation_required');
+    if(old.session!==marker)await workTabs.retireLoginPage(valid);
+  },
   expectedPrincipal:async()=>(await platformHealth.read()).xiaohongshu?.expected_ref,
   verificationCurrent:slot=>workTabs.verificationCurrent(slot),
   async verifyPage(slot){const owner=await runtime.owner(),expected=(await platformHealth.read()).xiaohongshu?.expected_ref;const page=await workTabs.verificationProbe(slot,async value=>{const p=await normalizeSessionPage(value,owner);return p.status==='authenticated'&&p.principal_ref===expected;});return normalizeSessionPage(page,owner);},
@@ -134,7 +140,7 @@ async function requireParticipant(){
 const tickAgent=agent.tick.bind(agent),startAgent=agent.start.bind(agent),stopAgent=agent.stop.bind(agent);
 const platformHealth=new CrowdPlatformHealth({storage,owner:runtime.owner,now:Date.now,probe:probePlatformSessions});
 const participantSession=new CrowdParticipantSession({storage,owner:runtime.owner,now:Date.now,health:platformHealth,agent,
-  start:startAgent,stop:stopAgent,bootstrap:(valid,retry,stopped)=>agent.bootstrapLoginPage(valid,retry,stopped),rebind:valid=>workTabs.rebindAfterLogin(valid),reconcile:valid=>agent.reconcileCompletedTask(valid),recoverPage:(valid,options)=>agent.recoverLoginPage(valid,options),verificationNeeded:()=>workTabs.recoveryNeeded(),indicate:indicatePlatformSession});
+  start:startAgent,stop:stopAgent,bootstrap:(valid,retry,stopped)=>agent.bootstrapLoginPage(valid,retry,stopped),rebind:valid=>workTabs.rebindAfterLogin(valid),reconcile:valid=>agent.reconcileCompletedTask(valid),supplement:valid=>agent.checkAcceptanceSupplement(valid),recoverPage:(valid,options)=>agent.recoverLoginPage(valid,options),verificationCurrent:slot=>workTabs.verificationCurrent(slot),verificationNeeded:()=>workTabs.recoveryNeeded(),indicate:indicatePlatformSession});
 // Direct controller stops cancel persisted intent before any pending recovery can start.
 agent.stop=async(reason='user_stopped',options={})=>{await participantSession.intent(false);return stopAgent(reason,options);};
 agent.tick=async(...args)=>{

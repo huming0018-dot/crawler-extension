@@ -19,7 +19,7 @@
     matches(current,expected) {
       try {
         const b=new URL(expected),home=b.href===root.CrowdCore.HOST+'/';
-        const a=new URL(home?current:root.CrowdCore.navigationURL(current));if(home)return a.href===b.href;
+        const a=new URL(home?current:root.CrowdCore.navigationURL(current));if(home)return a.href===b.href||a.href===root.CrowdCore.HOST+'/explore';
         try{return root.CrowdCore.noteURL(a.href).id===root.CrowdCore.noteURL(b.href).id;}catch(_){}
         return a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'') && a.searchParams.get('keyword')===b.searchParams.get('keyword');
       }catch(_){return false;}
