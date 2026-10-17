@@ -68,9 +68,16 @@
     const notice=h.xiaohongshu?.reason;
     await this.r.indicate?.({reason:['login_required','captcha','rate_limit','platform_identity_changed'].includes(notice)?notice:s.last_error,pending:false,desired_running:p.desired_running});return;
    }
+   // A stopped manual page still needs confirmation after the person logs in.
+   // Capture the existing binding before observation; never promote a newly learned account.
+   const manualExpected=s.verification_page?.manual===true&&s.verification_page.stage==='opened'?(await this.r.health.read(owner)).xiaohongshu?.expected_ref:null;
    let h=await this.r.health.check(force);if(!await valid())return;
    s=await this.r.agent.read();if(!await valid())return;
    let reason=this.reason(h.xiaohongshu);
+   if(manualExpected&&s.verification_page?.manual===true&&s.verification_page.stage==='opened'&&s.verification_page.expected_ref===manualExpected&&h.xiaohongshu?.expected_ref===manualExpected&&!reason&&this.r.recoverPage&&!this.r.agent.active&&!this.r.agent.stopping&&!this.r.agent.maintenance&&!this.r.agent.recoveryUnsafe(s)){
+    await this.r.recoverPage(valid,{confirm:true});if(!await valid())return;
+    s=await this.r.agent.read();if(!await valid())return;
+   }
    const stoppedWait=explicit&&s.last_error==='user_stopped'&&s.first_login_page?.stage==='waiting'&&WAIT.has(s.first_login_page.reason);
    const waiting=p.initial_login&&p.bootstrap_started&&p.desired_running&&s.first_login_page?.task_id===s.task?.id&&['admitting','waiting'].includes(s.first_login_page?.stage)&&(WAIT.has(s.last_error)||stoppedWait)&&!BACKEND.has(s.delivery_error);
    if(waiting&&this.r.bootstrap){
