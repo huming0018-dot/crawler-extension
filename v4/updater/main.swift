@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import CoreFoundation
 
 // The host accepts fixed verbs only. Paths, keys and endpoints never come from a browser message.
 let fm = FileManager.default
@@ -12,7 +13,7 @@ let channelURL = localTestChannelURL
 let extensionID = "licijehcpohikchlnkbpjdjdfkcocndg"
 let hostName = "com.crowd.v4.updater"
 #if PARTICIPANT
-let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-participants.json"
+let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-participants-pro.json"
 #else
 let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-kol.json"
 #endif
@@ -154,7 +155,7 @@ func handle(_ message: [String:Any], prepareOnly: Bool = false, unattended: Bool
   var config=try read(configURL);config["scheduled_enabled"]=message["enabled"];try write(config,configURL)
   return ["status":"configured","protocol":2]
  }
- if action=="rollback" {try require(s["pending"] as? String == loaded,"no_pending_update");let restored=try rollback(dir,&s);return ["status":restored ? "rolled_back":"idle"]}
+ if action=="rollback" {try proBusy();try require(s["pending"] as? String == loaded,"no_pending_update");let restored=try rollback(dir,&s);return ["status":restored ? "rolled_back":"idle"]}
  if action=="ack" {
   if s["pending"] != nil && local != s["pending"] as? String {_=try rollback(dir,&s)}
   if let pending=s["pending"] as? String {
@@ -189,7 +190,7 @@ func handle(_ message: [String:Any], prepareOnly: Bool = false, unattended: Bool
   if let value=s["poll_error"] as? String {result["poll_error"]=["invalid_signature","hash_mismatch","permission_change","replayed_release","recovery_required","busy","operation_failed","invalid_manifest","invalid_url","wrong_extension","ota_network_dns","ota_network_connect","ota_network_timeout","ota_network_tls","ota_network_http","ota_network_transfer","ota_io_permission","ota_io_missing","ota_io_space","ota_io_failed","ota_package_tool_failed","ota_service_failed","ota_process_terminated","ota_process_launch_failed","ota_unknown_exit","too_large","unsafe_archive","invalid_package","lock_failed","swap_failed","process_check_failed"].contains(value) ? value : "operation_failed"}
   return result
  }
- try require(action=="apply","invalid_request");try require(local==loaded,"version_mismatch")
+ try require(action=="apply","invalid_request");try proBusy();try require(local==loaded,"version_mismatch")
  if s["pending"] != nil {return ["status":"pending_reload","version":local]}
  let temp=root.appendingPathComponent("download-"+UUID().uuidString);try fm.createDirectory(at:temp,withIntermediateDirectories:false);defer{try? fm.removeItem(at:temp)}
  var channel=channelURL
@@ -324,7 +325,7 @@ func install(_ directory: String, _ browser: String) throws {
  else {try fm.createDirectory(at:dest,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])}
  let installLock=open(dest.appendingPathComponent("update.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600)
  try require(installLock>=0,"lock_failed");defer{close(installLock)}
- try require(flock(installLock,LOCK_EX|LOCK_NB)==0,"busy")
+ try require(flock(installLock,LOCK_EX|LOCK_NB)==0,"busy");try proBusy(dest)
  let binary=dest.appendingPathComponent("crowd-v4-updater")
  #if PARTICIPANT
  let oldStateURL=dest.appendingPathComponent("state.json")
@@ -380,26 +381,128 @@ func install(_ directory: String, _ browser: String) throws {
  #endif
  FileHandle.standardError.write(Data("更新助手已接通；只更新原 v4 插件，不关闭浏览器。\n".utf8))
 }
+
+// The persistent Pro port is separate from OTA's short-lived update lock.
+let proSchema="crowd-participant-native-v1"
+let proLimit=262144
+let proMethods:Set<String>=["scope","verify_platform_principal","pro_claim","pro_guard","pro_submit","pro_status","pro_receipt","pro_finish"]
+let proStates:Set<String>=["ready","not_ready","running","complete","partial","finish_unknown","source_failed","source_unknown","delivery_unknown","source_launch_unknown","stopped","blocked","unknown","native_ready","launching"]
+func proInteger(_ value:Any?) -> Int? {guard let n=value as? NSNumber,CFGetTypeID(n) != CFBooleanGetTypeID(),n.doubleValue.isFinite,n.doubleValue>=0,n.doubleValue<=9007199254740991,n.doubleValue.rounded()==n.doubleValue else{return nil};return n.intValue}
+func proUUID(_ value:Any?) -> Bool {guard let s=value as? String else{return false};return UUID(uuidString:s)?.uuidString.lowercased()==s}
+func proMessage(_ m:[String:Any],child:Bool=false) throws {
+ let base:Set<String>=["schema","type","id","session","epoch"]
+ try require(m["schema"] as? String==proSchema && proUUID(m["id"]) && proUUID(m["session"]) && proInteger(m["epoch"]) != nil,"pro_invalid_message")
+ guard let type=m["type"] as? String else{throw Failure("pro_invalid_message")}
+ let extra:[String]
+ let rpcErrors:Set<String>=["participant_scope_changed","participant_writer_busy","participant_stopped","participant_rpc_outcome_unknown","participant_protocol_invalid"]
+ let stateErrors=rpcErrors.union(["participant_contract_refused","participant_installation_invalid","participant_existing_run","pro_not_ready"])
+ let phases:Set<String>=["initial","local_status","scope","delivery","import","stage","finish","source","stopping"]
+ switch type {
+ case "pro_hello":try require(!child && proInteger(m["version"])==1,"pro_invalid_message");extra=["version"]
+ case "pro_start":try require(!child && proUUID(m["subject"]) && proUUID(m["installation_id"]) && proUUID(m["intent"]) && (proInteger(m["task_id"]) ?? 0)>0,"pro_invalid_message");extra=["subject","installation_id","task_id","intent"]
+ case "pro_stop","pro_status":try require(!child && (m["run_id"] is NSNull || proUUID(m["run_id"])),"pro_invalid_message");extra=["run_id"]
+ case "rpc_result":try require(!child && m["ok"] is Bool && (m["error"] is NSNull || rpcErrors.contains(m["error"] as? String ?? "")),"pro_invalid_message");let ok=m["ok"] as? Bool==true;try require(ok ? (m["result"] is [String:Any] && m["error"] is NSNull):(m["result"] is NSNull && m["error"] is String),"pro_invalid_message");extra=["ok","result","error"]
+ case "rpc_request":try require(child && proMethods.contains(m["method"] as? String ?? "") && m["params"] is [String:Any],"pro_invalid_message");extra=["method","params"]
+ case "pro_state":try require(child && proStates.contains(m["state"] as? String ?? "") && phases.contains(m["phase"] as? String ?? "") && (m["error"] is NSNull || stateErrors.contains(m["error"] as? String ?? "")) && (m["run_id"] is NSNull || proUUID(m["run_id"])) && proInteger(m["pending"]) != nil && (m["received"] is NSNull || proInteger(m["received"]) != nil) && (m["target"] is NSNull || proInteger(m["target"]) != nil),"pro_invalid_message");extra=["run_id","state","phase","received","target","pending","error"]
+ default:throw Failure("pro_invalid_message")
+ }
+ try require(Set(m.keys)==base.union(extra),"pro_invalid_message")
+}
+func framedRead(_ input:FileHandle) throws -> [String:Any]? {
+ func readN(_ n:Int,initial:Bool=false) throws -> Data? {var b=Data();while b.count<n {let c=input.readData(ofLength:n-b.count);if c.isEmpty{if initial && b.isEmpty{return nil};throw Failure("pro_invalid_message")};b.append(c)};return b}
+ guard let h=try readN(4,initial:true) else{return nil}
+ let n=h.withUnsafeBytes{$0.loadUnaligned(as:UInt32.self).littleEndian}
+ try require(n>0 && n<=proLimit,"pro_invalid_message")
+ let b=try readN(Int(n))!;try require(String(data:b,encoding:.utf8) != nil,"pro_invalid_message");return try json(b)
+}
+let frameOutputLock=NSLock()
+func framedWrite(_ m:[String:Any],_ out:FileHandle) throws {let b=try JSONSerialization.data(withJSONObject:m,options:[.sortedKeys]);try require(b.count<=proLimit,"pro_invalid_message");var n=UInt32(b.count).littleEndian;frameOutputLock.lock();defer{frameOutputLock.unlock()};try out.write(contentsOf:Data(bytes:&n,count:4));try out.write(contentsOf:b)}
+func proBusy(_ directory:URL=root) throws {
+ let fd=open(directory.appendingPathComponent("pro.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600);try require(fd>=0,"lock_failed");defer{close(fd)}
+ try require(flock(fd,LOCK_EX|LOCK_NB)==0,"busy")
+ let file=directory.appendingPathComponent("pro-state.json")
+ if fm.fileExists(atPath:file.path){try safePath(file);try require((try read(file))["busy"] as? Bool==false,"busy")}
+}
+func proConfiguration() throws -> [String:Any] {
+ let path=root.appendingPathComponent("pro-config.json");try safePath(path)
+ let a=try fm.attributesOfItem(atPath:path.path)
+ try require(a[.type] as? FileAttributeType == .typeRegular && (a[.posixPermissions] as? Int ?? 0)==0o600 && (a[.size] as? Int ?? 999999)<=16384,"pro_not_ready")
+ let c=try read(path)
+ try require(Set(c.keys)==Set(["schema","python","entry","entry_sha256","root","mc_root","session_id","max_api_requests","purpose"]) && c["schema"] as? String=="crowd-participant-pro-install-v1" && proUUID(c["session_id"]) && (proInteger(c["max_api_requests"]) ?? 0)>0 && (proInteger(c["max_api_requests"]) ?? 999)<=100 && ["noncommercial_research"].contains(c["purpose"] as? String ?? ""),"pro_not_ready")
+ for key in ["python","entry","root","mc_root"] {guard let p=c[key] as? String else{throw Failure("pro_not_ready")};try require(p.hasPrefix("/") && !p.contains("\n") && fm.fileExists(atPath:p),"pro_not_ready")}
+ guard let entry=c["entry"] as? String,let hash=c["entry_sha256"] as? String,let python=c["python"] as? String else{throw Failure("pro_not_ready")}
+ try safePath(URL(fileURLWithPath:entry));let data=try Data(contentsOf:URL(fileURLWithPath:entry));try require(data.count<=1048576 && digest(data)==hash && fm.isExecutableFile(atPath:python),"pro_not_ready")
+ return c
+}
+func proResponse(_ first:[String:Any],_ state:String,_ error:String?) -> [String:Any] {return ["schema":proSchema,"type":"pro_state","id":first["id"]!,"session":first["session"]!,"epoch":first["epoch"]!,"run_id":NSNull(),"state":state,"phase":"initial","received":NSNull(),"target":NSNull(),"pending":0,"error":error as Any? ?? NSNull()]}
+func proSession(_ first:[String:Any]) throws {
+ try proMessage(first);try require(["pro_hello","pro_start"].contains(first["type"] as? String ?? ""),"pro_invalid_message");_=try configuredDirectory()
+ let c:[String:Any]
+ do {c=try proConfiguration()} catch {try framedWrite(proResponse(first,"not_ready","pro_not_ready"),.standardOutput);return}
+ // Serialize starting a port against OTA before releasing its short lock.
+ let update=open(root.appendingPathComponent("update.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600);try require(update>=0,"lock_failed");defer{close(update)};try require(flock(update,LOCK_EX|LOCK_NB)==0,"busy")
+ let lock=open(root.appendingPathComponent("pro.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600);try require(lock>=0,"lock_failed");defer{close(lock)};try require(flock(lock,LOCK_EX|LOCK_NB)==0,"busy")
+ let busyURL=root.appendingPathComponent("pro-state.json")
+ // A reconnect can inspect durable state; it cannot silently clear an unknown run.
+ let previousBusy=(try? read(busyURL))?["busy"] as? Bool ?? false
+ try write(["busy":true,"state":"connected"],busyURL);flock(update,LOCK_UN)
+ let process=Process(),input=Pipe(),output=Pipe();process.executableURL=URL(fileURLWithPath:c["python"] as! String);process.arguments=["-u",c["entry"] as! String,"--config",root.appendingPathComponent("pro-config.json").path];process.standardInput=input;process.standardOutput=output;process.standardError=FileHandle.nullDevice
+ process.environment=["PATH":"/usr/bin:/bin:/usr/sbin:/sbin","HOME":fm.homeDirectoryForCurrentUser.path,"PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1"]
+ do {try process.run()} catch {try write(["busy":previousBusy,"state":"not_ready"],busyURL);try framedWrite(proResponse(first,"not_ready","pro_not_ready"),.standardOutput);return}
+ let stateLock=NSLock();var clean=false;var run:Any=NSNull();var readerFailed=false;var pendingRPC=Set<String>();var recovering=previousBusy
+ let done=DispatchGroup();done.enter()
+ DispatchQueue.global().async {
+  defer{done.leave()}
+  do {while let m=try framedRead(output.fileHandleForReading) {try proMessage(m,child:true);try require(m["session"] as? String==first["session"] as? String && proInteger(m["epoch"])==proInteger(first["epoch"]),"pro_invalid_message")
+    stateLock.lock();defer{stateLock.unlock()}
+    if m["type"] as? String=="rpc_request" {try require(!pendingRPC.contains(m["id"] as! String),"pro_invalid_message");pendingRPC.insert(m["id"] as! String)}
+    if m["type"] as? String=="pro_state" {run=m["run_id"]!;let state=m["state"] as! String;if ["stopped","complete","partial","source_failed"].contains(state){recovering=false};clean = !recovering && pendingRPC.isEmpty && ["ready","not_ready","stopped","complete","partial","source_failed"].contains(state) && proInteger(m["pending"])==0;try write(["busy":!clean,"state":state],busyURL)}
+    try framedWrite(m,.standardOutput)
+  }} catch {stateLock.lock();readerFailed=true;clean=false;stateLock.unlock();try? write(["busy":true,"state":"unknown"],busyURL);try? input.fileHandleForWriting.close()}
+ }
+ defer {
+  // EOF cancels the owned worker via its reader. Never signal Chrome or a foreign process group.
+  stateLock.lock();let lastRun=run;stateLock.unlock()
+  var stop=first;stop["type"]="pro_stop";stop["id"]=UUID().uuidString.lowercased();stop=stop.filter{["schema","type","id","session","epoch"].contains($0.key)};stop["run_id"]=lastRun
+  try? framedWrite(stop,input.fileHandleForWriting);try? input.fileHandleForWriting.close()
+  let until=Date().addingTimeInterval(12);while process.isRunning && Date()<until {Thread.sleep(forTimeInterval:0.02)}
+  if process.isRunning {process.terminate()}
+  _=done.wait(timeout:.now()+1)
+  stateLock.lock();let safe=clean && !readerFailed && !process.isRunning && process.terminationStatus==0;stateLock.unlock()
+  try? write(["busy":!safe,"state":safe ? "stopped":"unknown"],busyURL)
+ }
+ try framedWrite(first,input.fileHandleForWriting)
+ while let m=try framedRead(.standardInput) {try proMessage(m);try require(m["session"] as? String==first["session"] as? String && proInteger(m["epoch"])==proInteger(first["epoch"]),"pro_invalid_message");if m["type"] as? String=="rpc_result" {stateLock.lock();let known=pendingRPC.remove(m["id"] as! String) != nil;stateLock.unlock();try require(known,"pro_invalid_message")};try framedWrite(m,input.fileHandleForWriting)}
+}
 func output(_ value: [String:Any]) {if let data=try? JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]){var n=UInt32(data.count).littleEndian;FileHandle.standardOutput.write(Data(bytes:&n,count:4));FileHandle.standardOutput.write(data)}}
 func exactRead(_ count: Int) throws -> Data {var data=Data();while data.count<count {let chunk=FileHandle.standardInput.readData(ofLength:count-data.count);if chunk.isEmpty {throw Failure("invalid_message")};data.append(chunk)};return data}
+signal(SIGPIPE,SIG_IGN)
 do {
  if CommandLine.arguments.count==3 && CommandLine.arguments[1]=="--reconnect" {try reconnect(CommandLine.arguments[2]);exit(0)}
  if CommandLine.arguments.count==3 && CommandLine.arguments[1]=="--check-install" {try checkParticipantInstallation(CommandLine.arguments[2]);exit(0)}
  if CommandLine.arguments.count==4 && CommandLine.arguments[1]=="--install" {try install(CommandLine.arguments[2],CommandLine.arguments[3]);exit(0)}
  try require(CommandLine.arguments.count==2 && (CommandLine.arguments[1]==origin || CommandLine.arguments[1]=="--recover" || CommandLine.arguments[1]=="--poll"),"invalid_origin")
+ var first:[String:Any]?=nil
+ if CommandLine.arguments[1]==origin {
+  let header=try exactRead(4);let n=header.withUnsafeBytes{$0.loadUnaligned(as:UInt32.self).littleEndian};try require(n>0 && n<=proLimit,"invalid_message")
+  let data=try exactRead(Int(n));try require(String(data:data,encoding:.utf8) != nil,"invalid_message");let message=try json(data)
+  if message["schema"] as? String==proSchema {
+   do {try proSession(message)} catch {if proUUID(message["id"]) && proUUID(message["session"]) && proInteger(message["epoch"]) != nil {try? framedWrite(proResponse(message,"blocked",safeErrorCode(error)=="busy" ? "participant_writer_busy":"participant_protocol_invalid"),.standardOutput)} else {throw error}};exit(0)
+  }
+  try require(n<=4096,"invalid_message");first=message
+ }
  let fd=open(root.appendingPathComponent("update.lock").path,O_CREAT|O_RDWR|O_NOFOLLOW,0o600);try require(fd>=0,"lock_failed");defer{close(fd)};try require(flock(fd,LOCK_EX|LOCK_NB)==0,"busy")
  if CommandLine.arguments[1]=="--poll" {
   do {try scheduledPoll()} catch {var current=(try? state()) ?? [:];current["last_poll_at"]=Date().timeIntervalSince1970;current["poll_status"]="error";current["poll_error"]=safeErrorCode(error);try? write(current,stateURL);throw error}
  } else if CommandLine.arguments[1]=="--recover" {
-  let dir=try configuredDirectory();var s=try state()
+  try proBusy();let dir=try configuredDirectory();var s=try state()
   if let pending=s["pending"] as? String,try read(dir.appendingPathComponent("manifest.json"))["version"] as? String != pending {_=try rollback(dir,&s)}
   else if s["awaiting_launch"] as? Bool != true,let at=s["applied_at"] as? Double,Date().timeIntervalSince1970-at>300 {_=try rollback(dir,&s)}
   else if s["pending"]==nil,let at=s["staging_at"] as? Double,Date().timeIntervalSince1970-at>300 {
    let(stage,_)=paths(dir);if fm.fileExists(atPath:stage.path){try safePath(stage);try fm.removeItem(at:stage)};s["staging_at"]=nil;try write(s,stateURL)
   }
  } else {
-  let header=try exactRead(4);let n=header.withUnsafeBytes{$0.loadUnaligned(as:UInt32.self).littleEndian};try require(n>0 && n<=4096,"invalid_message")
-  output(try handle(json(exactRead(Int(n)))))
+  output(try handle(first!))
  }
 } catch let e as Failure {
  if CommandLine.arguments.dropFirst().first?.hasPrefix("--")==true {FileHandle.standardError.write(Data((e.code+"\n").utf8));exit(1)}

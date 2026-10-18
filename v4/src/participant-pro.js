@@ -1,0 +1,175 @@
+/* Native participant transport. Pro owns acquisition; auth never leaves this worker. */
+(function(root){
+ 'use strict';
+ const SCHEMA='crowd-participant-native-v1',LIMIT=262144;
+ const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+ const BASE=['schema','type','id','session','epoch'];
+ const EXTRA={rpc_request:['method','params'],pro_state:['run_id','state','phase','received','target','pending','error']};
+ const PARAMS={scope:[],verify_platform_principal:['uid'],pro_claim:['p_task','p_installation_id'],pro_guard:['p_task','p_lease','p_action','p_note','p_installation_id'],pro_submit:['p_task','p_lease','p_request','p_installation_id','p_payload'],pro_status:['p_task','p_installation_id'],pro_receipt:['p_task','p_installation_id','p_request'],pro_finish:['p_task','p_lease','p_installation_id']};
+ const STATES=new Set(['ready','not_ready','running','complete','partial','finish_unknown','source_failed','source_unknown','delivery_unknown','source_launch_unknown','stopped','blocked','unknown','native_ready','launching']);
+ const PHASES=new Set(['initial','local_status','scope','delivery','import','stage','finish','source','stopping']);
+ const HELD=new Set(['running','launching','native_ready','finish_unknown','source_unknown','delivery_unknown','source_launch_unknown','unknown']);
+ const ERRORS=new Set(['participant_scope_changed','participant_writer_busy','participant_stopped','participant_rpc_outcome_unknown','participant_protocol_invalid','participant_contract_refused','participant_installation_invalid','participant_existing_run','pro_not_ready','participant_dependencies_missing','participant_native_unavailable','participant_waiting_task','participant_recovery_required','consent_required','approval_required','backend_login_required','backend_permission_denied','daily_quota','test_completed']);
+ const keys=(v,w)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===[...w].sort().join(',');
+ const integer=v=>Number.isSafeInteger(v)&&v>=0;
+ const bytes=v=>new TextEncoder().encode(JSON.stringify(v)).length;
+ const requireValue=(ok,code='participant_protocol_invalid')=>{if(!ok)throw Error(code);};
+ function validate(v){
+  requireValue(v&&v.schema===SCHEMA&&UUID.test(v.id)&&UUID.test(v.session)&&integer(v.epoch)&&EXTRA[v.type]&&keys(v,[...BASE,...EXTRA[v.type]])&&bytes(v)<=LIMIT);
+  if(v.type==='rpc_request')requireValue(Object.hasOwn(PARAMS,v.method)&&keys(v.params,PARAMS[v.method]));
+  else requireValue((v.run_id===null||UUID.test(v.run_id))&&STATES.has(v.state)&&PHASES.has(v.phase)&&(v.received===null||integer(v.received))&&(v.target===null||integer(v.target))&&integer(v.pending)&&(v.error===null||ERRORS.has(v.error)));
+  return v;
+ }
+ class ParticipantPro {
+  constructor(r){this.r=r;this.port=null;this.binding=null;this.seen=new Set();this.inflight=0;this.tail=Promise.resolve();this.rpcTail=Promise.resolve();this.starting=null;this.revision=0;}
+  key(owner){return 'participant-pro:'+owner;}
+  async read(owner){owner ||= await this.r.owner();return owner?await this.r.storage.get(this.key(owner))||null:null;}
+  async save(owner,update,revision=this.revision){
+   const job=this.tail.catch(()=>{}).then(async()=>{if(revision!==this.revision||owner!==await this.r.owner())return false;const old=await this.read(owner);await this.r.storage.set(this.key(owner),{...old,...update});return true;});
+   this.tail=job;return job;
+  }
+  frame(type,extra={}){const b=this.binding;requireValue(b);return {schema:SCHEMA,type,id:this.r.uuid(),session:b.session,epoch:b.epoch,...extra};}
+  post(v){requireValue(bytes(v)<=LIMIT);requireValue(this.port,'participant_rpc_outcome_unknown');this.port.postMessage(v);}
+  closeClean(){const port=this.port;this.port=null;if(port)port.disconnect();}
+  async busy(){const p=await this.read();return !!this.starting||this.inflight>0||!!p&&(p.pending>0||HELD.has(p.state));}
+  async check(b=this.binding,lock=null){
+   requireValue(b&&b===this.binding&&this.port,'participant_scope_changed');
+   const scope=await this.r.scope(lock);
+   requireValue(b===this.binding&&scope.subject===b.subject&&scope.installation_id===b.installation_id&&scope.generation===b.epoch,'participant_scope_changed');
+   return scope;
+  }
+  async connect(saved){
+   requireValue(!this.port,'participant_writer_busy');this.binding={...saved};this.seen.clear();
+   const port=this.r.connect();this.port=port;
+   const ready=new Promise((resolve,reject)=>{this.ready={resolve,reject};});
+   port.onMessage.addListener(v=>this.message(v,port).catch(()=>this.fail('participant_protocol_invalid',port)));
+   port.onDisconnect.addListener(()=>{void this.fail('participant_rpc_outcome_unknown',port);});
+   this.post(this.frame('pro_hello',{version:1}));
+   let timer;try{return await Promise.race([ready,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('participant_native_unavailable')),10000);})]);}
+   finally{clearTimeout(timer);this.ready=null;}
+  }
+  async fail(error,port=this.port){
+   if(!port||this.port!==port)return;
+   const b=this.binding;this.port=null;this.ready?.reject(Error(error));try{port.disconnect();}catch(_){}
+   if(!b)return;const p=await this.read(b.subject);
+   if(p?.session===b.session&&p.desired_running)await this.save(b.subject,{state:p.intent?'unknown':'not_ready',error,pending:p.pending||0});
+  }
+  async message(raw,port){
+   if(port!==this.port)return;const v=validate(raw),b=this.binding;
+   requireValue(v.session===b.session&&v.epoch===b.epoch&&!this.seen.has(v.id)&&this.seen.size<4096);
+   this.seen.add(v.id);
+   if(v.type==='rpc_request'){
+    this.inflight++;
+    const operation=this.rpcTail.catch(()=>{}).then(()=>this.reverse(v,b));this.rpcTail=operation;
+    try{await operation;}finally{this.inflight--;}
+    return;
+   }
+   if(v.state==='ready'&&this.ready){this.ready.resolve();return;}
+   if(v.state==='not_ready'&&this.ready){this.ready.reject(Error(v.error||'participant_dependencies_missing'));return;}
+   const stopped=await this.read(b.subject);
+   if(v.state==='stopped'&&stopped?.session===b.session&&stopped.desired_running===false){
+    const scope=await this.r.identity();requireValue(scope.subject===b.subject&&scope.installation_id===b.installation_id,'participant_scope_changed');
+    await this.save(b.subject,{state:v.pending?'delivery_unknown':'stopped',phase:v.phase,run_id:v.run_id,pending:v.pending,error:v.pending?'participant_rpc_outcome_unknown':'participant_stopped'});
+    if(!v.pending&&!this.inflight)this.closeClean();return;
+   }
+   await this.check(b);const p=await this.read(b.subject);
+   requireValue(p?.session===b.session&&p.intent,'participant_scope_changed');
+   if(v.state==='complete'){
+    this.inflight++;let lock,clean=false;
+    try{
+     lock=this.r.acquire();
+     const fresh=await this.r.rpc('pro_status',{p_task:p.task_id,p_installation_id:b.installation_id});await this.check(b,lock);
+     const t=fresh?.task;
+     requireValue(t?.id===p.task_id&&t.source_executor==='mediacrawler_pro'&&integer(t.received)&&integer(t.target)&&t.target>0&&t.received===t.target&&t.status==='complete','participant_receipt_invalid');
+     await this.save(b.subject,{state:'complete',phase:v.phase,run_id:v.run_id,desired_running:false,pending:0,received:t.received,target:t.target,error:null});
+     await this.r.intent(false);clean=true;await this.r.event('stop',{status:'completed',counts:{received:t.received,queued:0}});
+    }finally{this.r.release(lock);this.inflight--;if(clean&&!this.inflight)this.closeClean();}
+   }else{
+    await this.save(b.subject,{state:v.state,phase:v.phase,run_id:v.run_id,received:v.received,target:v.target,pending:v.pending,error:v.error});
+    await this.r.event(v.phase==='delivery'?'outbox':'session',{status:v.state==='running'?'started':'waiting',error_code:v.error||null,counts:{queued:v.pending,...(v.received===null?{}:{received:v.received})}});
+   }
+  }
+  async reverse(v,b){
+   let result=null,error=null,called=false,lock;const revision=this.revision;
+   try{
+    lock=this.r.acquire();
+    const scope=await this.check(b,lock),p=await this.read(b.subject),params=v.params;
+    await this.check(b,lock);requireValue(revision===this.revision,'participant_stopped');
+    requireValue(p?.desired_running===true&&p.intent&&p.session===b.session,'participant_stopped');
+    requireValue(!this.r.busy(lock),'participant_writer_busy');
+    if(v.method==='scope')result=scope;
+    else if(v.method==='verify_platform_principal'){
+     requireValue(/^[a-f0-9]{24}$/.test(params.uid),'participant_protocol_invalid');
+     result=await this.r.principal(params.uid,scope);await this.check(b,lock);
+     await this.save(b.subject,{principal_verified_at:result?.matched===true?Date.now():null},revision);
+    }else{
+     requireValue(params.p_task===p.task_id&&params.p_installation_id===b.installation_id,'participant_scope_changed');
+     if('p_lease' in params)requireValue(UUID.test(params.p_lease));
+     if('p_request' in params)requireValue(UUID.test(params.p_request));
+     if(v.method==='pro_guard')requireValue(['control','search','detail','captcha','rate_limit'].includes(params.p_action)&&(params.p_note===null||/^[a-f0-9]{24}$/.test(params.p_note)));
+     if(v.method==='pro_submit')requireValue(params.p_payload?.schema==='crowd-participant-pro-v1'&&params.p_payload?.reward_eligible===false&&bytes(params.p_payload)<=180000);
+     await this.check(b,lock);called=true;
+     result=await this.r.rpc(v.method,params);
+     await this.check(b,lock);
+     if(v.method==='pro_submit'&&result?.gate==='received')await this.r.event('receipt',{status:'completed',counts:{received:result.task_received}});
+    }
+    await this.check(b,lock);requireValue(revision===this.revision,'participant_stopped');
+   }catch(e){error=called?'participant_rpc_outcome_unknown':['participant_scope_changed','participant_writer_busy','participant_stopped','participant_protocol_invalid'].includes(e.message)?e.message:'participant_rpc_outcome_unknown';result=null;}finally{this.r.release(lock);}
+   if(this.port&&this.binding===b)this.post(this.frame('rpc_result',{id:v.id,ok:error===null,result,error}));
+  }
+  async start(){
+   if(this.starting)return this.starting;
+   const job=this.activate();this.starting=job;
+   try{return await job;}finally{if(this.starting===job)this.starting=null;}
+  }
+  async requestStart(){
+   const revision=this.revision;await this.r.intent(true);
+   setTimeout(()=>{if(revision===this.revision)void this.start().catch(()=>{});},0);
+  }
+  async activate(){
+   const revision=this.revision,scope=await this.r.scope();requireValue(!this.r.busy(),'participant_writer_busy');
+   const old=await this.read(scope.subject);
+   requireValue(!old||!HELD.has(old.state)&&!old.pending,'participant_recovery_required');
+   await this.r.intent(true);requireValue(revision===this.revision,'participant_stopped');
+   const session=this.r.uuid();await this.save(scope.subject,{...scope,session,state:'not_ready',desired_running:true,intent:null,run_id:null,pending:0,error:null},revision);
+   if(this.port){const port=this.port;this.port=null;port.disconnect();}
+   try{await this.connect({...scope,epoch:scope.generation,session});await this.check();
+    requireValue(revision===this.revision,'participant_stopped');
+    const claim=await this.r.claim();await this.check();
+    requireValue(revision===this.revision,'participant_stopped');
+    if(claim?.error)throw Error(ERRORS.has(claim.error)?claim.error:'participant_contract_refused');
+    if(!claim?.task){await this.save(scope.subject,{state:'stopped',error:'participant_waiting_task'},revision);this.closeClean();return;}
+    const task=claim.task;requireValue(Number.isSafeInteger(task.id)&&task.id>0,'participant_protocol_invalid');
+    const intent=this.r.uuid();await this.save(scope.subject,{state:'native_ready',task_id:task.id,query:task.query,intent,target:task.target,received:task.received,error:null},revision);
+    // UI mutation releases its command lock before the native child can request RPC.
+    setTimeout(()=>{void this.launch(scope.subject,revision);},0);
+   }catch(error){
+    await this.save(scope.subject,{state:'not_ready',error:ERRORS.has(error.message)?error.message:'participant_native_unavailable'},revision);
+    // No pro_start has been sent on activate's failure path.
+    if(this.binding?.session===session)this.closeClean();throw error;
+   }
+  }
+  async launch(owner,revision){
+   try{if(revision!==this.revision)return;const b=this.binding,p=await this.read(owner);await this.check(b);
+    if(revision!==this.revision||b!==this.binding||!this.port||!p?.desired_running||!p.intent||p.state!=='native_ready')return;
+    this.post(this.frame('pro_start',{subject:owner,installation_id:p.installation_id,task_id:p.task_id,intent:p.intent}));
+    await this.save(owner,{state:'launching'},revision);
+   }catch(_){await this.save(owner,{state:'unknown',error:'participant_rpc_outcome_unknown'},revision);}
+  }
+  async stop(){
+   this.revision++;await this.r.intent(false);
+   const owner=await this.r.owner(),p=await this.read(owner);
+   if(!p)return;await this.save(owner,{desired_running:false,state:HELD.has(p.state)?'source_unknown':'stopped',error:'participant_stopped'});
+   // Revocation can stop its own old epoch after Agent invalidation; never authorize RPC.
+   if(this.port&&this.binding?.subject===owner)this.post(this.frame('pro_stop',{run_id:p.run_id||null}));
+  }
+  async poll(){
+   const p=await this.read();if(!p)return;
+   if(this.port){if(p.intent)this.post(this.frame('pro_status',{run_id:p.run_id||null}));return;}
+   if(HELD.has(p.state)||p.pending)return; // Unknown launch is durable; never replay Start.
+   if(p.desired_running&&p.error==='participant_waiting_task'&&!this.starting&&!this.r.busy())return this.start();
+  }
+ }
+ ParticipantPro.validate=validate;ParticipantPro.bytes=bytes;ParticipantPro.LIMIT=LIMIT;
+ root.CrowdParticipantPro=ParticipantPro;
+})(globalThis);

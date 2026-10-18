@@ -1,5 +1,5 @@
 /* Windows/macOS Chrome & Edge MV3. No automatic start on installation. */
-if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'identity.js', 'api.js', 'agent.js', 'pool.js', 'work-tabs.js', 'join.js', 'updater.js', 'participant-policy.js', 'trace.js', 'node-monitor.js', 'session-health.js', 'participant-session.js');
+if (typeof importScripts === 'function') importScripts('config.js', 'core.js', 'identity.js', 'api.js', 'agent.js', 'pool.js', 'work-tabs.js', 'join.js', 'updater.js', 'participant-policy.js', 'trace.js', 'node-monitor.js', 'session-health.js', 'participant-session.js', 'participant-pro.js');
 const storage = CrowdCore.accountStorage({
   async get(key) { return (await chrome.storage.local.get(key))[key]; },
   async set(key, value) { await chrome.storage.local.set({[key]: value}); }
@@ -170,14 +170,12 @@ const participantSession=new CrowdParticipantSession({storage,owner:runtime.owne
     return normalized.status==='authenticated'&&normalized.principal_ref===expected&&current===expected&&owner===await runtime.owner();
   }),reconcile:valid=>agent.reconcileCompletedTask(valid),supplement:valid=>agent.checkAcceptanceSupplement(valid),recoverPage:(valid,options)=>agent.recoverLoginPage(valid,options),verificationCurrent:slot=>workTabs.verificationCurrent(slot),verificationNeeded:()=>workTabs.recoveryNeeded(),indicate:indicatePlatformSession});
 // Direct controller stops cancel persisted intent before any pending recovery can start.
-agent.stop=async(reason='user_stopped',options={})=>{await participantSession.intent(false);return stopAgent(reason,options);};
+agent.stop=async(reason='user_stopped',options={})=>{await proParticipant.stop();return stopAgent(reason,options);};
 agent.tick=async(...args)=>{
   if(await legacyInstallation)return;
-  // Delivery has no platform source action and must not depend on a live login page.
-  if(!args[1])await participantSession.check();
-  const result=await tickAgent(...args);
-  if(!args[1])await participantSession.check();
-  return result;
+  // Pro is the sole source. Preserve original manual-rating/outbox delivery only.
+  await proParticipant.poll();
+  if(!await proParticipant.busy())return tickAgent(args[0],true);
 };
 async function normalizeSessionPage(page,owner){
   if(page?.platform!=='xiaohongshu')return {status:'unknown'};
@@ -232,9 +230,10 @@ async function cachedReleaseHash(){
 }
 const nodeMonitor=new CrowdNodeMonitor({storage,api:{rpc:originalRPC},settings:diagnosticSettings,
   state:async()=>{const state=await agent.read(),health=(await platformHealth.publicState()).xiaohongshu;let release_digest;
+    const owner=await runtime.owner(),pro=owner&&await storage.get('participant-pro:'+owner),age=Date.now()-(pro?.principal_verified_at||0);
     try{release_digest=await cachedReleaseHash();}catch(_){console.warn('release_digest_unavailable');}
-    return {release_digest,enabled:state.enabled===true,
-    login_state:CrowdNodeMonitor.loginState(state,health,Date.now())};},
+    return {release_digest,enabled:pro?pro.desired_running===true:state.enabled===true,
+    login_state:pro&&age>=0&&age<=120000?'ready':CrowdNodeMonitor.loginState(state,health,Date.now())};},
   uuid:()=>crypto.randomUUID(),version:CrowdCore.VERSION});
 let nodeFlushTimer=null;
 function queueNodeFlush(){
@@ -286,6 +285,38 @@ workTabs.riskObserved=evidence=>risk.captureMetadata(evidence);
 
 const localTests=new CrowdLocalTest({storage,id:chrome.runtime.id,version:CrowdCore.VERSION,owner:runtime.owner,agent,riskCheck:(s,owner,valid)=>risk.preflight(s,owner,valid),isBusy:async()=>pendingCommands>0 || agent.maintenance,start:valid=>agent.start(true,{valid})});
 const recovery=new CrowdRecovery({id:chrome.runtime.id,owner:runtime.owner,storage,agent,api,tabs:workTabs,prefs:()=>localTests.status(),busy:()=>pendingCommands>0||!!agent.active||!!agent.maintenance});
+async function proIdentity(){
+  const subject=await runtime.owner();
+  if(subject&&!await storage.get('node-monitor:'+subject))await nodeMonitor.register();
+  const node=subject&&await storage.get('node-monitor:'+subject);
+  if(!subject||!node?.installation_id)throw Error('participant_scope_changed');
+  return {subject,installation_id:node.installation_id};
+}
+const proBusy=lock=>pendingCommands>0||!!agent.active||!!(agent.maintenance&&agent.maintenance!==lock)||!!agent.stopping||!!agent.stopActive||!!agent.pendingStop||!!agent.poolJobs?.size||!!participantSession.active||!!platformHealth.active;
+const proParticipant=new CrowdParticipantPro({storage,owner:runtime.owner,uuid:()=>crypto.randomUUID(),
+  identity:proIdentity,scope:async(lock=null)=>{
+    await agent.initializeGeneration();const identity=await proIdentity();
+    const s=await storage.get('agent')||{},owner=await runtime.owner();
+    if(owner!==identity.subject||agent.generationOwner!==owner||s.owner_id&&s.owner_id!==owner||!Number.isSafeInteger(agent.generation))throw Error('participant_scope_changed');
+    if(s.consent!==CrowdCore.CONSENT)throw Error('consent_required');
+    if(proBusy(lock)||agent.recoveryUnsafe(s)||s.outbox?.length)throw Error('participant_writer_busy');
+    return {...identity,generation:agent.generation};
+  },busy:proBusy,acquire:()=>{if(proBusy())throw Error('participant_writer_busy');const lock={};agent.maintenance=lock;return lock;},release:lock=>{if(lock&&agent.maintenance===lock)agent.maintenance=null;},
+  connect:()=>chrome.runtime.connectNative('com.crowd.v4.updater'),
+  intent:enabled=>participantSession.intent(enabled),claim:()=>nodeMonitor.claim(),rpc:originalRPC,
+  principal:async(uid,scope)=>{
+    const expected=(await platformHealth.read()).xiaohongshu?.expected_ref;
+    const ref=await runtime.leaseScope(scope.subject+'\n'+'xiaohongshu'+'\n'+uid);
+    const current=(await platformHealth.read()).xiaohongshu?.expected_ref;
+    return {...scope,matched:/^[a-f0-9]{64}$/.test(current||'')&&expected===current&&ref===current};
+  },event:async(step,fields)=>{await nodeMonitor.event(step,fields);queueNodeFlush();}
+});
+// Manual login help remains available; automatic checks never open a DOM work page.
+participantSession.start=()=>proParticipant.requestStart();
+participantSession.check=()=>proParticipant.poll();
+localTests.run=async()=>{};
+localTests.allowed=()=>false;
+recovery.run=async()=>{};
 const updater = new CrowdUpdater({chrome,storage,agent,reportOTA:async fields=>{
   const settings=await diagnosticSettings();
   if(!settings.enabled||!settings.id)return false;
@@ -294,7 +325,7 @@ const updater = new CrowdUpdater({chrome,storage,agent,reportOTA:async fields=>{
   const s=await agent.read();
   const uncertain=s.sdk_unknown||s.sdk_pending||s.pending_risk||s.pending_observation_batch||['sending','unknown'].includes(s.risk_report?.state);
   const parked=s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&s.last_error==='test_completed'&&!s.outbox?.length&&!s.work_slots?.length&&!uncertain;
-  return !!recovery.active||pendingCommands>0||!!agent.pendingStop||!!agent.stopping||!!agent.stopActive||!!agent.poolJobs?.size||!!(s.enabled&&s.work_slots?.length)||!!(s.pilot_waiting&&!parked&&(uncertain||s.outbox?.length||s.work_slots?.length||s.enrichment||['search','note','reopen_note','enrich','parallel'].includes(s.phase)));
+  return await proParticipant.busy()||!!recovery.active||pendingCommands>0||!!agent.pendingStop||!!agent.stopping||!!agent.stopActive||!!agent.poolJobs?.size||!!(s.enabled&&s.work_slots?.length)||!!(s.pilot_waiting&&!parked&&(uncertain||s.outbox?.length||s.work_slots?.length||s.enrichment||['search','note','reopen_note','enrich','parallel'].includes(s.phase)));
 },version:CrowdCore.VERSION,releaseHash:cachedReleaseHash});
 let diagnosticReport;
 const diagnosticKey = (id, suffix) => 'diagnostics:' + id + ':' + suffix;
@@ -462,7 +493,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       case 'update_settings': await updater.setEnabled(message.enabled); return {};
       case 'update_check': {const result=await updater.check();if(result?.blocked)throw Error(result.blocked);return {};}
       case 'local_test_updates': if(message.enabled===false)await recovery.cancel();await localTests.settings(message.enabled);return {};
-      case 'state': { const session=await storage.get('session'), legacy=await legacyInstallation; if(legacy)return {legacy_installation:true,session:!!session,invited:false,agent:CrowdCore.initial(),status:{error:'legacy_migration_required'},progress:null,diagnostics:{enabled:false},updater:{enabled:false,state:'legacy_hold'},local_test:false,local_test_updates:{enabled:false},risk_confirmation:{}}; const settings = await diagnosticSettings(); return {entry_state:await participantEntry(),consent_scope:session?.user?.id||'signed-out',platform_session:await participantSession.status(),legacy_installation:legacy,node_monitor:await nodeMonitor.snapshot(),risk_confirmation:await risk.status(),recovery:!!session&&!legacy&&localTests.allowed()&&(await localTests.status()).enabled===true?await api.rpc('recovery_check',{p_action:'status'}).catch(()=>null):null,local_test:localTests.allowed(),local_test_updates:await localTests.status(),parallel_requested:(await agent.preferences())?.parallelism,parallel_allowed:await runtime.poolAllowed(),updater:legacy?{enabled:false,state:'legacy_hold'}:await updater.status(),agent: await agent.read(), session: !!session, invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: legacy?{error:'legacy_migration_required'}:session?await api.rpc('status').catch(e => ({error: e.message})):{}, progress:session&&!legacy?await api.rpc('progress').catch(()=>null):null,source_runtime:{active:!!agent.active,stopping:!!agent.stopping,maintenance:!!agent.maintenance,session_active:!!participantSession.active}}; }
+      case 'state': { const session=await storage.get('session'), legacy=await legacyInstallation; if(legacy)return {legacy_installation:true,session:!!session,invited:false,agent:CrowdCore.initial(),status:{error:'legacy_migration_required'},progress:null,diagnostics:{enabled:false},updater:{enabled:false,state:'legacy_hold'},local_test:false,local_test_updates:{enabled:false},risk_confirmation:{}}; const settings = await diagnosticSettings(); return {entry_state:await participantEntry(),consent_scope:session?.user?.id||'signed-out',platform_session:await participantSession.status(),legacy_installation:legacy,node_monitor:await nodeMonitor.snapshot(),risk_confirmation:await risk.status(),recovery:!!session&&!legacy&&localTests.allowed()&&(await localTests.status()).enabled===true?await api.rpc('recovery_check',{p_action:'status'}).catch(()=>null):null,local_test:localTests.allowed(),local_test_updates:await localTests.status(),source_executor:'mediacrawler_pro',pro_participant:await proParticipant.read(),parallel_requested:(await agent.preferences())?.parallelism,parallel_allowed:await runtime.poolAllowed(),updater:legacy?{enabled:false,state:'legacy_hold'}:await updater.status(),agent: await agent.read(), session: !!session, invited: !!await storage.get('pending_invite'), diagnostics: {...settings, id: undefined}, status: legacy?{error:'legacy_migration_required'}:session?await api.rpc('status').catch(e => ({error: e.message})):{}, progress:session&&!legacy?await api.rpc('progress').catch(()=>null):null,source_runtime:{active:!!agent.active,stopping:!!agent.stopping,maintenance:!!agent.maintenance,session_active:!!participantSession.active}}; }
       case 'rating': await agent.queueRating(message.proof, message.score, message.reason); agent.tick(false,true).catch(console.error); return {};
       case 'risk_confirm': return risk.confirm(message.confirmed);
       case 'parallelism': {await agent.requestParallelism(message.value);return {};}
@@ -503,7 +534,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         const s = await agent.read(); s.consent = CrowdCore.CONSENT; await agent.save(s); return {};
       }
       case 'start': await requireParticipant(); await participantSession.start(); return {};
-      case 'test_start': await requireParticipant(); await agent.start(true); return {};
+      case 'test_start': throw Error('participant_pro_required');
       case 'stop': await recovery.cancel();await localTests.cancel();await agent.stop('user_stopped', {drain:true}); return {};
       case 'logout': {
         await recovery.cancel();
@@ -515,6 +546,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       }
       case 'export': { const s = await agent.read(); return {outbox: s.outbox, rejected: s.rejected}; }
       case 'open_login': {
+        await agent.stop('user_login',{keepPage:true,drain:true});
         if((await platformHealth.read()).xiaohongshu?.expected_ref)return participantSession.openLogin();
         // Keep the actual challenge/note page. Opening help is a user action,
         // not evidence that either platform or backend authentication failed.

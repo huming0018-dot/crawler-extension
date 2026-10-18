@@ -158,6 +158,18 @@ async function refresh() {
   }
   const coverage=s.comment_coverage?.filter(item=>item.visible_complete && !item.complete);
   if(coverage?.length)fields['评论覆盖'] = coverage.map(item=>'当前可见 '+item.captured+' 条已采尽；页面声明 '+item.reported+' 条，差额 '+item.count_gap+' 条原因未确认。').join('\n');
+  const pro=data.pro_participant;
+  if(pro){
+    const phases={initial:'检查 Pro 安装',scope:'核对原参与身份',source:'Pro 静默采集',local_status:'核对原采集结果',import:'读取 Pro 结果',stage:'保存待回传数据',delivery:'等待逐条云回执',finish:'核对数据库完成状态',stopping:'停止采集'};
+    const messages={participant_dependencies_missing:'Pro 依赖尚未安装，请运行原安装包中的更新助手；原身份和进度保留。',participant_native_unavailable:'本机 Pro 助手未接通，请运行原安装包中的更新助手。',participant_waiting_task:'已开启自动领取，目前没有可执行任务。',participant_stopped:'已停止新采集；原身份、进度和回执保留。',participant_rpc_outcome_unknown:'上次调用结果待对账，已停止新采集；不会重复执行。',participant_native_comments_unsupported:'此任务要求评论，目前参与者接口尚未接通，未降低任务要求或回退旧采集。'};
+    const complete=pro.state==='complete'&&pro.received===pro.target&&pro.target>0&&pro.pending===0;
+    fields['采集引擎']='MediaCrawler Pro';fields['自动执行']=complete?'采集已停止，更新保持开启':pro.desired_running?'已开启':'已停止';
+    fields['当前阶段']=complete?'云端已收齐，自动停止':phases[pro.phase]||pro.state;
+    fields['任务']=pro.query||'等待中心派单';fields['本任务云端接收']=Number.isSafeInteger(pro.received)&&Number.isSafeInteger(pro.target)?pro.received+' / '+pro.target:'待数据库确认';
+    fields['Pro 待回传']=pro.pending;fields['最近提示']=complete?'本任务已获得逐条云回执，未重开旧任务。':messages[pro.error]||pro.error||'Pro 正在静默执行；不需要保持采集页面在前台。';
+    fields['最早下一步']=complete?'本批已完成，不再访问采集来源':pro.error==='participant_waiting_task'?'自动等待新任务':pro.state.includes('unknown')?'先对账原调用，禁止重开来源':pro.desired_running?'按原任务执行':'本人已停止';
+    $('welcome').textContent=fields['最近提示'];
+  }
   for (const [name, value] of Object.entries(fields)) { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = String(value); $('status').append(dt, dd); }
   const scope=data.consent_scope || (data.session?'native-session':'signed-out');
   if(scope!==consentScope){consentScope=scope;consentDraft=false;}
@@ -195,7 +207,8 @@ function renderControls() {
   const run=s.test_run,expired=run && Number.isFinite(run.expires_at) && Date.now()>=run.expires_at;
   const running=run && ['waiting','active'].includes(run.state) && (!expired || s.enabled);
   $('test_start').disabled=actions>0 || !data.session || s.consent!==CrowdCore.CONSENT || !local || !!running;
-  $('start').disabled=actions>0 || s.enabled || !!run;
+  const proMode=data.source_executor==='mediacrawler_pro',proHeld=data.pro_participant&&['running','launching','native_ready','finish_unknown','source_unknown','delivery_unknown','source_launch_unknown','unknown'].includes(data.pro_participant.state);
+  $('start').disabled=actions>0 || (proMode?!!proHeld:s.enabled || !!run);
   $('test_status').textContent=run?((running?(run.state==='waiting'?'正在等待旧记录收尾':'测试进行中'):expired && ['waiting','active'].includes(run.state)?'上次测试已过期，可开始新测试':(errors[run.reason] || '测试已停止'))+'；详情尝试 '+run.attempts+'/'+(run.limit??4)+'，有效新回执 '+run.accepted.length+'/'+(run.goal??2)+(s.outbox?.length?'；待回传 '+s.outbox.length+' 条':'')+(run.finish_error?'；任务收尾尚待确认，已停止新访问':'')):'最多打开两篇新详情；完成后自动停止，15分钟或跨日结束。沿用现有配额，旧待回传记录先收尾。';
   $('risk_confirm').disabled=actions>0||!data.risk_confirmation?.can_confirm||!$('risk_acknowledge').checked;
   $('profiles').disabled=actions>0 || !data.session;
