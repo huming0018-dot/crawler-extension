@@ -10,6 +10,7 @@ async function main(){
   sendMessage:async(id,m)=>{const t=tabs.get(id);t.token=m.token;return {document:t.document};}
  },windows:{
   create:async options=>{creates.push({...options});if(fail)throw Error('creation_outcome_unknown');const id=++seq;if(options.tabId)return {id,tabs:[tabs.get(options.tabId)]};const tab={id:++seq,windowId:id,url:options.url,status:'complete',document:crypto.randomUUID(),token:null};tabs.set(tab.id,tab);return {id,tabs:[tab]};},
+  get:async id=>({id,type:'normal',state:'minimized',incognito:false,tabs:[...tabs.values()].filter(v=>v.windowId===id)}),
   update:async(id,options)=>{windows.push({id,...options});return {id,...options};}
  }};
  const probe=async id=>({response:{token:tabs.get(id).token,document:tabs.get(id).document}});

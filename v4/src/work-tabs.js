@@ -74,8 +74,27 @@
         if(await this.structuredAllowed()){try{root.CrowdCore.noteURL(destination);const u=new URL(destination);u.searchParams.set('crowd_capture',entry.token);entry.url=u.href;}catch(error){if(error.message!=='invalid_note_url')throw error;}}
         await this.assertKey(key);
         const window=await this.chrome.windows.create({url:entry.url,type:'normal',state:'minimized',focused:false});
-        const tab=window.tabs[0];
-        entry={...entry,tab:tab.id};
+        const tab=window.tabs?.[0];
+        entry={...entry,tab:Number.isSafeInteger(tab?.id)?tab.id:null,created_window:Number.isSafeInteger(window.id)?window.id:null};
+        // Save the known creation outcome before visibility confirmation can fail.
+        await this.write(entries=>{if(entries[slot]?.token!==entry.token)throw Error('cancelled');entries[slot]=entry;},key);
+        if(!home){
+          const createdWindow=async()=>{
+            await this.assertKey(key);
+            const current=(await this.entries())[slot],marker=(await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session;
+            if(marker!==session||!current||['state','session','tab','token','url','instance','created_window'].some(k=>current[k]!==entry[k]))throw Error('cancelled');
+            if(!Number.isSafeInteger(entry.tab)||entry.tab<1||!Number.isSafeInteger(entry.created_window)||entry.created_window<1)throw this.failure('silent_window_unconfirmed');
+            const actual=await this.chrome.windows.get(entry.created_window,{populate:true}),only=actual?.tabs?.[0];
+            if(actual?.id!==entry.created_window||actual.type!=='normal'||actual.incognito||!Array.isArray(actual.tabs)||actual.tabs.length!==1||only?.id!==entry.tab||only.windowId!==actual.id||!this.matches(only.url,entry.url)&&!this.matches(only.pendingUrl,entry.url))throw this.failure('silent_window_unconfirmed');
+            await this.assertKey(key);return actual;
+          };
+          const actual=await createdWindow();
+          if(actual.state!=='minimized'){
+            await createdWindow();
+            try{await this.chrome.windows.update(entry.created_window,{state:'minimized',focused:false});}catch(_){throw this.failure('silent_window_unconfirmed');}
+          }
+          const confirmed=await createdWindow();if(confirmed.state!=='minimized')throw this.failure('silent_window_unconfirmed');
+        }
       }
       await this.write(entries=>{entries[slot]={...entry,state:'opened'};},key);
     }

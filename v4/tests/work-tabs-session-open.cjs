@@ -10,7 +10,7 @@ function fixture(change={}){
  const session={crowd_work_session:'current-session'},tabs=new Map();
  const storage={get:async key=>{if(hook)await hook(key);return structuredClone(data[key]);},set:async(key,value)=>{data[key]=structuredClone(value);}};
  const act=id=>{if(id===12){oldActions++;throw Error('old tab must never be touched');}};
- const chrome={storage:{session:{get:async key=>({[key]:session[key]}),set:async o=>Object.assign(session,o)}},tabs:{get:async id=>{act(id);return tabs.get(id)},update:async id=>{act(id)},remove:async id=>{act(id)},sendMessage:async id=>{act(id)}},windows:{create:async({url})=>{created++;const tab={id:++n,url,status:'complete'};tabs.set(tab.id,tab);return {tabs:[tab]};}}};
+ const chrome={storage:{session:{get:async key=>({[key]:session[key]}),set:async o=>Object.assign(session,o)}},tabs:{get:async id=>{act(id);return tabs.get(id)},update:async id=>{act(id)},remove:async id=>{act(id)},sendMessage:async id=>{act(id)}},windows:{get:async id=>({id,type:'normal',state:'minimized',incognito:false,tabs:[...tabs.values()].filter(t=>t.windowId===id)}),create:async({url})=>{created++;const wid=++n,tab={id:++n,windowId:wid,url,status:'complete'};tabs.set(tab.id,tab);return {id:wid,tabs:[tab]};}}};
  const probe=async id=>{act(id);return {response:{token:'not-current',document:'not-current'}};};
  const w=new CrowdWorkTabs({chrome,storage,owner:async()=>owner,probe,uuid:crypto.randomUUID});
  return {w,old,business,data,setOwner:x=>owner=x,setHook:x=>hook=x,get created(){return created},get oldActions(){return oldActions}};

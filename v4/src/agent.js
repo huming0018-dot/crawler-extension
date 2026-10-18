@@ -293,7 +293,8 @@
       const extendedComments=(scoped||controlRefresh) && Number.isSafeInteger(configuredCap) && configuredCap>=1 && configuredCap<=1000;
       const minimumGap=(scoped||controlRefresh) && Number.isSafeInteger(configuredGap) && configuredGap>=250 && configuredGap<=30000?configuredGap:1000;
       const batch=this.acceptanceBatch(s);
-      const caps = {search:30, detail:batch?200:60, comment:extendedComments?Math.max(120,configuredCap):120, scroll:120};
+      const scopedScroll=batch&&requestTask===s.task.id&&Number.isSafeInteger(s.task.daily_detail_cap)&&s.task.daily_detail_cap>=1&&s.task.daily_detail_cap<=200;
+      const caps = {search:30, detail:batch?200:60, comment:extendedComments?Math.max(120,configuredCap):120, scroll:scopedScroll?Math.max(120,s.task.daily_detail_cap):120};
       if (!value || !Number.isSafeInteger(value.version) || value.version < 1 ||
         !Number.isSafeInteger(value.ttl_ms) || value.ttl_ms < 1 || value.ttl_ms > 600000 ||
         typeof value.paused !== 'boolean' || typeof value.allowed !== 'boolean' || (value.allowed && (value.paused || value.reason !== null)) ||
@@ -309,9 +310,10 @@
         !s.outbox.length && !s.work_slots?.length && !s.enrichment && ['search','detail','comment'].every(key=>value.counts[key]<value.caps[key]);
       const clearedLocalBudget=action==='control'&&batch&&!this.recoveryUnsafe(s)&&s.wait_kind==='budget'&&s.last_error==null&&(['idle','search_done'].includes(s.phase)||this.admittedBatchNote(s))&&!s.pending_risk&&value.allowed===true&&value.reason===null&&!value.paused&&Number.isSafeInteger(s.task.daily_detail_cap)&&s.task.daily_detail_cap<=200&&value.caps.detail<=s.task.daily_detail_cap&&(value.caps.detail>s.visits||this.admittedBatchNote(s)&&value.caps.detail===s.visits)&&(value.counts.detail<value.caps.detail||this.admittedBatchNote(s)&&value.counts.detail===value.caps.detail);
       if(clearedLocalBudget){s.next_at=this.r.now();s.wait_kind=null;}
+      const raisedScrollBudget=action==='control'&&scopedScroll&&s.phase==='search'&&s.last_error==='action_budget'&&s.wait_kind==='action'&&!this.recoveryUnsafe(s)&&s.control_task===requestTask&&Number.isInteger(s.control?.caps?.scroll)&&Number.isInteger(s.control?.counts?.scroll)&&s.control.counts.scroll>=s.control.caps.scroll&&value.caps.scroll>s.control.caps.scroll&&value.caps.scroll<=s.task.daily_detail_cap&&value.counts.scroll<value.caps.scroll&&value.allowed===true&&!value.paused&&value.reason===null;
       const raisedDetailBudget=action==='control'&&batch&&s.phase==='search_done'&&s.last_error==='action_budget'&&s.wait_kind==='action'&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isInteger(s.control?.caps?.detail)&&value.caps.detail>s.control.caps.detail&&value.counts.detail<value.caps.detail&&value.allowed===true;
       // A current server-clear retires a stale lab action wait; source risk waits remain.
-      if((this.r.localTest === true || raisedDetailBudget || ['action_gap','session_rest','global_pause'].includes(s.last_error)) && (s.wait_kind === 'action' || idleRepair) && !s.pending_risk && !['captcha','rate_limit'].includes(s.last_error) && value.reason === null && !value.paused) {
+      if((this.r.localTest === true || raisedDetailBudget || raisedScrollBudget || ['action_gap','session_rest','global_pause'].includes(s.last_error)) && (s.wait_kind === 'action' || idleRepair) && !s.pending_risk && !['captcha','rate_limit'].includes(s.last_error) && value.reason === null && !value.paused) {
         s.next_at=this.r.now();s.action_not_before=0;s.wait_kind=null;s.last_error=null;if(raisedDetailBudget)s.assignment_refresh=true;if(idleRepair)s.retry_at=0;
       }
       // The next attempt remains server-admitted; do not add its RPC latency to the server's interval again.

@@ -9,7 +9,8 @@ for(const file of ['core','work-tabs'])vm.runInThisContext(fs.readFileSync('v4/s
   update:async(id,{url})=>Object.assign(tabs.get(id),{url,document:crypto.randomUUID(),token:null}),
   sendMessage:async(id,m)=>{const tab=tabs.get(id);tab.token=m.token;return {bound:true,document:tab.document};},remove:async id=>{removed.push(id);tabs.delete(id);}
  }};
- chrome.windows.create=async({url})=>({id:++seq,tabs:[await chrome.tabs.create({url})]});
+ chrome.windows.create=async({url})=>{const id=++seq,tab=await chrome.tabs.create({url});tabs.get(tab.id).windowId=id;return {id,tabs:[{...tab,windowId:id}]};};
+ chrome.windows.get=async id=>({id,type:'normal',state:'minimized',incognito:false,tabs:[...tabs.values()].filter(t=>t.windowId===id)});
  const storage={get:async key=>structuredClone(data[key]),set:async(key,value)=>data[key]=structuredClone(value)};
  const probe=async(id,action)=>({response:action==='ownership'?{token:tabs.get(id).token,document:tabs.get(id).document}:{ready:true}});
  const make=()=>new CrowdWorkTabs({chrome,storage,owner:async()=>owner,probe,uuid:crypto.randomUUID});
