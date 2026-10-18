@@ -55,6 +55,10 @@
       const saved=begin?s.search_checkpoint:old;
       return saved?.task_id===task.id&&saved.task_query===task.query&&saved.platform===platform&&saved.relevance_revision===revision&&(saved.query===task.query||saved.query===query)?saved.query:task.query;
     }
+    acceptanceBatch(s) {
+      const g=s.acceptance_supplement,t=s.task,uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+      return g?.schema==='crowd-acceptance-batch-v1'&&g.state==='admitted'&&g.task_id===19&&t?.id===g.task_id&&uuid(g.id)&&uuid(g.installation_id)&&typeof s.owner_id==='string'&&!!s.owner_id&&s.owner_id===this.generationOwner&&['xiaohongshu','xhs',undefined].includes(t.platform)&&Number.isSafeInteger(g.baseline_received)&&g.baseline_received>=0&&Number.isSafeInteger(g.extra_limit)&&g.extra_limit>=1&&g.extra_limit<=100&&g.target===g.baseline_received+g.extra_limit&&t.target===g.target&&Number.isSafeInteger(t.received)&&t.received===s.received&&t.received>=g.baseline_received&&Number.isSafeInteger(g.remaining)&&g.remaining>0&&g.remaining<=g.extra_limit&&g.remaining===g.target-t.received&&t.remaining_today===g.remaining;
+    }
     supplementTarget(g) {const target=g.schema==='crowd-acceptance-batch-v1'?g.target:g.baseline_received+g.extra_limit;if(!Number.isSafeInteger(target)||target<1||target>100100)throw Error('task_reconciliation_required');return target;}
     supplementGrant(value) {
       const g=value?.acceptance_supplement,uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
@@ -280,7 +284,8 @@
       const controlRefresh=this.r.localTest===true&&action==='control'&&Array.isArray(ids)&&ids.length>=1&&ids.length<=4&&new Set(ids).size===ids.length&&ids.every(id=>Number.isSafeInteger(id)&&id>0)&&ids.includes(s.task.id);
       const extendedComments=(scoped||controlRefresh) && Number.isSafeInteger(configuredCap) && configuredCap>=1 && configuredCap<=1000;
       const minimumGap=(scoped||controlRefresh) && Number.isSafeInteger(configuredGap) && configuredGap>=250 && configuredGap<=30000?configuredGap:1000;
-      const caps = {search:30, detail:60, comment:extendedComments?Math.max(120,configuredCap):120, scroll:120};
+      const batch=this.acceptanceBatch(s);
+      const caps = {search:30, detail:batch?200:60, comment:extendedComments?Math.max(120,configuredCap):120, scroll:120};
       if (!value || !Number.isSafeInteger(value.version) || value.version < 1 ||
         !Number.isSafeInteger(value.ttl_ms) || value.ttl_ms < 1 || value.ttl_ms > 600000 ||
         typeof value.paused !== 'boolean' || typeof value.allowed !== 'boolean' || (value.allowed && (value.paused || value.reason !== null)) ||
@@ -294,9 +299,10 @@
       if(this.r.now()<before)rejectPolicy('clock_regression');
       const idleRepair=this.r.localTest===true && scoped && s.enabled && s.task?.repair_only && ['waiting','active'].includes(s.test_run?.state) && s.phase==='idle' &&
         !s.outbox.length && !s.work_slots?.length && !s.enrichment && ['search','detail','comment'].every(key=>value.counts[key]<value.caps[key]);
+      const raisedDetailBudget=action==='control'&&batch&&s.phase==='search_done'&&s.last_error==='action_budget'&&s.wait_kind==='action'&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isInteger(s.control?.caps?.detail)&&value.caps.detail>s.control.caps.detail&&value.counts.detail<value.caps.detail&&value.allowed===true;
       // A current server-clear retires a stale lab action wait; source risk waits remain.
-      if((this.r.localTest === true || ['action_gap','session_rest','global_pause'].includes(s.last_error)) && (s.wait_kind === 'action' || idleRepair) && !s.pending_risk && !['captcha','rate_limit'].includes(s.last_error) && value.reason === null && !value.paused) {
-        s.next_at=this.r.now();s.action_not_before=0;s.wait_kind=null;s.last_error=null;if(idleRepair)s.retry_at=0;
+      if((this.r.localTest === true || raisedDetailBudget || ['action_gap','session_rest','global_pause'].includes(s.last_error)) && (s.wait_kind === 'action' || idleRepair) && !s.pending_risk && !['captcha','rate_limit'].includes(s.last_error) && value.reason === null && !value.paused) {
+        s.next_at=this.r.now();s.action_not_before=0;s.wait_kind=null;s.last_error=null;if(raisedDetailBudget)s.assignment_refresh=true;if(idleRepair)s.retry_at=0;
       }
       // The next attempt remains server-admitted; do not add its RPC latency to the server's interval again.
       if(value.action_wait_ms != null && value.allowed) s.action_not_before=Math.max(this.r.now(),before+value.action_wait_ms);
@@ -870,7 +876,9 @@
           now >= (s.retry_at || 0) &&
           (s.phase === 'search' ? ready.keyword === this.searchQuery(s) : ready.target === s.note_id);
         if (s.next_at > now && !pageWake && !s.work_slots?.length) { await this.schedule(s,s.next_at); return; }
-        if (s.visits >= 60) { s.next_at = now + 3600000; s.wait_kind = 'budget'; await this.save(s); await this.schedule(s,s.next_at); return; }
+        const taskDetailCap=s.task?.daily_detail_cap==null?200:s.task.daily_detail_cap;
+        const visitCap=this.acceptanceBatch(s)&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isSafeInteger(taskDetailCap)&&taskDetailCap>=1&&taskDetailCap<=200&&Number.isInteger(s.control.caps?.detail)&&s.control.caps.detail>=1&&s.control.caps.detail<=taskDetailCap&&s.control.caps.detail<=200&&Number.isSafeInteger(s.control_checked)&&s.control_checked<=now&&Number.isSafeInteger(s.control_expires)&&s.control_expires>now?s.control.caps.detail:60;
+        if (s.visits >= visitCap) { s.next_at = now + 3600000; s.wait_kind = 'budget'; await this.save(s); await this.schedule(s,s.next_at); return; }
         if (s.enrichment) {
           await this.enrich(s, alive, signal); await this.save(s); alive();
           if (s.outbox.length) await this.flushOutbox(s, alive, signal);
@@ -922,7 +930,7 @@
         } else if (s.phase === 'idle') {
           if (!await this.admit(s, 'search', alive, signal)) return;
           // One alarm interval for initial search loading; never auto-reopen it.
-          this.searchQuery(s,s.task,true);s.phase = 'search'; s.page_deadline = this.r.now() + 30000; s.next_at = this.r.now()+1000; s.wait_kind = 'page';
+          this.searchQuery(s,s.task,true);s.phase = 'search'; s.page_deadline = this.r.now() + (this.acceptanceBatch(s)?90000:30000); s.next_at = this.r.now()+1000; s.wait_kind = 'page';
           // Persist before navigation: a worker restart after tabs.update must
           // resume probing instead of opening/charging the same search again.
           await this.save(s); alive();
