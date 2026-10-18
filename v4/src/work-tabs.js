@@ -33,11 +33,14 @@
         const result=await fn(entries);await this.storage.set(key,entries);return result;
       });this.tail=pending;return pending;
     }
+    historicalOpened(entry,session) {
+      return entry?.state==='opened' && typeof entry.session==='string' && !!entry.session && entry.session!==session && Number.isInteger(entry.tab) && entry.tab>0 && typeof entry.document==='string' && !!entry.document && typeof entry.token==='string' && !!entry.token;
+    }
     async open(url, slot, {verificationHome=false}={}) {
       const home=verificationHome&&slot.startsWith('verify-')&&url===root.CrowdCore.HOST+'/';
       const key=await this.key(),destination=home?url:root.CrowdCore.navigationURL(url),session=await this.session();
       let entry=(await this.entries())[slot];
-      if(entry?.state==='opened' && typeof entry.session==='string' && entry.session && entry.session!==session && Number.isInteger(entry.tab) && entry.tab>0 && typeof entry.document==='string' && entry.document && typeof entry.token==='string' && entry.token) {
+      if(this.historicalOpened(entry,session)) {
         // OTA invalidates tab IDs. Keep their history without touching the old page.
         await this.write(async entries=>{
           await this.assertKey(key);
@@ -99,7 +102,7 @@
       return null;
     }
     async noteRisk(entry){let note;try{note=root.CrowdCore.noteURL(entry.url).id;}catch(_){return;}try{await this.riskObserved?.({note_id:note,session:entry.session,document:entry.document,at:Date.now()});}catch(_){this.riskCaptureFailed=true;}}
-    async target(slot) {
+    async target(slot,{verificationObservation=false}={}) {
       const key=await this.key();
       const entry=(await this.entries())[slot];
       if (!entry || entry.session!==await this.session() || !entry.tab || entry.state!=='opened')throw this.failure('entry_state');
@@ -109,14 +112,18 @@
       // Chrome may omit URL/pendingUrl before host permission applies at commit.
       // Only a newly created, unbound tab in this worker may wait in that state.
       const uncommitted=entry.instance===this.instance && !entry.document && tab.status==='loading' && (!tab.url || tab.url==='about:blank');
-      const pending=!this.matches(tab.url,entry.url) && (this.matches(tab.pendingUrl,entry.url) || uncommitted);
-      if(!pending && !this.matches(tab.url,entry.url)){
+      let observedVerification=false;
+      if(verificationObservation===true&&slot.startsWith('verify-')&&entry.verification===true&&entry.url===root.CrowdCore.HOST+'/'&&typeof entry.token==='string'&&entry.token&&typeof entry.document==='string'&&entry.document&&tab.status==='complete'&&!tab.pendingUrl&&!tab.frozen){
+        try{root.CrowdCore.noteURL(tab.url);observedVerification=true;}catch(_){}
+      }
+      const pending=!observedVerification&&!this.matches(tab.url,entry.url) && (this.matches(tab.pendingUrl,entry.url) || uncommitted);
+      if(!pending && !observedVerification && !this.matches(tab.url,entry.url)){
         if(!tab.url&&entry.document){const metadata=await this.currentMetadata(entry);await this.assertKey(key);if(this.rateLimitURL(metadata?.url)){await this.noteRisk(entry);await this.assertKey(key);throw Error('rate_limit');}}
         // An owned tab redirected to the platform error page is a risk signal, never a new capture document.
         if(this.rateLimitURL(tab.url)){await this.noteRisk(entry);await this.assertKey(key);throw Error('rate_limit');}
         throw this.failure('url_changed');
       }
-      await this.assertKey(key);return {entry,tab,pending};
+      await this.assertKey(key);return {entry,tab,pending,verificationObservation:observedVerification};
     }
     async read(action,slot,sdk=null) {
       const ownerKey=await this.key();
@@ -144,7 +151,7 @@
     }
     async recoveryNeeded() {
       const session=await this.session();
-      return Object.values(await this.entries()).some(e=>e.state!=='retired'&&(e.session!==session||e.state!=='opened'));
+      return Object.values(await this.entries()).some(e=>e.state!=='retired'&&!this.historicalOpened(e,session)&&(e.session!==session||e.state!=='opened'));
     }
     async verificationCurrent(slot) {
       const entries=await this.entries(),entry=entries[slot],session=await this.session();
@@ -166,12 +173,14 @@
     }
     async verificationProbe(slot,accept=async()=>false) {
       if(!slot?.startsWith('verify-'))throw this.failure('verification_slot');
-      const key=await this.key(),{entry,pending}=await this.target(slot);
+      const key=await this.key(),{entry,pending,verificationObservation}=await this.target(slot,{verificationObservation:true});
       if(!entry.verification)throw this.failure('verification_slot');if(pending)return {status:'unknown'};
       const proof=(await this.probe(entry.tab,'ownership')).response;if(!proof?.document)return {status:'unknown'};
       if(proof.token&&proof.token!==entry.token)throw this.failure('token_changed');
-      const page=await this.verificationMessage(entry.tab,{type:'crowd_session_probe'}),after=await this.target(slot),second=(await this.probe(entry.tab,'ownership')).response;
-      if(after.entry.token!==entry.token||after.entry.document!==entry.document||proof.document!==second?.document||proof.token!==second?.token)throw this.failure('verification_document_changed');
+      if(verificationObservation&&(proof.token!==entry.token||proof.document!==entry.document))throw this.failure('verification_document_changed');
+      const page=await this.verificationMessage(entry.tab,{type:'crowd_session_probe'}),after=await this.target(slot,{verificationObservation:true}),second=(await this.probe(entry.tab,'ownership')).response;
+      if((verificationObservation||after.verificationObservation)&&(proof.token!==entry.token||proof.document!==entry.document))throw this.failure('verification_document_changed');
+      if(after.entry.tab!==entry.tab||after.entry.session!==entry.session||after.entry.token!==entry.token||after.entry.document!==entry.document||proof.document!==second?.document||proof.token!==second?.token)throw this.failure('verification_document_changed');
       // A persisted newly-created page may outlive its worker before binding.
       // Only this current-browser owned slot and a confirmed original principal
       // can authorize binding; an old browser marker is rejected by target().
@@ -209,13 +218,22 @@
         entries.search={...old,state:'retired',retired_reason:'first_login_update'};
       },key);
     }
-    async rebindAfterLogin(valid) {
+    async rebindAfterLogin(valid,acceptVerification=async()=>false) {
       const key=await this.key(),session=await this.session();
       for(const [slot,entry] of Object.entries(await this.entries())) {
         if(!await valid())throw Error('cancelled');
-        if(entry.state==='retired')continue;
-        const {tab,pending}=await this.target(slot);
+        if(entry.state==='retired'||this.historicalOpened(entry,session))continue;
+        const current=await this.target(slot,{verificationObservation:true}),{tab,pending}=current;
         if(pending||tab.pendingUrl||entry.session!==session)throw this.failure('login_page_changed');
+        if(current.verificationObservation){
+          if(current.entry.token!==entry.token||current.entry.document!==entry.document)throw this.failure('verification_document_changed');
+          const page=await this.verificationProbe(slot);
+          if(!await valid())throw Error('cancelled');await this.assertKey(key);
+          if(page?.platform!=='xiaohongshu'||page.status!=='authenticated'||page.verification!=='rendered_account_navigation'||typeof page.principal_id!=='string'||!/^[a-f0-9]{24}$/i.test(page.principal_id))throw this.failure('login_page_unavailable');
+          if(await acceptVerification(page)!==true)throw Error('platform_identity_changed');
+          if(!await valid())throw Error('cancelled');await this.assertKey(key);
+          continue;
+        }
         const proof=(await this.probe(entry.tab,'ownership')).response;
         if(!proof?.document)throw this.failure('login_page_unavailable');
         if(proof.document===entry.document&&proof.token===entry.token)continue;

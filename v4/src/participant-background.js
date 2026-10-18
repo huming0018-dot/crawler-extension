@@ -140,7 +140,14 @@ async function requireParticipant(){
 const tickAgent=agent.tick.bind(agent),startAgent=agent.start.bind(agent),stopAgent=agent.stop.bind(agent);
 const platformHealth=new CrowdPlatformHealth({storage,owner:runtime.owner,now:Date.now,probe:probePlatformSessions});
 const participantSession=new CrowdParticipantSession({storage,owner:runtime.owner,now:Date.now,health:platformHealth,agent,
-  start:startAgent,stop:stopAgent,bootstrap:(valid,retry,stopped)=>agent.bootstrapLoginPage(valid,retry,stopped),rebind:valid=>workTabs.rebindAfterLogin(valid),reconcile:valid=>agent.reconcileCompletedTask(valid),supplement:valid=>agent.checkAcceptanceSupplement(valid),recoverPage:(valid,options)=>agent.recoverLoginPage(valid,options),verificationCurrent:slot=>workTabs.verificationCurrent(slot),verificationNeeded:()=>workTabs.recoveryNeeded(),indicate:indicatePlatformSession});
+  start:startAgent,stop:stopAgent,bootstrap:(valid,retry,stopped)=>agent.bootstrapLoginPage(valid,retry,stopped),rebind:valid=>workTabs.rebindAfterLogin(valid,async page=>{
+    const owner=await runtime.owner(),expected=(await platformHealth.read()).xiaohongshu?.expected_ref;
+    if(!owner||!/^[a-f0-9]{64}$/.test(expected||''))return false;
+    const normalized=await normalizeSessionPage(page,owner);
+    if(owner!==await runtime.owner())return false;
+    const current=(await platformHealth.read()).xiaohongshu?.expected_ref;
+    return normalized.status==='authenticated'&&normalized.principal_ref===expected&&current===expected&&owner===await runtime.owner();
+  }),reconcile:valid=>agent.reconcileCompletedTask(valid),supplement:valid=>agent.checkAcceptanceSupplement(valid),recoverPage:(valid,options)=>agent.recoverLoginPage(valid,options),verificationCurrent:slot=>workTabs.verificationCurrent(slot),verificationNeeded:()=>workTabs.recoveryNeeded(),indicate:indicatePlatformSession});
 // Direct controller stops cancel persisted intent before any pending recovery can start.
 agent.stop=async(reason='user_stopped',options={})=>{await participantSession.intent(false);return stopAgent(reason,options);};
 agent.tick=async(...args)=>{
