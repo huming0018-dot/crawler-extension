@@ -253,13 +253,27 @@
     page.record.extra.body_observation = {status:page.record.evidence.text ? 'rendered_stable' : 'empty_body',loading:false,collapsed:false};
     return page;
   }
+  function findSearchScroller(){
+    if(!/^\/search_result\/?$/.test(location.pathname))return {box:null,card_count:0};
+    const cards=[...new Set(noteLinks().map(a=>a.closest('section.note-item, div.note-item')).filter(card=>card&&!card.closest('.comments-container, .comments-list, .comment-list, .comment-item, .note-detail, .note-container, #noteContainer, [role="dialog"]')))];
+    let box=null;
+    for(let node=cards[0]?.parentElement;node;node=node.parentElement){
+      if(visible(node)&&node.clientHeight>0&&node.scrollHeight>node.clientHeight+3&&/^(auto|scroll)$/.test(getComputedStyle(node).overflowY)&&cards.every(card=>node.contains(card))){box=node;break;}
+    }
+    return {box,card_count:cards.length};
+  }
+  function searchScrollGeometry(){
+    const {box,card_count}=findSearchScroller();
+    return {container_kind:box?'results_ancestor':'unavailable',card_count,top:box?box.scrollTop:null,height:box?box.scrollHeight:null,client:box?box.clientHeight:null};
+  }
   function probe(action, boundWork = false) {
     // Opt-in diagnostics use categories/counts, never page text or navigation tokens.
     if (action === 'diagnostics') return {ready: true, page: {
       kind: /^\/search_result\/?$/.test(location.pathname) ? 'search' : /^\/(explore|discovery\/item|search_result)\/[a-f0-9]{24}\/?$/i.test(location.pathname) ? 'note' : 'other',
       document: document.readyState, gate: gate(), links: Math.min(noteLinks().length, 500),
       body_chars: Math.min(text(noteBody()).length, 24000), visible: !document.hidden,
-      search_note_links: Math.min([...document.querySelectorAll('a[href*="/search_result/"]')].filter(visible).length, 500)
+      search_note_links: Math.min([...document.querySelectorAll('a[href*="/search_result/"]')].filter(visible).length, 500),
+      ...(/^\/search_result\/?$/.test(location.pathname)?{search_scroll:searchScrollGeometry()}:{})
     }};
     const blocked = gate(); if (blocked) return {ready: false, gate: blocked};
     if (action === 'note_ready') return readyNote();
@@ -297,6 +311,15 @@
       return {ready: true};
     }
     if (action === 'scroll') {
+      if(/^\/search_result\/?$/.test(location.pathname)){
+        const {box}=findSearchScroller();
+        if(!box)return {ready:false,reason:'content_unavailable'};
+        const before=box.scrollTop;
+        // Hidden tabs may suspend smooth animation before the loading threshold.
+        box.scrollBy({top:Math.round(box.clientHeight*C.between(35,65)/100),behavior:'instant'});
+        const moved=box.scrollTop>before,at_end=box.scrollTop+box.clientHeight>=box.scrollHeight-3;
+        return {ready:moved||at_end,...(!moved&&!at_end?{reason:'content_unavailable'}:{}),scroll:{target:'search_container',before,after:box.scrollTop,height:box.scrollHeight,client:box.clientHeight,moved,at_end}};
+      }
       const box = first('.note-scroller, .note-detail .scroll-container');
       (box || window).scrollBy({top: Math.round(innerHeight * C.between(35, 65) / 100), behavior: 'smooth'});
       return {ready: true};

@@ -997,7 +997,19 @@
             const g=s.acceptance_supplement,terms=s.task.anchor_terms;
             const brandBatch=!s.task.repair_only&&g?.schema==='crowd-acceptance-batch-v1'&&g.state==='admitted'&&g.task_id===19&&g.task_id===s.task.id&&Number.isSafeInteger(g.baseline_received)&&g.baseline_received>=0&&Number.isSafeInteger(g.extra_limit)&&g.extra_limit>=1&&g.extra_limit<=100&&g.target===g.baseline_received+g.extra_limit&&g.target===s.task.target&&g.remaining===s.task.target-s.task.received&&g.remaining>0&&Array.isArray(terms)&&terms.length===1&&typeof terms[0]==='string'&&this.searchQuery(s)===terms[0].normalize('NFC').trim();
             const expand=brandBatch?s.candidates.filter(url=>score(url)>0).length<needed&&s.search_round<31&&s.candidates.length<80&&Number.isFinite(s.page_deadline)&&now<s.page_deadline:s.search_round<3&&s.candidates.length<needed;
-            if (expand) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } this.assertTest(s);await this.r.probe('scroll'); alive(); s.next_at = now + (this.r.fastCapture===true?1000:C.between(30000, 45000, this.r.random)); }
+            if (expand) {
+              if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; }
+              this.assertTest(s);const scrolled=await this.r.probe('scroll');alive();
+              const motionFailed=scrolled?.scroll?.moved===false&&scrolled.scroll.at_end===false;
+              if(scrolled?.ready!==true||scrolled.gate||motionFailed)s.search_round--;
+              this.checkPage(scrolled||{ready:false,reason:'content_unavailable'},s,now);
+              if(motionFailed)throw Error('content_unavailable');
+              if(scrolled?.ready!==true){
+                if(!scrolled||typeof scrolled.ready!=='boolean'||scrolled.reason==='content_unavailable'||!Number.isFinite(s.page_deadline))throw Error('content_unavailable');
+                await this.save(s);await this.schedule(s,s.next_at);return;
+              }
+              s.next_at = now + (this.r.fastCapture===true?1000:C.between(30000, 45000, this.r.random));
+            }
             else { s.search_round = 0; s.phase = 'search_done'; s.next_at = now; s.wait_kind = null; }
           }
         } else if (s.phase === 'search_done') {
