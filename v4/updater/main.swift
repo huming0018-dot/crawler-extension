@@ -395,7 +395,7 @@ func proMessage(_ m:[String:Any],child:Bool=false) throws {
  guard let type=m["type"] as? String else{throw Failure("pro_invalid_message")}
  let extra:[String]
  let rpcErrors:Set<String>=["participant_scope_changed","participant_writer_busy","participant_stopped","participant_rpc_outcome_unknown","participant_protocol_invalid"]
- let stateErrors=rpcErrors.union(["participant_contract_refused","participant_installation_invalid","participant_existing_run","pro_not_ready"])
+ let stateErrors=rpcErrors.union(["participant_contract_refused","participant_installation_invalid","participant_existing_run","pro_not_ready","login_required"])
  let phases:Set<String>=["initial","local_status","scope","delivery","import","stage","finish","source","stopping"]
  switch type {
  case "pro_hello":try require(!child && proInteger(m["version"])==1,"pro_invalid_message");extra=["version"]

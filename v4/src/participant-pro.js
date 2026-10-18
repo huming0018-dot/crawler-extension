@@ -9,7 +9,7 @@
  const STATES=new Set(['ready','not_ready','running','complete','partial','finish_unknown','source_failed','source_unknown','delivery_unknown','source_launch_unknown','stopped','blocked','unknown','native_ready','launching']);
  const PHASES=new Set(['initial','local_status','scope','delivery','import','stage','finish','source','stopping']);
  const HELD=new Set(['running','launching','native_ready','finish_unknown','source_unknown','delivery_unknown','source_launch_unknown','unknown']);
- const ERRORS=new Set(['participant_scope_changed','participant_writer_busy','participant_stopped','participant_rpc_outcome_unknown','participant_protocol_invalid','participant_contract_refused','participant_installation_invalid','participant_existing_run','pro_not_ready','participant_dependencies_missing','participant_native_unavailable','participant_waiting_task','participant_recovery_required','consent_required','approval_required','backend_login_required','backend_permission_denied','daily_quota','test_completed']);
+ const ERRORS=new Set(['participant_scope_changed','participant_writer_busy','participant_stopped','participant_rpc_outcome_unknown','participant_protocol_invalid','participant_contract_refused','participant_installation_invalid','participant_existing_run','pro_not_ready','participant_dependencies_missing','participant_native_unavailable','participant_waiting_task','participant_recovery_required','consent_required','approval_required','backend_login_required','login_required','backend_permission_denied','daily_quota','test_completed']);
  const keys=(v,w)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===[...w].sort().join(',');
  const integer=v=>Number.isSafeInteger(v)&&v>=0;
  const bytes=v=>new TextEncoder().encode(JSON.stringify(v)).length;
@@ -172,4 +172,58 @@
  }
  ParticipantPro.validate=validate;ParticipantPro.bytes=bytes;ParticipantPro.LIMIT=LIMIT;
  root.CrowdParticipantPro=ParticipantPro;
+})(globalThis);
+
+/* Explicit local login help only. Pro self/principal validation still owns authorization. */
+(function(root){
+ 'use strict';
+ const HOME='https://www.xiaohongshu.com/';
+ const need=(ok,code='participant_stopped')=>{if(!ok)throw Error(code);};
+ const platform=value=>{try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&!u.port&&['www.xiaohongshu.com','m.xiaohongshu.com'].includes(u.hostname);}catch(_){return false;}};
+ const home=value=>{try{const u=new URL(value);return platform(value)&&!u.search&&!u.hash&&['/','/explore'].includes(u.pathname);}catch(_){return false;}};
+ class ProManualLogin {
+  constructor(r){this.r=r;this.active=null;}
+  async open(){
+   need(!this.active,'participant_writer_busy');const job=this.run();this.active=job;
+   try{return await job;}catch(error){const code=error?.message;throw Error(['participant_stopped','participant_writer_busy','participant_scope_changed','identity_verification_required','participant_login_page_pending','participant_login_creation_unknown','participant_login_browser_required','participant_login_page_changed'].includes(code)?code:'participant_login_help_unknown');}finally{if(this.active===job)this.active=null;}
+  }
+  async run(){
+   const r=this.r,s=await r.scope(),key='pro-manual-login:'+s.subject;
+   const check=async()=>{const n=await r.scope();need(Object.keys(s).every(k=>n[k]===s[k]));};
+   need(/^[a-f0-9]{64}$/.test(s.expected_ref||''),'identity_verification_required');
+   let old=await r.storage.get(key);await check();
+   if(old)need(old.schema==='crowd-pro-manual-login-v1'&&old.installation_id===s.installation_id&&typeof old.intent==='string'&&Number.isSafeInteger(old.generation)&&['creating','opened'].includes(old.stage)&&(old.stage==='creating'?old.tab_id===null:Number.isSafeInteger(old.tab_id)),'participant_scope_changed');
+   const tabs=await r.chrome.tabs.query({});await check();
+   const candidates=tabs.filter(t=>!t.incognito&&(platform(t.url)||platform(t.pendingUrl)));
+   need(!candidates.some(t=>t.pendingUrl),'participant_login_page_pending');
+   const windows=await r.chrome.windows.getAll({populate:false});await check();
+   const normal=new Map(windows.filter(w=>w.type==='normal'&&w.incognito===false).map(w=>[w.id,w]));
+   const eligible=candidates.filter(t=>normal.has(t.windowId));
+   eligible.sort((a,b)=>(b.id===old?.tab_id)-(a.id===old?.tab_id)||Number(home(b.url))-Number(home(a.url))||(b.lastAccessed||0)-(a.lastAccessed||0)||a.id-b.id);
+   let tab=eligible[0],created=false;
+   if(!tab){
+    // An unresolved creation belongs to this helper; never issue it again.
+    need(!old||old.stage!=='creating','participant_login_creation_unknown');
+    const window=[...normal.values()].sort((a,b)=>Number(b.focused)-Number(a.focused)||a.id-b.id)[0];
+    need(window,'participant_login_browser_required');
+    const intent={schema:'crowd-pro-manual-login-v1',intent:r.uuid(),installation_id:s.installation_id,generation:s.generation,stage:'creating',tab_id:null};
+    await r.storage.set(key,intent);await check();
+    // This is a manual tab, unrelated to old WorkTabs/verification metadata.
+    try{tab=await r.chrome.tabs.create({windowId:window.id,url:HOME,active:true});}
+    catch(_){throw Error('participant_login_creation_unknown');}
+    created=true;await check();need(Number.isSafeInteger(tab?.id)&&tab.windowId===window.id&&!tab.incognito&&platform(tab.pendingUrl||tab.url),'participant_login_creation_unknown');
+    old={...intent,stage:'opened',tab_id:tab.id};await r.storage.set(key,old);await check();
+   }
+   if(!created&&(!old||old.stage!=='creating')){await r.storage.set(key,{schema:'crowd-pro-manual-login-v1',intent:old?.intent||r.uuid(),installation_id:s.installation_id,generation:s.generation,stage:'opened',tab_id:tab.id});await check();}
+   // Re-read the selected tab/window before each explicit presentation action.
+   const fresh=await r.chrome.tabs.get(tab.id);await check();
+   need(fresh.windowId===tab.windowId&&!fresh.incognito&&(!fresh.pendingUrl||created&&fresh.pendingUrl===HOME)&&platform(fresh.pendingUrl||fresh.url),'participant_login_page_changed');
+   const window=await r.chrome.windows.get(fresh.windowId);await check();
+   need(window.type==='normal'&&window.incognito===false,'participant_login_page_changed');
+   await r.chrome.tabs.update(fresh.id,{active:true});await check();
+   await r.chrome.windows.update(window.id,{state:'normal',focused:true});await check();
+   return {opened:true,reused:!created,login_verified:false};
+  }
+ }
+ root.CrowdProManualLogin=ProManualLogin;
 })(globalThis);

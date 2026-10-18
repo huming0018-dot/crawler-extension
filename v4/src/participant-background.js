@@ -311,6 +311,15 @@ const proParticipant=new CrowdParticipantPro({storage,owner:runtime.owner,uuid:(
     return {...scope,matched:/^[a-f0-9]{64}$/.test(current||'')&&expected===current&&ref===current};
   },event:async(step,fields)=>{await nodeMonitor.event(step,fields);queueNodeFlush();}
 });
+const proManualLogin=new CrowdProManualLogin({chrome,storage,uuid:()=>crypto.randomUUID(),scope:async()=>{
+  const owner=await runtime.owner(),session=await storage.get('session'),node=await storage.get('node-monitor:'+owner);
+  if(!owner||session?.user?.id!==owner||!node?.installation_id||agent.generationOwner!==owner||!Number.isSafeInteger(agent.generation)||owner!==await runtime.owner())throw Error('participant_scope_changed');
+  const generation=agent.generation,stopIntent=agent.stopIntent||0,revision=proParticipant.revision;
+  const expected=(await platformHealth.read()).xiaohongshu?.expected_ref,p=await proParticipant.read(owner),s=await storage.get('agent')||{};
+  if(agent.generationOwner!==owner||agent.generation!==generation||(agent.stopIntent||0)!==stopIntent||proParticipant.revision!==revision)throw Error('participant_stopped');
+  if(pendingCommands!==1||agent.active||agent.stopping||agent.stopActive||agent.pendingStop||agent.maintenance||agent.poolJobs?.size||participantSession.active||platformHealth.active||proParticipant.starting||proParticipant.inflight||agent.recoveryUnsafe(s)||s.enrichment||s.new_navigation||s.challenge||s.repair_intent||p?.pending||['running','launching','native_ready','source_unknown','delivery_unknown','source_launch_unknown','finish_unknown','unknown'].includes(p?.state))throw Error('participant_writer_busy');
+  return {subject:owner,installation_id:node.installation_id,generation:agent.generation,stop_intent:agent.stopIntent||0,revision:proParticipant.revision,expected_ref:expected};
+}});
 // Manual login help remains available; automatic checks never open a DOM work page.
 participantSession.start=()=>proParticipant.requestStart();
 participantSession.check=()=>proParticipant.poll();
@@ -545,26 +554,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         await api.logout(); await repairDiagnostics(); return {};
       }
       case 'export': { const s = await agent.read(); return {outbox: s.outbox, rejected: s.rejected}; }
-      case 'open_login': {
-        await agent.stop('user_login',{keepPage:true,drain:true});
-        if((await platformHealth.read()).xiaohongshu?.expected_ref)return participantSession.openLogin();
-        // Keep the actual challenge/note page. Opening help is a user action,
-        // not evidence that either platform or backend authentication failed.
-        const held=await participantSession.status();
-        if(!held.pending)await agent.stop('user_login', {keepPage:true,drain:true});
-        const id = await workingTab() || await storage.get('work_tab');
-        if (id) {
-          try {
-            const tab = await chrome.tabs.get(id), url = new URL(tab.pendingUrl || tab.url);
-            if (url.protocol === 'https:' && !url.username && !url.password && !url.port && ['www.xiaohongshu.com','m.xiaohongshu.com'].includes(url.hostname)) {
-              await chrome.tabs.update(id, {active: true});
-              await chrome.windows.update(tab.windowId, {focused: true}); return {};
-            }
-          } catch (_) {}
-        }
-        const tab = await chrome.tabs.create({url: CrowdCore.HOST, active: true});
-        await storage.set('work_tab', tab.id); return {};
-      }
+      case 'open_login': return proManualLogin.open();
       default: throw new Error('unknown_command');
     }
   })();
