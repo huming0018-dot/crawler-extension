@@ -158,7 +158,7 @@
         await this.save(s);return false;
       })().finally(()=>{this.active=null;});return this.active;
     }
-    async recoverLoginPage(valid,{manual=false,confirm=false}={}) {
+    async recoverLoginPage(valid,{manual=false,confirm=false,focus=manual}={}) {
       await this.initializeGeneration();if(this.active||this.stopping||this.maintenance)throw Error('executor_busy');
       const generation=this.generation,stopIntent=this.stopIntent||0,owner=this.generationOwner;
       const check=async()=>{if(generation!==this.generation||stopIntent!==(this.stopIntent||0)||owner!==(await this.r.owner?.()||'standalone')||!await valid())throw Error('cancelled');};
@@ -193,7 +193,7 @@
         }
         if(m){
           if(m.expected_ref!==expected)throw Error('platform_identity_changed');
-          if(['opened','confirmed'].includes(m.stage)){if(manual)await this.r.focusVerification?.(m.slot);return {opened:true,confirmed:m.stage==='confirmed',manual:m.manual};}
+          if(['opened','confirmed'].includes(m.stage)){if(manual&&focus===true)await this.r.focusVerification?.(m.slot);return {opened:true,confirmed:m.stage==='confirmed',manual:m.manual};}
           if(['claiming','admitting','opening'].includes(m.stage))throw Error('verification_page_unknown');
           if(m.stage==='blocked')throw Error(m.reason||'verification_page_unknown');
           if(m.retry_at>this.r.now())return {waiting:true,reason:m.reason,retry_at:m.retry_at};
@@ -228,7 +228,7 @@
         }
         if(!manual)this.searchQuery(s,s.task,true);
         m.stage='opening';delete m.reason;delete m.retry_at;await this.save(s);await check();
-        await this.r.openVerification(manual?C.HOST+'/':C.taskPlatform(s.task).searchURL(this.searchQuery(s)),m.slot,manual,valid);await check();
+        await this.r.openVerification(manual?C.HOST+'/':C.taskPlatform(s.task).searchURL(this.searchQuery(s)),m.slot,manual,valid,focus);await check();
         m.stage='opened';m.opened_at=this.r.now();await this.save(s);return {opened:true,manual};
       })().finally(()=>{this.active=null;});return this.active;
     }
@@ -310,7 +310,7 @@
         !s.outbox.length && !s.work_slots?.length && !s.enrichment && ['search','detail','comment'].every(key=>value.counts[key]<value.caps[key]);
       const clearedLocalBudget=action==='control'&&batch&&!this.recoveryUnsafe(s)&&s.wait_kind==='budget'&&s.last_error==null&&(['idle','search_done'].includes(s.phase)||this.admittedBatchNote(s))&&!s.pending_risk&&value.allowed===true&&value.reason===null&&!value.paused&&Number.isSafeInteger(s.task.daily_detail_cap)&&s.task.daily_detail_cap<=200&&value.caps.detail<=s.task.daily_detail_cap&&(value.caps.detail>s.visits||this.admittedBatchNote(s)&&value.caps.detail===s.visits)&&(value.counts.detail<value.caps.detail||this.admittedBatchNote(s)&&value.counts.detail===value.caps.detail);
       if(clearedLocalBudget){s.next_at=this.r.now();s.wait_kind=null;}
-      const raisedScrollBudget=action==='control'&&scopedScroll&&s.phase==='search'&&s.last_error==='action_budget'&&s.wait_kind==='action'&&!this.recoveryUnsafe(s)&&s.control_task===requestTask&&Number.isInteger(s.control?.caps?.scroll)&&Number.isInteger(s.control?.counts?.scroll)&&s.control.counts.scroll>=s.control.caps.scroll&&value.caps.scroll>s.control.caps.scroll&&value.caps.scroll<=s.task.daily_detail_cap&&value.counts.scroll<value.caps.scroll&&value.allowed===true&&!value.paused&&value.reason===null;
+      const raisedScrollBudget=action==='control'&&scopedScroll&&s.phase==='search'&&(s.last_error==='action_budget'||(s.last_error==='pool_recovery_required'&&s.pool_failure==='entry_state'&&s.enabled===false&&Array.isArray(s.outbox)&&s.outbox.length===0&&!s.work_slots?.length&&s.enrichment==null&&s.navigation_stage==null))&&s.wait_kind==='action'&&!this.recoveryUnsafe(s)&&s.control_task===requestTask&&Number.isInteger(s.control?.caps?.scroll)&&Number.isInteger(s.control?.counts?.scroll)&&s.control.counts.scroll>=s.control.caps.scroll&&value.caps.scroll>s.control.caps.scroll&&value.caps.scroll<=s.task.daily_detail_cap&&value.counts.scroll<value.caps.scroll&&value.allowed===true&&!value.paused&&value.reason===null;
       const raisedDetailBudget=action==='control'&&batch&&s.phase==='search_done'&&s.last_error==='action_budget'&&s.wait_kind==='action'&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isInteger(s.control?.caps?.detail)&&value.caps.detail>s.control.caps.detail&&value.counts.detail<value.caps.detail&&value.allowed===true;
       // A current server-clear retires a stale lab action wait; source risk waits remain.
       if((this.r.localTest === true || raisedDetailBudget || raisedScrollBudget || ['action_gap','session_rest','global_pause'].includes(s.last_error)) && (s.wait_kind === 'action' || idleRepair) && !s.pending_risk && !['captcha','rate_limit'].includes(s.last_error) && value.reason === null && !value.paused) {

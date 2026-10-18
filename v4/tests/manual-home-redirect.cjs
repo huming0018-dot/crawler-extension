@@ -5,7 +5,7 @@ const core=process.argv[3]||path.join(__dirname,'../src/core.js');
 vm.runInThisContext(fs.readFileSync(core,'utf8'));vm.runInThisContext(fs.readFileSync(source,'utf8'));
 async function fixture(url){
  let marker={},data={},sequence=0,reads=0,created=0,binds=0;
- const chrome={storage:{session:{get:async k=>({[k]:marker[k]}),set:async v=>Object.assign(marker,v)}},windows:{create:async()=>{created++;return {tabs:[{id:8}]};}},tabs:{get:async()=>{reads++;return {id:8,url,status:'complete'};},sendMessage:async(_,m)=>{if(m.type==='crowd_session_probe')return {platform:'xiaohongshu',status:'authenticated',principal_id:'a'.repeat(24)};assert.equal(m.type,'crowd_bind');binds++;return {document:'current-document'};}}};
+ const chrome={storage:{session:{get:async k=>({[k]:marker[k]}),set:async v=>Object.assign(marker,v)}},windows:{create:async()=>{created++;return {id:9,tabs:[{id:8,windowId:9}]};},get:async()=>({id:9,type:'normal',state:'minimized',tabs:[{id:8,windowId:9,url:CrowdCore.HOST+'/'}]})},tabs:{get:async()=>{reads++;return {id:8,url,status:'complete'};},sendMessage:async(_,m)=>{if(m.type==='crowd_session_probe')return {platform:'xiaohongshu',status:'authenticated',principal_id:'a'.repeat(24)};assert.equal(m.type,'crowd_bind');binds++;return {document:'current-document'};}}};
  const storage={get:async k=>structuredClone(data[k]),set:async(k,v)=>{data[k]=structuredClone(v);}};
  const make=()=>new CrowdWorkTabs({chrome,storage,owner:async()=>'original-owner',uuid:()=>`random-${++sequence}`,probe:async()=>({response:{token:null,document:'current-document'}})});
  const tabs=make();await tabs.open(CrowdCore.HOST+'/','verify-original',{verificationHome:true});

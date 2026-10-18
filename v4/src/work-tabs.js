@@ -78,7 +78,7 @@
         entry={...entry,tab:Number.isSafeInteger(tab?.id)?tab.id:null,created_window:Number.isSafeInteger(window.id)?window.id:null};
         // Save the known creation outcome before visibility confirmation can fail.
         await this.write(entries=>{if(entries[slot]?.token!==entry.token)throw Error('cancelled');entries[slot]=entry;},key);
-        if(!home){
+        {
           const createdWindow=async()=>{
             await this.assertKey(key);
             const current=(await this.entries())[slot],marker=(await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session;

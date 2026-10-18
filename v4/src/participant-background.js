@@ -69,7 +69,7 @@ const runtime = {
   expectedPrincipal:async()=>(await platformHealth.read()).xiaohongshu?.expected_ref,
   verificationCurrent:slot=>workTabs.verificationCurrent(slot),
   async verifyPage(slot){const owner=await runtime.owner(),expected=(await platformHealth.read()).xiaohongshu?.expected_ref;const page=await workTabs.verificationProbe(slot,async value=>{const p=await normalizeSessionPage(value,owner);return p.status==='authenticated'&&p.principal_ref===expected;});return normalizeSessionPage(page,owner);},
-  async openVerification(url,slot,manual,valid){if(!await valid())throw Error('cancelled');await workTabs.open(url,slot,{verificationHome:manual});if(!await valid())throw Error('cancelled');if(manual)await workTabs.focusVerification(slot);},
+  async openVerification(url,slot,manual,valid,focus=manual){if(!await valid())throw Error('cancelled');await workTabs.open(url,slot,{verificationHome:manual});if(!await valid())throw Error('cancelled');if(manual&&focus===true)await workTabs.focusVerification(slot);},
   adoptVerification:(slot,valid)=>workTabs.adoptVerification(slot,valid),
   focusVerification:slot=>workTabs.focusVerification(slot),
   trace:(stage,options)=>trace.event(stage,options),
