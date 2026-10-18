@@ -42,7 +42,8 @@
    requireValue(!this.port,'participant_writer_busy');this.binding={...saved};this.seen.clear();
    const port=this.r.connect();this.port=port;
    const ready=new Promise((resolve,reject)=>{this.ready={resolve,reject};});
-   port.onMessage.addListener(v=>this.message(v,port).catch(()=>this.fail('participant_protocol_invalid',port)));
+   let messages=Promise.resolve();
+   port.onMessage.addListener(v=>{const revision=this.revision;const operation=messages.then(()=>this.message(v,port,revision));messages=operation.catch(error=>this.fail(ERRORS.has(error?.message)?error.message:'participant_protocol_invalid',port));});
    port.onDisconnect.addListener(()=>{void this.fail('participant_rpc_outcome_unknown',port);});
    this.post(this.frame('pro_hello',{version:1}));
    let timer;try{return await Promise.race([ready,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('participant_native_unavailable')),10000);})]);}
@@ -54,8 +55,8 @@
    if(!b)return;const p=await this.read(b.subject);
    if(p?.session===b.session&&p.desired_running)await this.save(b.subject,{state:p.intent?'unknown':'not_ready',error,pending:p.pending||0});
   }
-  async message(raw,port){
-   if(port!==this.port)return;const v=validate(raw),b=this.binding;
+  async message(raw,port,revision=this.revision){
+   if(port!==this.port||revision!==this.revision)return;const v=validate(raw),b=this.binding;
    requireValue(v.session===b.session&&v.epoch===b.epoch&&!this.seen.has(v.id)&&this.seen.size<4096);
    this.seen.add(v.id);
    if(v.type==='rpc_request'){
@@ -66,26 +67,28 @@
    }
    if(v.state==='ready'&&this.ready){this.ready.resolve();return;}
    if(v.state==='not_ready'&&this.ready){this.ready.reject(Error(v.error||'participant_dependencies_missing'));return;}
-   const stopped=await this.read(b.subject);
+   const stopped=await this.read(b.subject);if(revision!==this.revision)return;
    if(v.state==='stopped'&&stopped?.session===b.session&&stopped.desired_running===false){
     const scope=await this.r.identity();requireValue(scope.subject===b.subject&&scope.installation_id===b.installation_id,'participant_scope_changed');
-    await this.save(b.subject,{state:v.pending?'delivery_unknown':'stopped',phase:v.phase,run_id:v.run_id,pending:v.pending,error:v.pending?'participant_rpc_outcome_unknown':'participant_stopped'});
+    if(revision!==this.revision)return;
+    await this.save(b.subject,{state:v.pending?'delivery_unknown':'stopped',phase:v.phase,run_id:v.run_id,pending:v.pending,error:v.pending?'participant_rpc_outcome_unknown':'participant_stopped'},revision);
     if(!v.pending&&!this.inflight)this.closeClean();return;
    }
-   await this.check(b);const p=await this.read(b.subject);
+   await this.check(b);const p=await this.read(b.subject);if(revision!==this.revision)return;
    requireValue(p?.session===b.session&&p.intent,'participant_scope_changed');
+   if(!p.desired_running)return;
    if(v.state==='complete'){
     this.inflight++;let lock,clean=false;
     try{
      lock=this.r.acquire();
-     const fresh=await this.r.rpc('pro_status',{p_task:p.task_id,p_installation_id:b.installation_id});await this.check(b,lock);
+     const fresh=await this.r.rpc('pro_status',{p_task:p.task_id,p_installation_id:b.installation_id});await this.check(b,lock);if(revision!==this.revision)return;
      const t=fresh?.task;
      requireValue(t?.id===p.task_id&&t.source_executor==='mediacrawler_pro'&&integer(t.received)&&integer(t.target)&&t.target>0&&t.received===t.target&&t.status==='complete','participant_receipt_invalid');
-     await this.save(b.subject,{state:'complete',phase:v.phase,run_id:v.run_id,desired_running:false,pending:0,received:t.received,target:t.target,error:null});
+     if(!await this.save(b.subject,{state:'complete',phase:v.phase,run_id:v.run_id,desired_running:false,pending:0,received:t.received,target:t.target,error:null},revision)||revision!==this.revision)return;
      await this.r.intent(false);clean=true;await this.r.event('stop',{status:'completed',counts:{received:t.received,queued:0}});
     }finally{this.r.release(lock);this.inflight--;if(clean&&!this.inflight)this.closeClean();}
    }else{
-    await this.save(b.subject,{state:v.state,phase:v.phase,run_id:v.run_id,received:v.received,target:v.target,pending:v.pending,error:v.error});
+    if(!await this.save(b.subject,{state:v.state,phase:v.phase,run_id:v.run_id,received:v.received,target:v.target,pending:v.pending,error:v.error},revision)||revision!==this.revision)return;
     await this.r.event(v.phase==='delivery'?'outbox':'session',{status:v.state==='running'?'started':'waiting',error_code:v.error||null,counts:{queued:v.pending,...(v.received===null?{}:{received:v.received})}});
    }
   }
@@ -161,7 +164,21 @@
    const owner=await this.r.owner(),p=await this.read(owner);
    if(!p)return;await this.save(owner,{desired_running:false,state:HELD.has(p.state)?'source_unknown':'stopped',error:'participant_stopped'});
    // Revocation can stop its own old epoch after Agent invalidation; never authorize RPC.
-   if(this.port&&this.binding?.subject===owner)this.post(this.frame('pro_stop',{run_id:p.run_id||null}));
+   if(this.port&&this.binding?.subject===owner){this.post(this.frame('pro_stop',{run_id:p.run_id||null}));return;}
+   if(!HELD.has(p.state)||!UUID.test(p.run_id||'')||!UUID.test(p.session||'')||!integer(p.generation))return;
+   const revision=this.revision,saved={subject:owner,installation_id:p.installation_id,session:p.session,epoch:p.generation};
+   let stopPort=null,stopBinding=null;
+   try{
+    const identity=await this.r.identity();
+    requireValue(identity.subject===owner&&identity.installation_id===p.installation_id&&revision===this.revision,'participant_scope_changed');
+    requireValue(!this.port,'participant_writer_busy');
+    const connected=this.connect(saved);stopPort=this.port;stopBinding=this.binding;await connected;
+    const fresh=await this.read(owner),now=await this.r.identity();
+    requireValue(now.subject===owner&&now.installation_id===saved.installation_id&&revision===this.revision&&fresh?.session===p.session&&fresh.run_id===p.run_id&&fresh.desired_running===false&&this.port===stopPort&&this.binding===stopBinding&&this.binding?.session===saved.session&&this.binding?.epoch===saved.epoch,'participant_scope_changed');
+    this.post(this.frame('pro_stop',{run_id:p.run_id}));
+   }catch(error){
+    if(stopPort&&this.port===stopPort&&this.binding===stopBinding)this.closeClean();await this.save(owner,{error:ERRORS.has(error.message)?error.message:'participant_rpc_outcome_unknown'},revision);
+   }
   }
   async poll(){
    const p=await this.read();if(!p)return;
