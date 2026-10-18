@@ -218,9 +218,16 @@ const saveAgent=agent.save.bind(agent);
 let observedNodeState=null;
 agent.save=async (state,stopping=false)=>{
   await saveAgent(state,stopping);
-  const current={phase:state.phase,enabled:state.enabled===true,error:state.last_error||null,queued:state.outbox?.length||0,received:state.received||0};
+  const current={phase:state.phase,enabled:state.enabled===true,error:state.last_error||null,queued:state.outbox?.length||0,received:state.received||0,comments_requested:state.task?.comments_capture===true||state.task?.structured_capture===true};
   const previous=observedNodeState;observedNodeState=current;
-  if(previous?.phase!==current.phase)nodeMonitor.event(({search:'list',search_done:'list',note:'detail',reopen_note:'detail',enrich:'comments',idle:'session'})[current.phase]||'session',{status:'started'}).then(queueNodeFlush);
+  const diagnostic=state.control_diagnostic,observation=state.control_diagnostic_seq;
+  if(diagnostic&&Number.isSafeInteger(observation)&&observation>0){
+    const detail={schema:'crowd-control-diagnostic-v1',kind:diagnostic.kind,http_status:diagnostic.http_status,elapsed_ms:diagnostic.elapsed_ms,at_ms:diagnostic.at_ms};
+    if(Object.hasOwn(diagnostic,'cause'))detail.cause=diagnostic.cause;
+    const completed=['ok','terminal_response'].includes(detail.kind);
+    nodeMonitor.event(completed?'session':'stop',{status:completed?'completed':'waiting',error_code:completed?null:'control_unavailable',control_diagnostic:detail,control_observation_seq:observation,control_owner_id:state.owner_id}).then(queueNodeFlush);
+  }
+  if(previous?.phase!==current.phase)nodeMonitor.event(({search:'list',search_done:'list',note:'detail',reopen_note:'detail',enrich:'comments',idle:'session'})[current.phase]||'session',{status:current.phase==='enrich'?(current.comments_requested?'waiting':'skipped'):'started'}).then(queueNodeFlush);
   if(previous?.queued!==current.queued)nodeMonitor.event('outbox',{status:current.queued?'waiting':'completed',counts:{queued:current.queued,received:current.received}}).then(queueNodeFlush);
   if(current.error!==previous?.error && current.error)nodeMonitor.event(['login_required','backend_login_required','captcha','identity_verification_required','platform_identity_changed'].includes(current.error)?'session':'stop',
     {status:'waiting',error_code:current.error==='test_completed'?null:current.error}).then(queueNodeFlush);
@@ -229,12 +236,18 @@ agent.save=async (state,stopping=false)=>{
 api.rpc=async(name,params={},...rest)=>{
   const metrics=rest[1],clock=()=>performance.now(),elapsed=start=>Math.max(0,Math.round(clock()-start)),wrapperAt=metrics?clock():0,traceBefore=metrics?clock():0;
   const admission=name==='guard' && ['search','detail','comment','scroll'].includes(params.p_action);
+  const commentState=name==='guard'&&params.p_action==='comment'?await agent.read().catch(()=>null):null;
   const submit=['submit','observe','rating','comments_observe','structured_observe','batch_observe'].includes(name),options=submit?{id:params.p_request}:{};
   if(admission)await trace.event('admission_requested',{start:true});
   if(submit)await trace.event('submit_requested',options);
   if(metrics)metrics.trace_before_ms=elapsed(traceBefore);
   try {const result=name==='claim'?await nodeMonitor.claim(params.p_task||null,...rest):await originalRPC(name,params,...rest);const traceAfter=metrics?clock():0;
     if(admission)await trace.event(result.allowed?'admission_allowed':'admission_denied');
+    // This is an admitted dedicated comment action, not incidental DOM or a phase transition.
+    if(commentState?.task&&commentState.task.id===params.p_task&&(commentState.task.comments_capture===true||commentState.task.structured_capture===true)
+      &&result.allowed===true&&result.paused===false&&result.reason===null&&!result.error&&!rest[0]?.aborted&&!agent.stopping&&!agent.maintenance&&!commentState.pending_risk){
+      try{if(commentState.owner_id===await runtime.owner())nodeMonitor.event('comments',{status:'started'}).then(queueNodeFlush);}catch(_){}
+    }
     if(submit)await trace.event(result.error||result.gate==='rejected'?'submit_rejected':'submit_accepted',options);
     if(metrics)metrics.trace_after_ms=elapsed(traceAfter);return result;
   }catch(e){if(submit)await trace.event('submit_failed',options);throw e;}finally{if(metrics)metrics.wrapper_ms=elapsed(wrapperAt);}

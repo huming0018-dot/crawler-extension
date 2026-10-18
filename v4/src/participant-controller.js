@@ -121,6 +121,34 @@ async function refresh() {
   $('status').replaceChildren();
   if(!s.enabled&&s.last_error==='rate_limit'&&data.recovery?.gate==='waiting'){fields['最早下一步']=data.recovery.reason==='attempt_active'?'正在自动检查恢复状态':data.recovery.wait_ms>0?new Date(Date.now()+data.recovery.wait_ms).toLocaleString('zh-CN')+' 后自动检查一次':'等待自动恢复检查';fields['最近提示']='限流期间停止采集；确认恢复后自动继续本批，完成后自动停止。';}
   fields['后台回传'] = s.delivery_error ? (errors[s.delivery_error] || s.delivery_error) : s.outbox.length && (s.enabled || s.delivery_enabled) ? '已有记录会继续回传' : '无待发送记录或已停止回传';
+  // Database progress is authoritative; a local parked pilot is not a completed database task.
+  if(data.session&&!data.legacy_installation){
+    const tasks=Array.isArray(data.progress?.tasks)?data.progress.tasks:null,grant=p.acceptance_supplement;
+    const selected=Number.isSafeInteger(grant?.task_id)?grant.task_id:Number.isSafeInteger(s.task?.id)?s.task.id:null;
+    const task=tasks&&(selected!==null?tasks.find(t=>t.id===selected):tasks.length===1?tasks[0]:null);
+    const validTask=task&&Number.isSafeInteger(task.received)&&task.received>=0&&Number.isSafeInteger(task.target)&&task.target>0&&['open','leased','complete','exhausted','closed'].includes(task.status);
+    if(!p.error&&validTask){
+      const remaining=Math.max(0,task.target-task.received),complete=remaining===0&&task.status==='complete',parked=!s.enabled||s.pilot_waiting===true&&s.last_error==='test_completed'&&s.outbox.length===0;
+      fields['数据库任务进度']=task.received+' / '+task.target;fields['本轮尚欠']=String(remaining);
+      fields['中央任务状态']=({open:'待领取或接续',leased:'已领取',complete:'已结束',exhausted:'未达目标已结束',closed:'已关闭'})[task.status];
+      fields['任务']=task.query||'原任务';
+      if(complete){
+        fields['当前阶段']='中央已收齐本轮正文';fields['最早下一步']=parked?'终端已停止来源采集，无需重复采集':'中央已收齐；终端停止状态待确认';
+        fields['最近提示']='数据库已入库 '+task.received+' 条；核验与奖励分别统计。';
+        $('welcome').textContent='中央已收到 '+task.received+'/'+task.target+' 条正文；'+(parked?'终端已停止来源采集。':'终端停止状态待确认。');
+      }else if(pilotWaiting||remaining>0){
+        const expired=grant&&typeof grant.expires_at==='string'&&Number.isFinite(Date.parse(grant.expires_at))&&Date.parse(grant.expires_at)<=Date.now();
+        fields['当前阶段']=remaining?'中央尚欠 '+remaining+' 条正文':'中央结束状态待确认';
+        fields['最早下一步']=s.last_error==='user_stopped'?'本人已停止，不会自动继续；已有进度保留':expired?'本轮许可已到期，等待原任务恢复；已有进度保留':s.last_error&&s.last_error!=='test_completed'?'等待终端处理当前阻断；已有进度保留':s.enabled&&Number.isSafeInteger(grant?.remaining)&&grant.remaining>0?'终端按原任务自动接续':s.enabled?'等待原任务许可或调度反馈':'终端已停止；不会因刷新状态开始采集';
+        fields['最近提示']=s.last_error&&s.last_error!=='test_completed'?(errors[s.last_error]||s.last_error):'以数据库实际入库为准，尚未宣告本轮完成。';
+        $('welcome').textContent='中央已收到 '+task.received+'/'+task.target+' 条正文，尚欠 '+remaining+' 条。';
+      }
+    }else if(p.error||tasks===null||selected!==null||pilotWaiting){
+      fields['数据库任务进度']=p.error||tasks===null?'暂时不可查':'本次未返回原任务';
+      fields['当前阶段']='数据库反馈待确认';fields['最早下一步']='保留原任务和进度，等待数据库状态恢复';
+      $('welcome').textContent='数据库任务状态尚未确认；不会据本机旧计数宣告完成。';
+    }
+  }
   const coverage=s.comment_coverage?.filter(item=>item.visible_complete && !item.complete);
   if(coverage?.length)fields['评论覆盖'] = coverage.map(item=>'当前可见 '+item.captured+' 条已采尽；页面声明 '+item.reported+' 条，差额 '+item.count_gap+' 条原因未确认。').join('\n');
   for (const [name, value] of Object.entries(fields)) { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = String(value); $('status').append(dt, dd); }

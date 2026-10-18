@@ -23,6 +23,18 @@
    return 'unknown';
   }
 
+  static controlDiagnostic(value,at){
+   if(!value||typeof value!=='object'||Array.isArray(value))return null;
+   const required=['schema','kind','http_status','elapsed_ms','at_ms'],keys=Object.keys(value);
+   const kinds=['timeout','cancelled','network_unknown','http_4xx','http_5xx','invalid_json','backend_error','policy_schema_invalid','policy_version_regression','response_slow','clock_regression','local_gate_failure','ok','terminal_response'];
+   const integer=(v,lo,hi)=>Number.isSafeInteger(v)&&v>=lo&&v<=hi;
+   if(!required.every(k=>Object.hasOwn(value,k))||keys.some(k=>!required.includes(k)&&k!=='cause')||value.schema!=='crowd-control-diagnostic-v1'||!kinds.includes(value.kind))return null;
+   if(value.http_status!==null&&!integer(value.http_status,100,599)||value.elapsed_ms!==null&&!integer(value.elapsed_ms,0,300000)||value.at_ms!==null&&(!integer(value.at_ms,0,4102444800000)||value.at_ms>at))return null;
+   if(value.kind==='http_4xx'&&!integer(value.http_status,400,499)||value.kind==='http_5xx'&&!integer(value.http_status,500,599))return null;
+   if(Object.hasOwn(value,'cause')&&(value.kind!=='local_gate_failure'||!['cancelled','task_reconciliation_required','admission_rejected','local_unknown'].includes(value.cause)))return null;
+   const clean={schema:value.schema,kind:value.kind,http_status:value.http_status,elapsed_ms:value.elapsed_ms,at_ms:value.at_ms};if(Object.hasOwn(value,'cause'))clean.cause=value.cause;return clean;
+  }
+
   constructor({storage,api,settings,state=async()=>({enabled:false,login_state:'unknown'}),uuid,now=Date.now,version}){
    Object.assign(this,{storage,api,settings,state,uuid,now,version});this.queue=Promise.resolve();this.registered=null;this.registering=null;this.flushing=null;this.legacy=false;this.registrationError=null;
   }
@@ -88,9 +100,14 @@
    const captured=this.settings();
    return this.serial(async()=>{
     const s=await captured;if(!UUID.test(s.id||'')||!await this.same(s))return;
+    if(Object.hasOwn(fields,'control_diagnostic')&&fields.control_owner_id!==s.id)return;
     const value=await this.record(s);
-    if(!s.enabled){if(value.rows.length)await this.storage.set(this.key(s.id),{...value,rows:[]});return;}
     const at=Math.floor(this.now());if(!Number.isSafeInteger(at)||at<0||at>4102444800000)return;
+    const diagnostic=Object.hasOwn(fields,'control_diagnostic')?CrowdNodeMonitor.controlDiagnostic(fields.control_diagnostic,at):null;
+    const observation=fields.control_observation_seq;
+    if(Object.hasOwn(fields,'control_diagnostic')&&(!diagnostic||!['session','stop'].includes(step)||!Number.isSafeInteger(observation)||observation<1))return;
+    if(!s.enabled){if(value.rows.length||diagnostic&&observation>(value.control_observation_seq||0)){if(!await this.same(s))return;await this.storage.set(this.key(s.id),{...value,rows:[],...(diagnostic?{control_observation_seq:Math.max(value.control_observation_seq||0,observation)}:{})});}return;}
+    if(diagnostic&&observation<=(value.control_observation_seq||0))return;
     const row={event_id:this.uuid(),node_seq:value.seq+1,run_id:value.run_id||null,step,status:STATUS.has(fields.status)?fields.status:'completed',at_ms:at,duration_ms:null,error_code:null};
     // An in-flight task from an older build has no server run binding until its next claim.
     if(!row.run_id&&!['claim','session','stop','ota','telemetry_gap'].includes(row.step)){row.step='telemetry_gap';row.status='skipped';}
@@ -99,12 +116,13 @@
     if(fields.error_code)row.error_code=(ERRORS.has(fields.error_code)||(step==='ota'&&OTA_ERRORS.has(fields.error_code)))?fields.error_code:'unexpected_error';
     const counts={};for(const name of COUNTS)if(Number.isSafeInteger(fields.counts?.[name])&&fields.counts[name]>=0&&fields.counts[name]<=100000)counts[name]=fields.counts[name];
     if(Object.keys(counts).length)row.counts=counts;
+    if(diagnostic)row.control_diagnostic=diagnostic;
     let rows=[...value.rows,row],dropped=value.dropped||0;
     if(rows.length>1000){
      dropped+=value.rows.length-998;row.node_seq++;
      rows=[...value.rows.slice(-998),{event_id:this.uuid(),node_seq:value.seq+1,run_id:row.run_id,step:'telemetry_gap',status:'skipped',at_ms:at,duration_ms:null,error_code:null},row];
     }
-    if(!await this.same(s))return;await this.storage.set(this.key(s.id),{...value,seq:row.node_seq,rows,dropped});return true;
+    if(!await this.same(s))return;await this.storage.set(this.key(s.id),{...value,seq:row.node_seq,rows,dropped,...(diagnostic?{control_observation_seq:observation}:{})});return true;
    }).catch(()=>{});
   }
   async flush(signal){

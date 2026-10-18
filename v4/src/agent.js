@@ -45,17 +45,21 @@
       if (this.active) return;
       return this.tick();
     }
+    supplementTarget(g) {const target=g.schema==='crowd-acceptance-batch-v1'?g.target:g.baseline_received+g.extra_limit;if(!Number.isSafeInteger(target)||target<1||target>100100)throw Error('task_reconciliation_required');return target;}
     supplementGrant(value) {
-      const g=value?.acceptance_supplement,keys=['schema','id','task_id','installation_id','baseline_received','extra_limit','remaining','expires_at'];
-      const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
-      return g&&typeof g==='object'&&!Array.isArray(g)&&Object.keys(g).length===keys.length&&keys.every(k=>Object.hasOwn(g,k))&&g.schema==='crowd-acceptance-extra1-v1'&&uuid(g.id)&&[19,20].includes(g.task_id)&&uuid(g.installation_id)&&g.baseline_received===2&&g.extra_limit===1&&g.remaining===1&&typeof g.expires_at==='string'&&Number.isFinite(Date.parse(g.expires_at))&&Date.parse(g.expires_at)>this.r.now()?g:null;
+      const g=value?.acceptance_supplement,uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+      if(!g||typeof g!=='object'||Array.isArray(g)||!uuid(g.id)||!uuid(g.installation_id))return null;
+      const batch=g.schema==='crowd-acceptance-batch-v1',keys=['schema','id','task_id','installation_id','baseline_received','extra_limit','remaining',batch?'target':'expires_at'];
+      if(Object.keys(g).length!==keys.length||!keys.every(k=>Object.hasOwn(g,k)))return null;
+      if(batch)return g.task_id===19&&Number.isSafeInteger(g.baseline_received)&&g.baseline_received>=0&&g.baseline_received<=100000&&Number.isSafeInteger(g.extra_limit)&&g.extra_limit>=1&&g.extra_limit<=100&&g.target===g.baseline_received+g.extra_limit&&g.target<=100100&&Number.isSafeInteger(g.remaining)&&g.remaining>=1&&g.remaining<=g.extra_limit?g:null;
+      return g.schema==='crowd-acceptance-extra1-v1'&&[19,20].includes(g.task_id)&&g.baseline_received===2&&g.extra_limit===1&&g.remaining===1&&typeof g.expires_at==='string'&&Number.isFinite(Date.parse(g.expires_at))&&Date.parse(g.expires_at)>this.r.now()?g:null;
     }
     async acceptSupplement(s,value,alive) {
-      const g=this.supplementGrant(value);if(!g||value.pilot_phase!=='awaiting_acceptance'||value.reason!==null||value.allowed!==true||value.paused!==false||(!['test_completed','control_unavailable'].includes(s.last_error)||s.pilot_waiting!==true)||s.pilot_phase!=='awaiting_acceptance'||s.received!==2||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.id===g.id)return false;
+      const g=this.supplementGrant(value);if(!g||value.pilot_phase!=='awaiting_acceptance'||value.reason!==null||value.allowed!==true||value.paused!==false||(!['test_completed','control_unavailable'].includes(s.last_error)||s.pilot_waiting!==true)||s.pilot_phase!=='awaiting_acceptance'||s.received!==g.baseline_received||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.id===g.id&&s.acceptance_supplement?.schema===g.schema||s.acceptance_supplement?.state==='consumed'&&g.schema!=='crowd-acceptance-batch-v1')return false;
       const owner=await this.r.owner?.(),node=await this.r.storage.get('node-monitor:'+owner),expected=await this.r.expectedPrincipal?.();alive();
       if(!owner||owner!==s.owner_id||node?.installation_id!==g.installation_id||!/^[a-f0-9]{64}$/.test(expected||''))return false;
       const health=await this.r.sourceHealth?.('xiaohongshu');alive();
-      if(Date.parse(g.expires_at)<=this.r.now()||(await this.r.storage.get('node-monitor:'+owner))?.installation_id!==g.installation_id||owner!==await this.r.owner?.()||expected!==await this.r.expectedPrincipal?.()||health?.status!=='authenticated'||health.expected_ref!==expected||health.observed_ref!==expected||!Number.isSafeInteger(health.checked_at)||this.r.now()<health.checked_at||this.r.now()-health.checked_at>120000)return false;
+      if(g.schema!=='crowd-acceptance-batch-v1'&&Date.parse(g.expires_at)<=this.r.now()||(await this.r.storage.get('node-monitor:'+owner))?.installation_id!==g.installation_id||owner!==await this.r.owner?.()||expected!==await this.r.expectedPrincipal?.()||health?.status!=='authenticated'||health.expected_ref!==expected||health.observed_ref!==expected||!Number.isSafeInteger(health.checked_at)||this.r.now()<health.checked_at||this.r.now()-health.checked_at>120000)return false;
       if(!this.r.retireSupplementPage)return false;
       await this.r.retireSupplementPage(async()=>{alive();return owner===await this.r.owner?.()&&!this.stopping&&!this.maintenance;});alive();
       s.acceptance_supplement={...g,state:'admitted',baseline_history:[...s.history],admitted_at:this.r.now()};
@@ -67,7 +71,7 @@
       const alive=()=>{if(generation!==this.generation||stop!==(this.stopIntent||0))throw Error('cancelled');};
       this.active=(async()=>{
         const s=await this.read();if(!await valid())return false;
-        if(s.consent!==C.CONSENT||(!['test_completed','control_unavailable'].includes(s.last_error)||s.pilot_waiting!==true)||s.pilot_phase!=='awaiting_acceptance'||s.received!==2||s.task||this.recoveryUnsafe(s)||s.acceptance_supplement?.state==='consumed')return false;
+        if(s.consent!==C.CONSENT||(!['test_completed','control_unavailable'].includes(s.last_error)||s.pilot_waiting!==true)||s.pilot_phase!=='awaiting_acceptance'||!Number.isSafeInteger(s.received)||s.received<0||s.task||this.recoveryUnsafe(s))return false;
         if(Number.isFinite(s.supplement_checked_at)&&this.r.now()>=s.supplement_checked_at&&this.r.now()-s.supplement_checked_at<60000)return false;
         s.supplement_checked_at=this.r.now();await this.save(s);alive();
         try{await this.control(s,'control',alive);alive();if(!await valid())return false;await this.save(s);if(s.acceptance_supplement?.state==='admitted')await this.schedule(s,this.r.now()+1000);return s.acceptance_supplement?.state==='admitted';}
@@ -204,11 +208,12 @@
     }
     async control(s, action, alive, signal, note = null) {
       const before = this.r.now();
-      const checkingSupplement=action==='control'&&s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&s.received===2&&!s.task&&['test_completed','control_unavailable'].includes(s.last_error);
+      const checkingSupplement=action==='control'&&s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&Number.isSafeInteger(s.received)&&s.received>=0&&!s.task&&['test_completed','control_unavailable'].includes(s.last_error);
       const recordDiagnostic=(kind,status=null,success=false,cause=null)=>{
         const now=this.r.now(),delta=now-before;
         const diagnostic={kind,http_status:Number.isInteger(status)&&status>=100&&status<=599?status:null,elapsed_ms:Number.isFinite(delta)?Math.min(300000,Math.max(0,Math.round(delta))):null,at_ms:Number.isSafeInteger(now)&&now>=0&&now<=4102444800000?now:null};
         if(kind==='local_gate_failure')diagnostic.cause=['cancelled','task_reconciliation_required','admission_rejected'].includes(cause)?cause:'local_unknown';
+        s.control_diagnostic_seq=Math.min(Number.MAX_SAFE_INTEGER,(Number.isSafeInteger(s.control_diagnostic_seq)&&s.control_diagnostic_seq>=0?s.control_diagnostic_seq:0)+1);
         s.control_diagnostic=diagnostic;
         if(success)s.control_success_at=diagnostic.at_ms;else s.control_last_failure=diagnostic;
       };
@@ -726,7 +731,7 @@
           let task=claimed.task;
           if(s.acceptance_supplement?.state==='admitted'){
             const g=this.supplementGrant(claimed),a=s.acceptance_supplement;
-            if(!g||['schema','id','task_id','installation_id','baseline_received','extra_limit','expires_at'].some(k=>g[k]!==a[k])||task?.id!==g.task_id||task.received!==2||task.target!==3||task.remaining_today!==1||!['xiaohongshu','xhs',undefined].includes(task.platform))throw Error('task_reconciliation_required');
+            if(!g||['schema','id','task_id','installation_id','baseline_received','extra_limit',g.schema==='crowd-acceptance-batch-v1'?'target':'expires_at'].some(k=>g[k]!==a[k])||task?.id!==g.task_id||task.target!==this.supplementTarget(g)||!Number.isSafeInteger(task.received)||task.received!==task.target-g.remaining||task.received!==s.received||task.remaining_today!==g.remaining||!['xiaohongshu','xhs',undefined].includes(task.platform))throw Error('task_reconciliation_required');
           }
           const resumed=s.platform_resume_task;
           if(resumed){
@@ -1186,7 +1191,7 @@
       const receipt = C.receipt(await this.api.rpc('submit', {p_request: item.request, p_task: item.task,
         p_lease: item.lease, p_record: item.record}, signal), item.request);
       alive();
-      if(s.acceptance_supplement?.state==='admitted'&&!receipt.error&&receipt.inserted===true&&(item.task!==s.acceptance_supplement.task_id||receipt.task_received!==3||s.acceptance_supplement.baseline_history.includes(item.record.standard.note_id)))throw Error('invalid_receipt');
+      if(s.acceptance_supplement?.state==='admitted'&&!receipt.error&&receipt.inserted===true&&(item.task!==s.acceptance_supplement.task_id||receipt.duplicate===true||receipt.task_received!==(s.task?.received??s.acceptance_supplement.baseline_received)+1||receipt.task_received>this.supplementTarget(s.acceptance_supplement)||s.history.includes(item.record.standard.note_id)))throw Error('invalid_receipt');
       if (receipt.error === 'daily_quota') {
         item.retry_at = C.quotaRetry(receipt, now); s.last_error = 'daily_quota'; await this.save(s); await this.scheduleReceipt(s, item.retry_at); return;
       } else if (receipt.error === 'lease_expired') {
@@ -1225,8 +1230,11 @@
       }
       const supplement=s.acceptance_supplement;
       if(supplement?.state==='admitted'&&!receipt.error&&receipt.inserted===true&&receipt.duplicate!==true&&item.task===supplement.task_id&&!supplement.baseline_history.includes(item.record.standard.note_id)){
-        supplement.state='consumed';supplement.remaining=0;supplement.request=item.request;supplement.consumed_at=this.r.now();
-        await this.parkPilot(s,{error:'test_completed',pilot_phase:'awaiting_acceptance'},alive);
+        supplement.remaining=Math.max(0,this.supplementTarget(supplement)-receipt.task_received);
+        if(supplement.remaining===0){
+          supplement.state='consumed';supplement.request=item.request;supplement.consumed_at=this.r.now();
+          await this.parkPilot(s,{error:'test_completed',pilot_phase:'awaiting_acceptance'},alive);
+        }
       }
       // Failed records remain exportable; bounded by stopping, never by deleting evidence.
       if (receipt.error && s.rejected.length >= 20) throw new Error('review_local_rejections');
