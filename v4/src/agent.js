@@ -234,7 +234,8 @@
     }
     validateSupplementClaim(s,claimed) {
       if(s.acceptance_supplement?.state==='admitted'){
-            const g=this.supplementGrant(claimed),a=s.acceptance_supplement,task=claimed.task;
+            const g=this.supplementGrant(claimed),a=s.acceptance_supplement,task=claimed?.task;
+            if(task===null&&Object.hasOwn(claimed,'task')&&g&&['schema','id','task_id','installation_id','baseline_received','extra_limit',g.schema==='crowd-acceptance-batch-v1'?'target':'expires_at'].every(k=>g[k]===a[k])&&Number.isSafeInteger(s.received)&&Number.isSafeInteger(a.remaining)&&g.remaining===a.remaining&&g.remaining>0&&g.remaining===this.supplementTarget(g)-s.received)return;
             if(!g||['schema','id','task_id','installation_id','baseline_received','extra_limit',g.schema==='crowd-acceptance-batch-v1'?'target':'expires_at'].some(k=>g[k]!==a[k])||task?.id!==g.task_id||task.target!==this.supplementTarget(g)||!Number.isSafeInteger(task.received)||task.received!==task.target-g.remaining||task.received!==s.received||task.remaining_today!==g.remaining||!['xiaohongshu','xhs',undefined].includes(task.platform))throw Error('task_reconciliation_required');
           }
     }
@@ -774,6 +775,12 @@
           if(resumed){
             if(task?.id!==resumed.id||task?.query!==s.task?.query||task?.platform!==s.task?.platform)throw Error('lease_lost');
             if(task.lease_token!==resumed.lease&&!resumed.allow_renewal)throw Error('pool_recovery_required');
+          }
+          if(task===null&&s.acceptance_supplement?.state==='admitted'){
+            if(this.recoveryUnsafe(s)||s.work_slots?.length||s.enrichment||['note','reopen_note'].includes(s.phase))throw Error('pool_recovery_required');
+            s.task=null;s.phase='idle';s.next_at=now+300000;this.invalidateTaskControl(s);s.assignment_refresh=false;delete s.platform_resume_task;
+            if(s.last_error==='task_reconciliation_required')s.last_error=null;
+            await this.save(s);await this.schedule(s,s.next_at);return;
           }
           if(!task && s.task && !s.test_run?.task_ids) {
             if(s.work_slots?.length || s.enrichment || ['note','reopen_note'].includes(s.phase))throw Error('pool_recovery_required');

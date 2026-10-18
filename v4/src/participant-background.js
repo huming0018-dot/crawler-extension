@@ -133,7 +133,7 @@ const runtime = {
   }
 
 };
-const workTabs=new CrowdWorkTabs({chrome,storage,owner:async()=>(await storage.get('session'))?.user?.id,probe:probeTab,uuid:()=>crypto.randomUUID(),structuredAllowed:async()=>{const s=await agent.read();return s.enabled===true&&s.task?.structured_capture===true;},presentationAllowed:async()=>{const state=await agent.read();return !agent.pendingStop&&!agent.stopping&&!agent.stopActive&&!agent.maintenance&&state.enabled===true;}});
+const workTabs=new CrowdWorkTabs({chrome,storage,observe:(stage,owner)=>localTrace(stage,{start:true,owner}),owner:async()=>(await storage.get('session'))?.user?.id,probe:probeTab,uuid:()=>crypto.randomUUID(),structuredAllowed:async()=>{const s=await agent.read();return s.enabled===true&&s.task?.structured_capture===true;},presentationAllowed:async()=>{const state=await agent.read();return !agent.pendingStop&&!agent.stopping&&!agent.stopActive&&!agent.maintenance&&state.enabled===true;}});
 async function workingTab(){if((await storage.get('session'))?.user?.id){const state=await agent.read(),owned=await workTabs.first((state.work_slots||[]).map(slot=>slot.id));return owned || null;}return null;}
 const api = new CrowdAPI(CROWD_CONFIG, storage), agent = new CrowdAgent(runtime, api);
 // Legacy 3.x has the same extension ID but a different identity/outbox protocol.
@@ -572,8 +572,8 @@ chrome.runtime.onInstalled.addListener((details = {reason: 'install'}) => {
     await repairDiagnostics();
   })().catch(console.error);
 });
-chrome.tabs.onRemoved.addListener(id => {
-  workTabs.removed(id).catch(()=>{});
+chrome.tabs.onRemoved.addListener((id,info) => {
+  workTabs.removed(id,info).catch(()=>{});
   storage.get('work_tab').then(owned => { if (owned === id) return storage.set('work_tab', null); }).catch(console.error);
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable

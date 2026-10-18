@@ -2,7 +2,7 @@
 (function(root) {
   'use strict';
   class CrowdWorkTabs {
-    constructor({chrome,storage,owner,probe,uuid,presentationAllowed=async()=>false,structuredAllowed=async()=>false}) {Object.assign(this,{chrome,storage,owner,probe,uuid,presentationAllowed,structuredAllowed});this.tail=Promise.resolve();this.presentationJobs=new Map();this.instance=uuid();}
+    constructor({chrome,storage,owner,probe,uuid,presentationAllowed=async()=>false,structuredAllowed=async()=>false,observe=null}) {Object.assign(this,{chrome,storage,owner,probe,uuid,presentationAllowed,structuredAllowed,observe});this.pendingRemovals=new Map();this.tail=Promise.resolve();this.presentationJobs=new Map();this.instance=uuid();}
     failure(cause) {this.lastFailure=cause;return Object.assign(Error('pool_recovery_required'),{poolCause:cause});}
     async session() {
       if(this.sessionPromise)return this.sessionPromise;
@@ -305,10 +305,13 @@
       }
       return null;
     }
+    role(slot,entry) {return slot==='search'?'search':entry?.verification===true||slot.startsWith('verify-')?'verification':'other';}
+    observeWindow(stage,ownerKey) {try{if(this.observe)Promise.resolve(this.observe(stage,ownerKey.slice('work_tabs:'.length))).catch(()=>{});}catch(_){} }
     async close(slot, expectedOwner = null) {
       if(!await this.owner())return;
       const ownerKey=await this.key();
       if(expectedOwner && ownerKey!=='work_tabs:'+expectedOwner)throw Error('cancelled');
+      this.observeWindow(slot?'close_'+this.role(slot,null)+'_requested':'close_all_requested',ownerKey);
       await Promise.allSettled([...this.presentationJobs].filter(([key])=>key.startsWith(ownerKey+':')&&(!slot||key===ownerKey+':'+slot)).map(([,job])=>job));
       await this.assertKey(ownerKey);
       const entries=await this.storage.get(ownerKey)||{},selected=slot ? [[slot,entries[slot]]] : Object.entries(entries);
@@ -328,7 +331,15 @@
             const proof=(await this.probe(entry.tab,'ownership')).response;
             if(proof?.token!==entry.token || proof?.document!==entry.document){await retire('close_identity');continue;}
           } else if(entry.instance!==this.instance){await retire('unbound_restart');continue;}
-          await this.assertKey(ownerKey);await this.chrome.tabs.remove(entry.tab);
+          this.observeWindow('remove_'+this.role(key,entry)+'_requested',ownerKey);
+          await this.assertKey(ownerKey);
+          const current=(await this.entries())[key];
+          if(!current||['tab','session','token','document','url','state','instance'].some(name=>current[name]!==entry[name]))throw Error('cancelled');
+          await this.assertKey(ownerKey);
+          const removal={ownerKey,session:entry.session,token:entry.token,document:entry.document,role:this.role(key,entry)};
+          this.pendingRemovals.set(entry.tab,removal);
+          while(this.pendingRemovals.size>24)this.pendingRemovals.delete(this.pendingRemovals.keys().next().value);
+          try{await this.chrome.tabs.remove(entry.tab);}finally{if(this.pendingRemovals.get(entry.tab)===removal)this.pendingRemovals.delete(entry.tab);}
         }
         await this.write(all=>{if(all[key]?.token===entry.token)delete all[key];},ownerKey);
       }
@@ -342,7 +353,17 @@
       }
       return null;
     }
-    async removed(id) {await this.write(entries=>{for(const entry of Object.values(entries))if(entry.tab===id)entry.state='missing';});}
+    async removed(id,info={}) {
+      const pending=this.pendingRemovals.get(id);this.pendingRemovals.delete(id);
+      const ownerKey=await this.key();
+      const matched=[];
+      await this.write(entries=>{for(const [slot,entry] of Object.entries(entries))if(entry.tab===id){matched.push({role:this.role(slot,entry),session:entry.session,token:entry.token,document:entry.document});entry.state='missing';}},ownerKey);
+      let marker=null;try{marker=(await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session;}catch(_){}
+      const own=pending&&pending.ownerKey===ownerKey&&pending.session===marker&&(!matched.length||matched.some(e=>e.token===pending.token&&e.document===pending.document&&e.session===pending.session));
+      const roles=new Set(matched.map(e=>e.role));if(own)roles.add(pending.role);
+      const kind=info?.isWindowClosing===true?'window':info?.isWindowClosing===false?'tab':'unknown';
+      for(const role of roles)this.observeWindow('removed_'+role+'_'+(own&&(!matched.length&&role===pending.role||matched.some(e=>e.role===role&&e.token===pending.token&&e.document===pending.document&&e.session===pending.session))?'own_request':'unattributed')+'_'+kind,ownerKey);
+    }
   }
   root.CrowdWorkTabs=CrowdWorkTabs;
 })(globalThis);
