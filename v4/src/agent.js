@@ -85,6 +85,17 @@
       s.wait_kind='action';s.control=null;s.control_expires=0;
       await this.save(s);alive();if(s.enabled)await this.schedule(s,s.next_at);return true;
     }
+    batchUnrelated(s,item,revision=null) {
+      const batch=s.acceptance_supplement;
+      return batch?.schema==='crowd-acceptance-batch-v1'&&batch.state==='admitted'&&item?.task===batch.task_id&&!item.kind&&item.reason==='unrelated_note'&&typeof item.request==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.request)&&typeof item.record?.standard?.note_id==='string'&&item.record.standard.note_id.length>0&&item.record.standard.note_id.length<=200&&Number.isSafeInteger(item.relevance_revision)&&item.relevance_revision>=0&&(revision===null||item.relevance_revision===revision);
+    }
+    rejectionNeedsReview(s) {return s.rejected.filter(item=>!this.batchUnrelated(s,item)).length>=20;}
+    knownNotes(s,task) {
+      const repairs=new Set((task.repair_notes||[]).filter(n=>!s.repaired?.includes(n.parent)).map(n=>n.record.standard.note_id)),known=new Set((task.known_note_ids||[]).filter(id=>!repairs.has(id)));
+      const revision=Math.max(task.relevance_revision||0,s.control_task===task.id?s.control?.relevance_revision||0:0);
+      if(task.id===s.acceptance_supplement?.task_id)for(const item of s.rejected)if(this.batchUnrelated(s,item,revision)&&!repairs.has(item.record.standard.note_id))known.add(item.record.standard.note_id);
+      return known;
+    }
     recoveryUnsafe(s) {
       return !!(s.test_run||s.outbox?.length||s.work_slots?.length||s.pending_batch||s.pending_observation_batch||s.enrichment?.sdk_pending||s.sdk_pending||s.sdk_unknown||s.risk_report||s.pending_risk||['backend_login_required','backend_permission_denied'].includes(s.delivery_error));
     }
@@ -751,10 +762,16 @@
             if(!resumed&&s.acceptance_supplement?.state!=='admitted'){s.phase='idle';s.seen=[];s.candidates=[];s.search_round=0;s.note_url=null;s.note_id=null;}
           } else if(task) {
             if(task.received<s.task.received)throw Error('backend_unavailable');
-            const known=new Set(task.known_note_ids || []);
-            s.candidates=s.candidates.filter(url=>!known.has(C.taskPlatform(task).noteURL(url).id) || task.repair_notes?.some(n=>n.record.standard.note_id===C.taskPlatform(task).noteURL(url).id));
+
           }
+          if(task){
+            const before=s.candidates.length,known=this.knownNotes(s,task);
+            s.candidates=s.candidates.filter(url=>!known.has(C.taskPlatform(task).noteURL(url).id));
+            if(before>0&&!s.candidates.length&&s.phase==='search_done'&&s.acceptance_supplement?.schema==='crowd-acceptance-batch-v1'&&s.acceptance_supplement.state==='admitted'&&s.acceptance_supplement.task_id===task.id&&s.acceptance_supplement.remaining>0&&!this.recoveryUnsafe(s)&&!s.enrichment&&!['action','retry','budget','page'].includes(s.wait_kind)){s.phase='idle';s.search_round=0;s.next_at=this.r.now();}
+          }
+          const resumeNoTaskBatch=!s.task&&s.phase==='idle'&&task&&s.acceptance_supplement?.schema==='crowd-acceptance-batch-v1'&&s.acceptance_supplement.state==='admitted'&&s.acceptance_supplement.task_id===task.id&&s.acceptance_supplement.remaining>0&&!this.recoveryUnsafe(s)&&!['action','retry','budget','page'].includes(s.wait_kind);
           s.task=task || null;s.assignment_refresh=false;delete s.platform_resume_task;
+          if(resumeNoTaskBatch)s.next_at=this.r.now();
           if(s.test_run?.state==='waiting' && task?.repair_only){
             if(s.outbox.length || s.work_slots?.length || s.enrichment)throw Error('pool_recovery_required');
             s.test_run.goal=0;s.test_run.limit=0;s.phase='idle';s.seen=[];s.candidates=[];s.search_round=0;s.note_url=null;s.note_id=null;
@@ -885,7 +902,9 @@
             if(finished.error || finished.status!=='complete'){await this.endTest(s,'test_partial');return;}
             s.test_run.finished_tasks ||= [];if(!s.test_run.finished_tasks.includes(finishedTask))s.test_run.finished_tasks.push(finishedTask);
           }
-          s.task = null; s.phase = 'idle'; s.next_at = now + (continueBatch?1000:60000); await this.r.close();
+          const resumeBatch=s.acceptance_supplement?.schema==='crowd-acceptance-batch-v1'&&s.acceptance_supplement.state==='admitted'&&s.acceptance_supplement.task_id===finishedTask&&s.acceptance_supplement.remaining>0&&!finished.error&&finished.status==='open'&&finished.received===s.task.received&&finished.received<s.task.target&&Number.isSafeInteger(s.task.lease_start_received)&&s.task.received>s.task.lease_start_received;
+          if(resumeBatch)s.assignment_refresh=true;
+          s.task = null; s.phase = 'idle'; s.next_at = now + (continueBatch||resumeBatch?1000:60000); await this.r.close();
         } else if (s.task.remaining_today === 0 && !s.task.repair_only) {
           if(s.test_run){await this.endTest(s,'test_quota');return;}
           s.next_at = now + 3600000;
@@ -909,7 +928,7 @@
           if (page.ready) {
             s.data_ready_at = this.r.now();
             const repairs=new Set((s.task.repair_notes||[]).filter(n=>!s.repaired?.includes(n.parent)).map(n=>n.record.standard.note_id));
-            const known = new Set((s.task.known_note_ids||[]).filter(id=>!repairs.has(id)));
+            const known=this.knownNotes(s,s.task);
             const found = new Map(s.candidates.map(url => [platform.noteURL(url).id, url]).filter(([id]) => !known.has(id)));
             for (const url of page.links) { try { const note = platform.noteURL(url); if (!known.has(note.id) && !s.seen.includes(note.id) && (!s.history.includes(note.id) || repairs.has(note.id))) found.set(note.id, note.navigation); } catch (_) {} }
             s.card_meta ||= {};
@@ -922,7 +941,7 @@
             // Stop expanding once enough unseen candidates exist for this task.
             // This saves page actions for small trials without changing server gaps.
             const needed = s.task.repair_only?repairs.size:Math.max(1, Math.min(s.task.target - s.task.received,this.testRemaining(s)));
-            if (s.search_round < 3 && s.candidates.length < needed) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } this.assertTest(s);await this.r.probe('scroll'); alive(); s.next_at = now + C.between(30000, 45000, this.r.random); }
+            if (s.search_round < 3 && s.candidates.length < needed) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } this.assertTest(s);await this.r.probe('scroll'); alive(); s.next_at = now + (this.r.fastCapture===true?1000:C.between(30000, 45000, this.r.random)); }
             else { s.search_round = 0; s.phase = 'search_done'; s.next_at = now; s.wait_kind = null; }
           }
         } else if (s.phase === 'search_done') {
@@ -998,7 +1017,8 @@
         await this.save(s); alive();
         // The durable outbox is the crash boundary, not a reason to delay its first send.
         if (s.outbox.length) await this.flushOutbox(s, alive, signal);
-        await this.schedule(s,Math.max(s.next_at, now + 30000));
+        const fastResume=this.r.fastCapture===true&&(s.phase==='search'||s.phase==='idle'&&s.assignment_refresh===true&&s.acceptance_supplement?.state==='admitted');
+        await this.schedule(s,fastResume?s.next_at:Math.max(s.next_at,now+30000));
         return !s.outbox.length && ['enrich','search_done'].includes(s.phase) && s.next_at <= this.r.now();
       } catch (err) {
         if (err.message === 'cancelled' || signal.aborted) return;
@@ -1144,7 +1164,7 @@
       }
       s.outbox.splice(0,result.receipts.length);delete s.pending_observation_batch;
       await this.save(s);alive();
-      if(result.receipts.some(receipt=>receipt.gate==='rejected')&&s.rejected.length>=20)throw Error('review_local_rejections');
+      if(result.receipts.some(receipt=>receipt.gate==='rejected')&&this.rejectionNeedsReview(s))throw Error('review_local_rejections');
       await this.scheduleReceipt(s,this.r.now()+(result.halted?1000:250));
       return !result.halted && this.readyDeliveryContinuation(s);
     }
@@ -1171,7 +1191,7 @@
         if(!receipt || receipt.request!==item.request || !['observed','rejected'].includes(receipt.gate) || receipt.gate==='observed'&&(receipt.run!==item.record.run||receipt.page!==item.record.page||receipt.source!==item.record.source||receipt.reward_eligible!==false))throw Error('invalid_receipt');
         if(receipt.gate==='rejected'){s.rejected.push({...item,reason:receipt.error||'invalid_record'});if(this.r.experimentalAPIEarlyFinish===true)s.structured_partial=true;}
         else this.acknowledgeExperimentalAPI(s,item,receipt);
-        s.outbox.shift();await this.save(s);if(receipt.gate==='rejected'&&s.rejected.length>=20)throw Error('review_local_rejections');await this.scheduleReceipt(s,this.r.fastCapture===true&&receipt.gate==='observed'?this.r.now()+250:now+1000);return receipt.gate==='observed' && this.readyDeliveryContinuation(s);
+        s.outbox.shift();await this.save(s);if(receipt.gate==='rejected'&&this.rejectionNeedsReview(s))throw Error('review_local_rejections');await this.scheduleReceipt(s,this.r.fastCapture===true&&receipt.gate==='observed'?this.r.now()+250:now+1000);return receipt.gate==='observed' && this.readyDeliveryContinuation(s);
       }
       if (item.kind === 'rating') {
         const receipt=await this.api.rpc('rating',{p_request:item.request,p_proof:item.proof,p_score:item.score,p_reason:item.rating_reason},signal);alive();
@@ -1179,15 +1199,16 @@
           (receipt.gate==='rated' && typeof receipt.inserted!=='boolean') ||
           (receipt.gate==='rejected' && !['invalid_rating','invalid_anchor','already_rated','request_reused'].includes(receipt.error)))throw new Error('invalid_receipt');
         if(receipt.gate==='rejected')s.rejected.push({...item,reason:receipt.error});
-        s.outbox.shift();if(receipt.gate==='rejected' && s.rejected.length>=20)throw new Error('review_local_rejections');await this.save(s);await this.scheduleReceipt(s,now+30000);return;
+        s.outbox.shift();if(receipt.gate==='rejected' && this.rejectionNeedsReview(s))throw new Error('review_local_rejections');await this.save(s);await this.scheduleReceipt(s,now+30000);return;
       }
       if (item.kind) {
         const receipt = await this.api.rpc(item.kind==='comments'?'comments_observe':'observe', item.kind==='comments'?{p_request:item.request,p_parent:item.parent,p_task:item.task,p_lease:item.lease,p_data:item.record}:{p_request:item.request,p_parent:item.parent,p_kind:item.kind,p_data:item.record}, signal); alive();
         if (!receipt || receipt.request !== item.request || !['observed','rejected'].includes(receipt.gate)) throw new Error('invalid_receipt');
         if (receipt.gate === 'rejected') {s.rejected.push({...item,reason:receipt.error || 'invalid_record'});if(item.kind==='comments')s.comment_failures=(s.comment_failures||0)+1;}
         if(item.kind==='comments' && receipt.gate==='observed' && item.record.page===item.record.total-1 && s.task?.repair_notes?.some(n=>n.parent===item.parent)){s.repaired ||= [];if(!s.repaired.includes(item.parent))s.repaired.push(item.parent);}
-        s.outbox.shift(); if(receipt.gate==='rejected' && s.rejected.length>=20)throw new Error('review_local_rejections'); await this.save(s); await this.scheduleReceipt(s,this.r.fastCapture===true&&item.kind==='comments'&&receipt.gate==='observed'?this.r.now()+250:now+(item.kind==='comments'&&receipt.gate==='observed'?1000:30000)); return item.kind==='comments' && receipt.gate==='observed' && this.readyDeliveryContinuation(s);
+        s.outbox.shift(); if(receipt.gate==='rejected' && this.rejectionNeedsReview(s))throw new Error('review_local_rejections'); await this.save(s); await this.scheduleReceipt(s,this.r.fastCapture===true&&item.kind==='comments'&&receipt.gate==='observed'?this.r.now()+250:now+(item.kind==='comments'&&receipt.gate==='observed'?1000:30000)); return item.kind==='comments' && receipt.gate==='observed' && this.readyDeliveryContinuation(s);
       }
+      let bodyOnlyFinished=false;
       const receipt = C.receipt(await this.api.rpc('submit', {p_request: item.request, p_task: item.task,
         p_lease: item.lease, p_record: item.record}, signal), item.request);
       alive();
@@ -1226,6 +1247,9 @@
             s.task.received=Math.max(s.task.received,receipt.task_received);
             if(s.task.remaining_today!=null)s.task.remaining_today=Math.max(0,s.task.remaining_today-newlyReceived);
           }
+          if(this.r.fastCapture===true&&s.task?.id===item.task&&s.task.comments_capture===false&&s.task.structured_capture===false&&s.profiles!==true&&s.enrichment?.parent===item.request&&s.enrichment.stage==='comments'&&!s.sdk_unknown&&!s.sdk_pending&&!s.enrichment.sdk_pending&&!s.pending_risk){
+            s.enrichment=null;s.phase='search_done';s.note_url=null;s.note_id=null;s.loaded_at=null;s.notes_in_session++;s.next_at=this.r.now();bodyOnlyFinished=true;
+          }
         }
       }
       const supplement=s.acceptance_supplement;
@@ -1237,8 +1261,8 @@
         }
       }
       // Failed records remain exportable; bounded by stopping, never by deleting evidence.
-      if (receipt.error && s.rejected.length >= 20) throw new Error('review_local_rejections');
-      await this.save(s); await this.scheduleReceipt(s, now + 30000); return;
+      if (receipt.error && this.rejectionNeedsReview(s)) throw new Error('review_local_rejections');
+      await this.save(s); await this.scheduleReceipt(s,bodyOnlyFinished?this.r.now()+250:now+30000); return;
     }
     saveStructuredDiagnostic(s,e,value) {
       const diag=value.observer_diagnostics;
