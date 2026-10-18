@@ -238,6 +238,7 @@
             if(!g||['schema','id','task_id','installation_id','baseline_received','extra_limit',g.schema==='crowd-acceptance-batch-v1'?'target':'expires_at'].some(k=>g[k]!==a[k])||task?.id!==g.task_id||task.target!==this.supplementTarget(g)||!Number.isSafeInteger(task.received)||task.received!==task.target-g.remaining||task.received!==s.received||task.remaining_today!==g.remaining||!['xiaohongshu','xhs',undefined].includes(task.platform))throw Error('task_reconciliation_required');
           }
     }
+    admittedBatchNote(s) { try{return this.acceptanceBatch(s)&&s.phase==='note'&&C.noteURL(s.note_url).id===s.note_id;}catch(_){return false;} }
     invalidateTaskControl(s) { s.control=null;s.control_task=null;s.control_checked=0;s.control_expires=0; }
     async control(s, action, alive, signal, note = null) {
       const before = this.r.now(),requestTask=s.task?.id||null;
@@ -306,7 +307,7 @@
       if(this.r.now()<before)rejectPolicy('clock_regression');
       const idleRepair=this.r.localTest===true && scoped && s.enabled && s.task?.repair_only && ['waiting','active'].includes(s.test_run?.state) && s.phase==='idle' &&
         !s.outbox.length && !s.work_slots?.length && !s.enrichment && ['search','detail','comment'].every(key=>value.counts[key]<value.caps[key]);
-      const clearedLocalBudget=action==='control'&&batch&&!this.recoveryUnsafe(s)&&s.wait_kind==='budget'&&s.last_error==null&&['idle','search_done'].includes(s.phase)&&!s.pending_risk&&value.allowed===true&&value.reason===null&&!value.paused&&Number.isSafeInteger(s.task.daily_detail_cap)&&s.task.daily_detail_cap<=200&&value.caps.detail<=s.task.daily_detail_cap&&value.caps.detail>s.visits&&value.counts.detail<value.caps.detail;
+      const clearedLocalBudget=action==='control'&&batch&&!this.recoveryUnsafe(s)&&s.wait_kind==='budget'&&s.last_error==null&&(['idle','search_done'].includes(s.phase)||this.admittedBatchNote(s))&&!s.pending_risk&&value.allowed===true&&value.reason===null&&!value.paused&&Number.isSafeInteger(s.task.daily_detail_cap)&&s.task.daily_detail_cap<=200&&value.caps.detail<=s.task.daily_detail_cap&&(value.caps.detail>s.visits||this.admittedBatchNote(s)&&value.caps.detail===s.visits)&&(value.counts.detail<value.caps.detail||this.admittedBatchNote(s)&&value.counts.detail===value.caps.detail);
       if(clearedLocalBudget){s.next_at=this.r.now();s.wait_kind=null;}
       const raisedDetailBudget=action==='control'&&batch&&s.phase==='search_done'&&s.last_error==='action_budget'&&s.wait_kind==='action'&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isInteger(s.control?.caps?.detail)&&value.caps.detail>s.control.caps.detail&&value.counts.detail<value.caps.detail&&value.allowed===true;
       // A current server-clear retires a stale lab action wait; source risk waits remain.
@@ -824,7 +825,7 @@
           if(this.r.localTest === true && s.wait_kind === 'action')s.control_checked=0;
           // Keep comment/profile checkpoints; enrich rechecks page, lease and action gates.
           // Elapsed sleep is not evidence that comments ended.
-          if (s.phase === 'note') { s.phase = 'reopen_note'; s.loaded_at = null; s.scrolls = 0; }
+          if (s.phase === 'note' && !this.admittedBatchNote(s)) { s.phase = 'reopen_note'; s.loaded_at = null; s.scrolls = 0; }
           // An admitted search survives suspension. Probe its existing page and
           // original deadline; resetting to idle would charge and navigate again.
           // Keep persisted cooldowns, quota waits and evidence retry deadlines.
@@ -909,9 +910,10 @@
           this.invalidateTaskControl(s);await this.save(s);return true;
         }
         if (!s.task) { if(s.test_run){await this.endTest(s,'test_no_task');return;} await this.save(s); await this.schedule(s,s.next_at); return; }
+        const budgetNow=this.r.now();
         const taskDetailCap=s.task?.daily_detail_cap==null?200:s.task.daily_detail_cap;
-        const visitCap=this.acceptanceBatch(s)&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isSafeInteger(taskDetailCap)&&taskDetailCap>=1&&taskDetailCap<=200&&Number.isInteger(s.control.caps?.detail)&&s.control.caps.detail>=1&&s.control.caps.detail<=taskDetailCap&&s.control.caps.detail<=200&&Number.isSafeInteger(s.control_checked)&&s.control_checked<=now&&Number.isSafeInteger(s.control_expires)&&s.control_expires>now?s.control.caps.detail:60;
-        if (s.visits >= visitCap) { s.next_at = now + 3600000; s.wait_kind = 'budget'; await this.save(s); await this.schedule(s,s.next_at); return; }
+        const visitCap=this.acceptanceBatch(s)&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isSafeInteger(taskDetailCap)&&taskDetailCap>=1&&taskDetailCap<=200&&Number.isInteger(s.control.caps?.detail)&&s.control.caps.detail>=1&&s.control.caps.detail<=taskDetailCap&&s.control.caps.detail<=200&&Number.isSafeInteger(s.control_checked)&&s.control_checked<=budgetNow&&Number.isSafeInteger(s.control_expires)&&s.control_expires>budgetNow?s.control.caps.detail:60;
+        if (s.visits >= visitCap && !this.admittedBatchNote(s)) { s.next_at = budgetNow + 3600000; s.wait_kind = 'budget'; await this.save(s); await this.schedule(s,s.next_at); return; }
         const platform = C.taskPlatform(s.task);
         if(s.work_slots?.length || s.parallelism===2 && ['search_done','parallel'].includes(s.phase) &&
           (s.task.repair_only || s.task.received<s.task.target && s.task.remaining_today!==0) && s.candidates.length) {
@@ -999,7 +1001,20 @@
             s.page_deadline = now + 180000; s.next_at = now + (this.r.fastCapture===true?1000:30000); s.wait_kind = 'page'; s.fast_note = this.r.fastCapture === true;
           }
         } else if (s.phase === 'note') {
-          this.assertTest(s);const page=await this.r.probe(s.fast_note ? 'note_ready' : 'note'); alive(); this.checkPage(page, s, now);this.assertTest(s);await this.r.sourceHealth?.(s.task?.platform||'xiaohongshu');alive();
+          this.assertTest(s);let page;
+          try{page=await this.r.probe(s.fast_note ? 'note_ready' : 'note');}
+          catch(error){
+            alive();
+            if(error.message==='pool_recovery_required'&&error.poolCause==='entry_state'&&this.admittedBatchNote(s)&&!s.task.repair_only&&!s.task.repair_notes?.length&&s.task.comments_capture===false&&s.task.structured_capture===false&&s.profiles!==true&&!this.recoveryUnsafe(s)&&!s.outbox.length&&!s.work_slots?.length&&!s.enrichment&&!s.note_repair&&!s.pending_risk&&this.r.historicalNote){
+              await this.r.sourceHealth?.(s.task.platform||'xiaohongshu');alive();
+              if(await this.r.historicalNote(s.note_id,alive)){
+                alive();s.interrupted||=[];s.interrupted.push({task:s.task.id,note_id:s.note_id,action_consumed:true,outcome:'confirmed_abandoned',reason:'update_interrupted_before_capture'});
+                s.phase='search_done';s.note_id=null;s.note_url=null;s.note_test_run=null;s.loaded_at=null;s.wait_kind=null;s.next_at=this.r.now();await this.save(s);return true;
+              }
+            }
+            throw error;
+          }
+          alive(); this.checkPage(page, s, now);this.assertTest(s);await this.r.sourceHealth?.(s.task?.platform||'xiaohongshu');alive();
           if (page.ready) {
             if (page.record.standard.note_id !== s.note_id) throw new Error('wrong_note');
             s.data_ready_at = this.r.now();

@@ -112,6 +112,17 @@ const runtime = {
     })();
     try {await pendingTabCreation;}catch(error){await trace.event('update_failed');throw error;}finally{pendingTabCreation=null;}
   },
+  async historicalNote(note,valid){
+    const owner=await this.owner(),key='work_tabs:'+owner,markerKey='crowd_work_session';
+    if(!owner)throw Error('cancelled');
+    const before=await storage.get(key)||{},entry=before.search,marker=(await chrome.storage.session.get(markerKey))[markerKey];
+    if(typeof marker!=='string'||!marker||!workTabs.historicalOpened(entry,marker))return false;
+    try{if(CrowdCore.noteURL(entry.url).id!==note)return false;}catch(_){return false;}
+    await valid();if(owner!==await this.owner())throw Error('cancelled');
+    const current=(await storage.get(key)||{}).search,after=(await chrome.storage.session.get(markerKey))[markerKey];
+    if(after!==marker||!current||['state','session','tab','document','token','url','instance'].some(k=>current[k]!==entry[k]))throw Error('cancelled');
+    return true;
+  },
   async probe(action,slot = null,sdk=null) {
     const page=await workTabs.read(action,slot||'search',sdk);
     await trace.event(page.ready?'probe_ready':'probe_missing');return page;
