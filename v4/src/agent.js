@@ -949,10 +949,12 @@
             s.candidates = [...found.values()].filter(url=>!s.task.repair_only || repairs.has(platform.noteURL(url).id)).sort((a,b) => (repairs.has(platform.noteURL(b).id)?10000:score(b))-(repairs.has(platform.noteURL(a).id)?10000:score(a))).slice(0, 80);
             s.card_meta = Object.fromEntries(s.candidates.map(url => {const id=platform.noteURL(url).id;return [id,s.card_meta[id] || {}];}));
             s.search_round = (s.search_round || 0) + 1;
-            // Stop expanding once enough unseen candidates exist for this task.
-            // This saves page actions for small trials without changing server gaps.
+            // A title match improves discovery order, never replaces body relevance.
             const needed = s.task.repair_only?repairs.size:Math.max(1, Math.min(s.task.target - s.task.received,this.testRemaining(s)));
-            if (s.search_round < 3 && s.candidates.length < needed) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } this.assertTest(s);await this.r.probe('scroll'); alive(); s.next_at = now + (this.r.fastCapture===true?1000:C.between(30000, 45000, this.r.random)); }
+            const g=s.acceptance_supplement,terms=s.task.anchor_terms;
+            const brandBatch=!s.task.repair_only&&g?.schema==='crowd-acceptance-batch-v1'&&g.state==='admitted'&&g.task_id===19&&g.task_id===s.task.id&&Number.isSafeInteger(g.baseline_received)&&g.baseline_received>=0&&Number.isSafeInteger(g.extra_limit)&&g.extra_limit>=1&&g.extra_limit<=100&&g.target===g.baseline_received+g.extra_limit&&g.target===s.task.target&&g.remaining===s.task.target-s.task.received&&g.remaining>0&&Array.isArray(terms)&&terms.length===1&&typeof terms[0]==='string'&&this.searchQuery(s)===terms[0].normalize('NFC').trim();
+            const expand=brandBatch?s.candidates.filter(url=>score(url)>0).length<needed&&s.search_round<31&&s.candidates.length<80&&Number.isFinite(s.page_deadline)&&now<s.page_deadline:s.search_round<3&&s.candidates.length<needed;
+            if (expand) { if (!await this.admit(s, 'scroll', alive, signal)) { s.search_round--; await this.save(s); return; } this.assertTest(s);await this.r.probe('scroll'); alive(); s.next_at = now + (this.r.fastCapture===true?1000:C.between(30000, 45000, this.r.random)); }
             else { s.search_round = 0; s.phase = 'search_done'; s.next_at = now; s.wait_kind = null; }
           }
         } else if (s.phase === 'search_done') {
