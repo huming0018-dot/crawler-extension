@@ -5,7 +5,7 @@
  const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
  const BASE=['schema','type','id','session','epoch'];
  const EXTRA={rpc_request:['method','params'],pro_state:['run_id','state','phase','received','target','pending','error']};
- const PARAMS={scope:[],verify_platform_principal:['uid'],pro_claim:['p_task','p_installation_id'],pro_guard:['p_task','p_lease','p_action','p_note','p_installation_id'],pro_submit:['p_task','p_lease','p_request','p_installation_id','p_payload'],pro_status:['p_task','p_installation_id'],pro_receipt:['p_task','p_installation_id','p_request'],pro_finish:['p_task','p_lease','p_installation_id']};
+ const PARAMS={scope:[],verify_platform_principal:['uid'],pro_claim:['p_task','p_installation_id'],pro_guard:['p_task','p_lease','p_action','p_note','p_installation_id'],pro_submit:['p_task','p_lease','p_request','p_installation_id','p_payload'],pro_status:['p_task','p_installation_id'],pro_receipt:['p_task','p_installation_id','p_request'],pro_finish:['p_task','p_lease','p_installation_id'],pro_comment_submit:['p_task','p_lease','p_request','p_parent_request','p_payload','p_installation_id'],pro_comment_commit:['p_task','p_lease','p_request','p_parent_request','p_payload','p_installation_id'],pro_comment_receipt:['p_task','p_installation_id','p_request']};
  const STATES=new Set(['ready','not_ready','running','complete','partial','finish_unknown','source_failed','source_unknown','delivery_unknown','source_launch_unknown','stopped','blocked','unknown','native_ready','launching']);
  const PHASES=new Set(['initial','local_status','scope','delivery','import','stage','finish','source','stopping']);
  const HELD=new Set(['running','launching','native_ready','finish_unknown','source_unknown','delivery_unknown','source_launch_unknown','unknown']);
@@ -109,8 +109,9 @@
      requireValue(params.p_task===p.task_id&&params.p_installation_id===b.installation_id,'participant_scope_changed');
      if('p_lease' in params)requireValue(UUID.test(params.p_lease));
      if('p_request' in params)requireValue(UUID.test(params.p_request));
-     if(v.method==='pro_guard')requireValue(['control','search','detail','captcha','rate_limit'].includes(params.p_action)&&(params.p_note===null||/^[a-f0-9]{24}$/.test(params.p_note)));
+     if(v.method==='pro_guard')requireValue(['control','search','detail','comment','captcha','rate_limit'].includes(params.p_action)&&(params.p_note===null||/^[a-f0-9]{24}$/.test(params.p_note)));
      if(v.method==='pro_submit')requireValue(params.p_payload?.schema==='crowd-participant-pro-v1'&&params.p_payload?.reward_eligible===false&&bytes(params.p_payload)<=180000);
+     if(v.method==='pro_comment_submit'||v.method==='pro_comment_commit')requireValue(UUID.test(params.p_parent_request)&&params.p_payload?.schema===(v.method==='pro_comment_submit'?'crowd-participant-pro-comment-v1':'crowd-participant-pro-comment-capture-v1')&&params.p_payload?.source_kind==='mediacrawler_pro'&&params.p_payload?.reward_eligible===false&&bytes(params.p_payload)<=131072);
      await this.check(b,lock);called=true;
      result=await this.r.rpc(v.method,params);
      await this.check(b,lock);

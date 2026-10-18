@@ -385,7 +385,7 @@ func install(_ directory: String, _ browser: String) throws {
 // The persistent Pro port is separate from OTA's short-lived update lock.
 let proSchema="crowd-participant-native-v1"
 let proLimit=262144
-let proMethods:Set<String>=["scope","verify_platform_principal","pro_claim","pro_guard","pro_submit","pro_status","pro_receipt","pro_finish"]
+let proMethods:Set<String>=["scope","verify_platform_principal","pro_claim","pro_guard","pro_submit","pro_status","pro_receipt","pro_finish","pro_comment_submit","pro_comment_commit","pro_comment_receipt"]
 let proStates:Set<String>=["ready","not_ready","running","complete","partial","finish_unknown","source_failed","source_unknown","delivery_unknown","source_launch_unknown","stopped","blocked","unknown","native_ready","launching"]
 func proInteger(_ value:Any?) -> Int? {guard let n=value as? NSNumber,CFGetTypeID(n) != CFBooleanGetTypeID(),n.doubleValue.isFinite,n.doubleValue>=0,n.doubleValue<=9007199254740991,n.doubleValue.rounded()==n.doubleValue else{return nil};return n.intValue}
 func proUUID(_ value:Any?) -> Bool {guard let s=value as? String else{return false};return UUID(uuidString:s)?.uuidString.lowercased()==s}
