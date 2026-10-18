@@ -232,8 +232,15 @@
         m.stage='opened';m.opened_at=this.r.now();await this.save(s);return {opened:true,manual};
       })().finally(()=>{this.active=null;});return this.active;
     }
+    validateSupplementClaim(s,claimed) {
+      if(s.acceptance_supplement?.state==='admitted'){
+            const g=this.supplementGrant(claimed),a=s.acceptance_supplement,task=claimed.task;
+            if(!g||['schema','id','task_id','installation_id','baseline_received','extra_limit',g.schema==='crowd-acceptance-batch-v1'?'target':'expires_at'].some(k=>g[k]!==a[k])||task?.id!==g.task_id||task.target!==this.supplementTarget(g)||!Number.isSafeInteger(task.received)||task.received!==task.target-g.remaining||task.received!==s.received||task.remaining_today!==g.remaining||!['xiaohongshu','xhs',undefined].includes(task.platform))throw Error('task_reconciliation_required');
+          }
+    }
+    invalidateTaskControl(s) { s.control=null;s.control_task=null;s.control_checked=0;s.control_expires=0; }
     async control(s, action, alive, signal, note = null) {
-      const before = this.r.now();
+      const before = this.r.now(),requestTask=s.task?.id||null;
       const checkingSupplement=action==='control'&&s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&Number.isSafeInteger(s.received)&&s.received>=0&&!s.task&&['test_completed','control_unavailable'].includes(s.last_error);
       const recordDiagnostic=(kind,status=null,success=false,cause=null)=>{
         const now=this.r.now(),delta=now-before;
@@ -245,7 +252,7 @@
       };
       const rejectPolicy=kind=>{recordDiagnostic(kind);throw new Error('control_unavailable');};
       let value;const metrics=this.r.localTest===true&&s.test_run?.state==='active'?{}:null;
-      try { value = await this.api.rpc('guard', {p_action: action, p_task: s.task?.id || null, p_note: note}, signal,metrics); }
+      try { value = await this.api.rpc('guard', {p_action: action, p_task: requestTask, p_note: note}, signal,metrics); }
       catch (error) {
         const known=['timeout','cancelled','network_unknown','http_4xx','http_5xx','invalid_json'];
         const d=error?.request_diagnostic;recordDiagnostic(known.includes(d?.kind)?d.kind:'network_unknown',error?.status??d?.http_status);
@@ -299,6 +306,8 @@
       if(this.r.now()<before)rejectPolicy('clock_regression');
       const idleRepair=this.r.localTest===true && scoped && s.enabled && s.task?.repair_only && ['waiting','active'].includes(s.test_run?.state) && s.phase==='idle' &&
         !s.outbox.length && !s.work_slots?.length && !s.enrichment && ['search','detail','comment'].every(key=>value.counts[key]<value.caps[key]);
+      const clearedLocalBudget=action==='control'&&batch&&!this.recoveryUnsafe(s)&&s.wait_kind==='budget'&&s.last_error==null&&['idle','search_done'].includes(s.phase)&&!s.pending_risk&&value.allowed===true&&value.reason===null&&!value.paused&&Number.isSafeInteger(s.task.daily_detail_cap)&&s.task.daily_detail_cap<=200&&value.caps.detail<=s.task.daily_detail_cap&&value.caps.detail>s.visits&&value.counts.detail<value.caps.detail;
+      if(clearedLocalBudget){s.next_at=this.r.now();s.wait_kind=null;}
       const raisedDetailBudget=action==='control'&&batch&&s.phase==='search_done'&&s.last_error==='action_budget'&&s.wait_kind==='action'&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isInteger(s.control?.caps?.detail)&&value.caps.detail>s.control.caps.detail&&value.counts.detail<value.caps.detail&&value.allowed===true;
       // A current server-clear retires a stale lab action wait; source risk waits remain.
       if((this.r.localTest === true || raisedDetailBudget || ['action_gap','session_rest','global_pause'].includes(s.last_error)) && (s.wait_kind === 'action' || idleRepair) && !s.pending_risk && !['captcha','rate_limit'].includes(s.last_error) && value.reason === null && !value.paused) {
@@ -319,7 +328,7 @@
       }
       if(checkingSupplement&&value.acceptance_supplement!=null&&admitted!==true)recordDiagnostic('local_gate_failure',null,false,'admission_rejected');
       else recordDiagnostic('ok',null,true);
-      s.control = value; s.control_task=s.task?.id || null; s.control_checked = this.r.now(); s.control_expires = before + value.ttl_ms;
+      s.control = value; s.control_task=requestTask; s.control_checked = this.r.now(); s.control_expires = before + value.ttl_ms;
       s.control_error = false;
       if (['captcha','rate_limit'].includes(action)) s.pending_risk = null;
       return value;
@@ -757,10 +766,7 @@
           if(claimed.error==='daily_quota') {if(s.test_run){await this.endTest(s,'test_quota');return;}s.next_at=C.quotaRetry(claimed,now);s.last_error='daily_quota';await this.save(s);await this.schedule(s,s.next_at);return;}
           if(claimed.error)throw Error(claimed.error);
           let task=claimed.task;
-          if(s.acceptance_supplement?.state==='admitted'){
-            const g=this.supplementGrant(claimed),a=s.acceptance_supplement;
-            if(!g||['schema','id','task_id','installation_id','baseline_received','extra_limit',g.schema==='crowd-acceptance-batch-v1'?'target':'expires_at'].some(k=>g[k]!==a[k])||task?.id!==g.task_id||task.target!==this.supplementTarget(g)||!Number.isSafeInteger(task.received)||task.received!==task.target-g.remaining||task.received!==s.received||task.remaining_today!==g.remaining||!['xiaohongshu','xhs',undefined].includes(task.platform))throw Error('task_reconciliation_required');
-          }
+          this.validateSupplementClaim(s,claimed);
           const resumed=s.platform_resume_task;
           if(resumed){
             if(task?.id!==resumed.id||task?.query!==s.task?.query||task?.platform!==s.task?.platform)throw Error('lease_lost');
@@ -787,7 +793,7 @@
             if(before>0&&!s.candidates.length&&s.phase==='search_done'&&s.acceptance_supplement?.schema==='crowd-acceptance-batch-v1'&&s.acceptance_supplement.state==='admitted'&&s.acceptance_supplement.task_id===task.id&&s.acceptance_supplement.remaining>0&&!this.recoveryUnsafe(s)&&!s.enrichment&&!['action','retry','budget','page'].includes(s.wait_kind)){s.phase='idle';s.search_round=0;s.next_at=this.r.now();}
           }
           const resumeNoTaskBatch=!s.task&&s.phase==='idle'&&task&&s.acceptance_supplement?.schema==='crowd-acceptance-batch-v1'&&s.acceptance_supplement.state==='admitted'&&s.acceptance_supplement.task_id===task.id&&s.acceptance_supplement.remaining>0&&!this.recoveryUnsafe(s)&&!['action','retry','budget','page'].includes(s.wait_kind);
-          s.task=task || null;s.assignment_refresh=false;delete s.platform_resume_task;
+          s.task=task || null;this.invalidateTaskControl(s);s.assignment_refresh=false;delete s.platform_resume_task;
           if(resumeNoTaskBatch)s.next_at=this.r.now();
           if(s.test_run?.state==='waiting' && task?.repair_only){
             if(s.outbox.length || s.work_slots?.length || s.enrichment)throw Error('pool_recovery_required');
@@ -828,7 +834,7 @@
         await this.schedule(s,Math.max(s.next_at, now + 30000)); alive();
         // Independent of task caching and collection waits. Explicit user stop still cancels work.
         const controlInterval=s.wait_kind==='action' || s.task?.repair_only && s.phase==='idle'?30000:300000;
-        if (s.pending_risk || !s.control || now >= (s.control_checked || 0) + controlInterval || now < s.control_checked) {
+        if (s.pending_risk || !s.control || s.control_task!==(s.task?.id||null) || now >= (s.control_checked || 0) + controlInterval || now < s.control_checked) {
           try { await this.control(s, s.pending_risk || 'control', alive, signal); }
           catch (error) { alive(); s.control_error = true; if (error.status === 401 || error.status === 403) throw error; }
           await this.save(s);
@@ -866,7 +872,7 @@
           }
           return;
         }
-        if (s.pending_risk || !s.control || this.r.now() >= s.control_expires || this.r.now() < s.control_checked) {
+        if (s.pending_risk || !s.control || s.control_task!==(s.task?.id||null) || this.r.now() >= s.control_expires || this.r.now() < s.control_checked) {
           s.last_error = 'control_unavailable'; await this.save(s); return;
         }
         if (s.control.paused || ['captcha','rate_limit','session_rest'].includes(s.control.reason) && now < s.control_checked + s.control.wait_ms) {
@@ -876,9 +882,6 @@
           now >= (s.retry_at || 0) &&
           (s.phase === 'search' ? ready.keyword === this.searchQuery(s) : ready.target === s.note_id);
         if (s.next_at > now && !pageWake && !s.work_slots?.length) { await this.schedule(s,s.next_at); return; }
-        const taskDetailCap=s.task?.daily_detail_cap==null?200:s.task.daily_detail_cap;
-        const visitCap=this.acceptanceBatch(s)&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isSafeInteger(taskDetailCap)&&taskDetailCap>=1&&taskDetailCap<=200&&Number.isInteger(s.control.caps?.detail)&&s.control.caps.detail>=1&&s.control.caps.detail<=taskDetailCap&&s.control.caps.detail<=200&&Number.isSafeInteger(s.control_checked)&&s.control_checked<=now&&Number.isSafeInteger(s.control_expires)&&s.control_expires>now?s.control.caps.detail:60;
-        if (s.visits >= visitCap) { s.next_at = now + 3600000; s.wait_kind = 'budget'; await this.save(s); await this.schedule(s,s.next_at); return; }
         if (s.enrichment) {
           await this.enrich(s, alive, signal); await this.save(s); alive();
           if (s.outbox.length) await this.flushOutbox(s, alive, signal);
@@ -892,18 +895,23 @@
           if(await this.parkPilot(s,claimed,alive))return;
           if (claimed.error === 'daily_quota') { if(s.test_run){await this.endTest(s,'test_quota');return;} s.next_at = C.quotaRetry(claimed, now); s.last_error = 'daily_quota'; await this.save(s); await this.schedule(s,s.next_at); return; }
           if (claimed.error) throw new Error(claimed.error);
+          if(claimed.task!==null)this.validateSupplementClaim(s,claimed);
           if(!this.bindBatch(s,claimed.task,bound?requested:null)){await this.endTest(s,'test_no_task');return;}
           if (!claimed.task) { s.task = null; s.phase = 'idle'; s.next_at = now + 300000; }
           else {
             if (s.task?.id !== claimed.task.id || s.task?.lease_token !== claimed.task.lease_token) {
               if(s.work_slots?.length)throw Error('pool_recovery_required');
-              s.phase = 'idle'; s.seen = []; s.candidates = []; s.search_round = 0;
-              s.note_url = null; s.note_id = null;
+              if(s.acceptance_supplement?.state!=='admitted'){s.phase = 'idle'; s.seen = []; s.candidates = []; s.search_round = 0;
+              s.note_url = null; s.note_id = null;}
             }
             s.task = claimed.task;
           }
+          this.invalidateTaskControl(s);await this.save(s);return true;
         }
         if (!s.task) { if(s.test_run){await this.endTest(s,'test_no_task');return;} await this.save(s); await this.schedule(s,s.next_at); return; }
+        const taskDetailCap=s.task?.daily_detail_cap==null?200:s.task.daily_detail_cap;
+        const visitCap=this.acceptanceBatch(s)&&!this.recoveryUnsafe(s)&&s.control_task===s.task.id&&Number.isSafeInteger(taskDetailCap)&&taskDetailCap>=1&&taskDetailCap<=200&&Number.isInteger(s.control.caps?.detail)&&s.control.caps.detail>=1&&s.control.caps.detail<=taskDetailCap&&s.control.caps.detail<=200&&Number.isSafeInteger(s.control_checked)&&s.control_checked<=now&&Number.isSafeInteger(s.control_expires)&&s.control_expires>now?s.control.caps.detail:60;
+        if (s.visits >= visitCap) { s.next_at = now + 3600000; s.wait_kind = 'budget'; await this.save(s); await this.schedule(s,s.next_at); return; }
         const platform = C.taskPlatform(s.task);
         if(s.work_slots?.length || s.parallelism===2 && ['search_done','parallel'].includes(s.phase) &&
           (s.task.repair_only || s.task.received<s.task.target && s.task.remaining_today!==0) && s.candidates.length) {
