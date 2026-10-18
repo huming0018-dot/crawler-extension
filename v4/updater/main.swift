@@ -389,21 +389,28 @@ let proMethods:Set<String>=["scope","verify_platform_principal","pro_claim","pro
 let proStates:Set<String>=["ready","not_ready","running","complete","partial","finish_unknown","source_failed","source_unknown","delivery_unknown","source_launch_unknown","stopped","blocked","unknown","native_ready","launching"]
 func proInteger(_ value:Any?) -> Int? {guard let n=value as? NSNumber,CFGetTypeID(n) != CFBooleanGetTypeID(),n.doubleValue.isFinite,n.doubleValue>=0,n.doubleValue<=9007199254740991,n.doubleValue.rounded()==n.doubleValue else{return nil};return n.intValue}
 func proUUID(_ value:Any?) -> Bool {guard let s=value as? String else{return false};return UUID(uuidString:s)?.uuidString.lowercased()==s}
+func proCapability(_ raw:Any?) throws {
+ guard let v=raw as? [String:Any] else{throw Failure("pro_invalid_message")}
+ let feature=v["comment_options_v1"] as? NSNumber
+ try require(Set(v.keys)==Set(["schema","runtime_sha256","entry_sha256","worker_sha256","upstream_commit","comment_options_v1","max_api_requests"]) && v["schema"] as? String=="crowd-participant-pro-capability-v1" && feature != nil && CFGetTypeID(feature!)==CFBooleanGetTypeID() && feature?.boolValue==true,"pro_invalid_message")
+ for key in ["runtime_sha256","entry_sha256","worker_sha256"] {try require((v[key] as? String)?.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil,"pro_invalid_message")}
+ try require((v["upstream_commit"] as? String)?.range(of:"^[a-f0-9]{40}$",options:.regularExpression) != nil && (proInteger(v["max_api_requests"]) ?? 0)>=1 && (proInteger(v["max_api_requests"]) ?? 101)<=100,"pro_invalid_message")
+}
 func proMessage(_ m:[String:Any],child:Bool=false) throws {
  let base:Set<String>=["schema","type","id","session","epoch"]
  try require(m["schema"] as? String==proSchema && proUUID(m["id"]) && proUUID(m["session"]) && proInteger(m["epoch"]) != nil,"pro_invalid_message")
  guard let type=m["type"] as? String else{throw Failure("pro_invalid_message")}
- let extra:[String]
+ var extra:[String]
  let rpcErrors:Set<String>=["participant_scope_changed","participant_writer_busy","participant_stopped","participant_rpc_outcome_unknown","participant_protocol_invalid"]
- let stateErrors=rpcErrors.union(["participant_contract_refused","participant_installation_invalid","participant_existing_run","pro_not_ready","login_required"])
+ let stateErrors=rpcErrors.union(["participant_contract_refused","participant_installation_invalid","participant_existing_run","participant_capability_required","pro_not_ready","login_required"])
  let phases:Set<String>=["initial","local_status","scope","delivery","import","stage","finish","source","stopping"]
  switch type {
- case "pro_hello":try require(!child && proInteger(m["version"])==1,"pro_invalid_message");extra=["version"]
+ case "pro_hello":try require(!child && proInteger(m["version"])==1,"pro_invalid_message");extra=["version"];if m.keys.contains("capability_request"){try require(m["capability_request"] as? String=="pro_comment_options_v1","pro_invalid_message");extra=extra+["capability_request"]}
  case "pro_start":try require(!child && proUUID(m["subject"]) && proUUID(m["installation_id"]) && proUUID(m["intent"]) && (proInteger(m["task_id"]) ?? 0)>0,"pro_invalid_message");extra=["subject","installation_id","task_id","intent"]
  case "pro_stop","pro_status":try require(!child && (m["run_id"] is NSNull || proUUID(m["run_id"])),"pro_invalid_message");extra=["run_id"]
  case "rpc_result":try require(!child && m["ok"] is Bool && (m["error"] is NSNull || rpcErrors.contains(m["error"] as? String ?? "")),"pro_invalid_message");let ok=m["ok"] as? Bool==true;try require(ok ? (m["result"] is [String:Any] && m["error"] is NSNull):(m["result"] is NSNull && m["error"] is String),"pro_invalid_message");extra=["ok","result","error"]
  case "rpc_request":try require(child && proMethods.contains(m["method"] as? String ?? "") && m["params"] is [String:Any],"pro_invalid_message");extra=["method","params"]
- case "pro_state":try require(child && proStates.contains(m["state"] as? String ?? "") && phases.contains(m["phase"] as? String ?? "") && (m["error"] is NSNull || stateErrors.contains(m["error"] as? String ?? "")) && (m["run_id"] is NSNull || proUUID(m["run_id"])) && proInteger(m["pending"]) != nil && (m["received"] is NSNull || proInteger(m["received"]) != nil) && (m["target"] is NSNull || proInteger(m["target"]) != nil),"pro_invalid_message");extra=["run_id","state","phase","received","target","pending","error"]
+ case "pro_state":try require(child && proStates.contains(m["state"] as? String ?? "") && phases.contains(m["phase"] as? String ?? "") && (m["error"] is NSNull || stateErrors.contains(m["error"] as? String ?? "")) && (m["run_id"] is NSNull || proUUID(m["run_id"])) && proInteger(m["pending"]) != nil && (m["received"] is NSNull || proInteger(m["received"]) != nil) && (m["target"] is NSNull || proInteger(m["target"]) != nil),"pro_invalid_message");extra=["run_id","state","phase","received","target","pending","error"];if m.keys.contains("capabilities"){try proCapability(m["capabilities"]);extra=extra+["capabilities"]}
  default:throw Failure("pro_invalid_message")
  }
  try require(Set(m.keys)==base.union(extra),"pro_invalid_message")

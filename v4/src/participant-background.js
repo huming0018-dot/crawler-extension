@@ -232,7 +232,8 @@ const nodeMonitor=new CrowdNodeMonitor({storage,api:{rpc:originalRPC},settings:d
   state:async()=>{const state=await agent.read(),health=(await platformHealth.publicState()).xiaohongshu;let release_digest;
     const owner=await runtime.owner(),pro=owner&&await storage.get('participant-pro:'+owner),age=Date.now()-(pro?.principal_verified_at||0);
     try{release_digest=await cachedReleaseHash();}catch(_){console.warn('release_digest_unavailable');}
-    return {release_digest,enabled:pro?pro.desired_running===true:state.enabled===true,
+    const capAge=Date.now()-(pro?.capability_at||0),pro_capabilities=pro?.capability_release_digest===release_digest&&capAge>=0&&capAge<=120000?pro.capabilities:null;
+    return {release_digest,pro_capabilities,enabled:pro?pro.desired_running===true:state.enabled===true,
     login_state:pro&&age>=0&&age<=120000?'ready':CrowdNodeMonitor.loginState(state,health,Date.now())};},
   uuid:()=>crypto.randomUUID(),version:CrowdCore.VERSION});
 let nodeFlushTimer=null;
@@ -302,6 +303,7 @@ const proParticipant=new CrowdParticipantPro({storage,owner:runtime.owner,uuid:(
     if(proBusy(lock)||agent.recoveryUnsafe(s)||s.outbox?.length)throw Error('participant_writer_busy');
     return {...identity,generation:agent.generation};
   },busy:proBusy,acquire:()=>{if(proBusy())throw Error('participant_writer_busy');const lock={};agent.maintenance=lock;return lock;},release:lock=>{if(lock&&agent.maintenance===lock)agent.maintenance=null;},
+  capabilityRequest:true,releaseDigest:cachedReleaseHash,generation:()=>agent.generation,
   connect:()=>chrome.runtime.connectNative('com.crowd.v4.updater'),
   intent:enabled=>participantSession.intent(enabled),claim:()=>nodeMonitor.claim(),rpc:originalRPC,
   principal:async(uid,scope)=>{

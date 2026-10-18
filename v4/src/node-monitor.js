@@ -56,6 +56,7 @@
    const raw=await this.state();
    const p_state={version:this.version,enabled:raw.enabled===true,login_state:['ready','needs_login','verification','unknown'].includes(raw.login_state)?raw.login_state:'unknown'};
    if(/^[0-9a-f]{64}$/.test(raw.release_digest||''))p_state.release_digest=raw.release_digest;
+   if(raw.pro_capabilities)p_state.pro_capabilities=root.CrowdParticipantPro.capability(raw.pro_capabilities);
    const signature=JSON.stringify(p_state),age=this.now()-(this.registered?.at||0);
    if(this.registered?.id===s.id&&this.registered.signature===signature&&age>=0&&age<60000)return;
    if(this.registering){await this.registering;return this.register(signal);}

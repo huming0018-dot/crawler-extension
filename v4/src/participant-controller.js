@@ -161,7 +161,7 @@ async function refresh() {
   const pro=data.pro_participant;
   if(pro){
     const phases={initial:'检查 Pro 安装',scope:'核对原参与身份',source:'Pro 静默采集',local_status:'核对原采集结果',import:'读取 Pro 结果',stage:'保存待回传数据',delivery:'等待逐条云回执',finish:'核对数据库完成状态',stopping:'停止采集'};
-    const messages={login_required:'请在原采集浏览器恢复小红书原账号登录；原参与身份、任务、进度和回执保留。当前未自动重试。',participant_dependencies_missing:'Pro 依赖尚未安装，请运行原安装包中的更新助手；原身份和进度保留。',participant_native_unavailable:'本机 Pro 助手暂未就绪，请先检查系统是否有待处理的权限提示；若仍未接通，请向邀请人提供诊断信息。原身份和进度保留，请勿重复安装。',participant_waiting_task:'已开启自动领取，目前没有可执行任务。',participant_stopped:'已停止新采集；原身份、进度和回执保留。',participant_rpc_outcome_unknown:'上次调用结果待对账，已停止新采集；不会重复执行。',participant_native_comments_unsupported:'此任务要求评论，目前参与者接口尚未接通，未降低任务要求或回退旧采集。'};
+    const messages={participant_capability_required:'本机尚未确认此任务需要的 Pro 评论选项能力或接口容量；请等待原助手能力登记，任务范围未降低，也未启动采集。',login_required:'请在原采集浏览器恢复小红书原账号登录；原参与身份、任务、进度和回执保留。当前未自动重试。',participant_dependencies_missing:'Pro 依赖尚未安装，请运行原安装包中的更新助手；原身份和进度保留。',participant_native_unavailable:'本机 Pro 助手暂未就绪，请先检查系统是否有待处理的权限提示；若仍未接通，请向邀请人提供诊断信息。原身份和进度保留，请勿重复安装。',participant_waiting_task:'已开启自动领取，目前没有可执行任务。',participant_stopped:'已停止新采集；原身份、进度和回执保留。',participant_rpc_outcome_unknown:'上次调用结果待对账，已停止新采集；不会重复执行。',participant_native_comments_unsupported:'此任务要求评论，目前参与者接口尚未接通，未降低任务要求或回退旧采集。'};
     const complete=pro.state==='complete'&&pro.received===pro.target&&pro.target>0&&pro.pending===0;
     fields['采集引擎']='MediaCrawler Pro';fields['自动执行']=complete?'采集已停止，更新保持开启':pro.error==='login_required'?'采集已暂停':pro.desired_running?'已开启':'已停止';
     fields['当前阶段']=complete?'云端已收齐，自动停止':pro.error==='login_required'?'小红书原账号需要登录':phases[pro.phase]||pro.state;

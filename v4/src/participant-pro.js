@@ -9,18 +9,24 @@
  const STATES=new Set(['ready','not_ready','running','complete','partial','finish_unknown','source_failed','source_unknown','delivery_unknown','source_launch_unknown','stopped','blocked','unknown','native_ready','launching']);
  const PHASES=new Set(['initial','local_status','scope','delivery','import','stage','finish','source','stopping']);
  const HELD=new Set(['running','launching','native_ready','finish_unknown','source_unknown','delivery_unknown','source_launch_unknown','unknown']);
- const ERRORS=new Set(['participant_scope_changed','participant_writer_busy','participant_stopped','participant_rpc_outcome_unknown','participant_protocol_invalid','participant_contract_refused','participant_installation_invalid','participant_existing_run','pro_not_ready','participant_dependencies_missing','participant_native_unavailable','participant_waiting_task','participant_recovery_required','consent_required','approval_required','backend_login_required','login_required','backend_permission_denied','daily_quota','test_completed']);
+ const ERRORS=new Set(['participant_scope_changed','participant_writer_busy','participant_stopped','participant_rpc_outcome_unknown','participant_protocol_invalid','participant_contract_refused','participant_installation_invalid','participant_existing_run','pro_not_ready','participant_dependencies_missing','participant_native_unavailable','participant_waiting_task','participant_capability_required','participant_recovery_required','consent_required','approval_required','backend_login_required','login_required','backend_permission_denied','daily_quota','test_completed']);
  const keys=(v,w)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===[...w].sort().join(',');
  const integer=v=>Number.isSafeInteger(v)&&v>=0;
  const bytes=v=>new TextEncoder().encode(JSON.stringify(v)).length;
  const requireValue=(ok,code='participant_protocol_invalid')=>{if(!ok)throw Error(code);};
+ function capability(v){
+  requireValue(keys(v,['schema','runtime_sha256','entry_sha256','worker_sha256','upstream_commit','comment_options_v1','max_api_requests'])&&v.schema==='crowd-participant-pro-capability-v1'&&v.comment_options_v1===true&&['runtime_sha256','entry_sha256','worker_sha256'].every(k=>typeof v[k]==='string'&&/^[a-f0-9]{64}$/.test(v[k]))&&typeof v.upstream_commit==='string'&&/^[a-f0-9]{40}$/.test(v.upstream_commit)&&Number.isSafeInteger(v.max_api_requests)&&v.max_api_requests>=1&&v.max_api_requests<=100);
+  return {...v};
+ }
  function validate(v){
-  requireValue(v&&v.schema===SCHEMA&&UUID.test(v.id)&&UUID.test(v.session)&&integer(v.epoch)&&EXTRA[v.type]&&keys(v,[...BASE,...EXTRA[v.type]])&&bytes(v)<=LIMIT);
+  requireValue(v&&v.schema===SCHEMA&&UUID.test(v.id)&&UUID.test(v.session)&&integer(v.epoch)&&EXTRA[v.type]&&keys(v,[...BASE,...EXTRA[v.type],...(v.type==='pro_state'&&Object.hasOwn(v,'capabilities')?['capabilities']:[])])&&bytes(v)<=LIMIT);
   if(v.type==='rpc_request')requireValue(Object.hasOwn(PARAMS,v.method)&&keys(v.params,PARAMS[v.method]));
   else requireValue((v.run_id===null||UUID.test(v.run_id))&&STATES.has(v.state)&&PHASES.has(v.phase)&&(v.received===null||integer(v.received))&&(v.target===null||integer(v.target))&&integer(v.pending)&&(v.error===null||ERRORS.has(v.error)));
+  if(v.type==='pro_state'&&Object.hasOwn(v,'capabilities'))capability(v.capabilities);
   return v;
  }
  class ParticipantPro {
+  static capability(value){return capability(value);}
   constructor(r){this.r=r;this.port=null;this.binding=null;this.seen=new Set();this.inflight=0;this.tail=Promise.resolve();this.rpcTail=Promise.resolve();this.starting=null;this.revision=0;}
   key(owner){return 'participant-pro:'+owner;}
   async read(owner){owner ||= await this.r.owner();return owner?await this.r.storage.get(this.key(owner))||null:null;}
@@ -45,7 +51,7 @@
    let messages=Promise.resolve();
    port.onMessage.addListener(v=>{const revision=this.revision;const operation=messages.then(()=>this.message(v,port,revision));messages=operation.catch(error=>this.fail(ERRORS.has(error?.message)?error.message:'participant_protocol_invalid',port));});
    port.onDisconnect.addListener(()=>{void this.fail('participant_rpc_outcome_unknown',port);});
-   this.post(this.frame('pro_hello',{version:1}));
+   this.post(this.frame('pro_hello',{version:1,...(this.r.capabilityRequest?{capability_request:'pro_comment_options_v1'}:{})}));
    let timer;try{return await Promise.race([ready,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('participant_native_unavailable')),10000);})]);}
    finally{clearTimeout(timer);this.ready=null;}
   }
@@ -65,6 +71,12 @@
     try{await operation;}finally{this.inflight--;}
     return;
    }
+   const capabilityState=v.capabilities?await this.read(b.subject):null;
+   if(v.capabilities&&this.r.releaseDigest&&capabilityState?.desired_running===true){
+    const digest=await this.r.releaseDigest(),identity=await this.r.identity();
+    requireValue(port===this.port&&revision===this.revision&&this.binding===b&&identity.subject===b.subject&&identity.installation_id===b.installation_id&&(!this.r.generation||this.r.generation()===b.epoch)&&/^[a-f0-9]{64}$/.test(digest),'participant_scope_changed');
+    if(!await this.save(b.subject,{capabilities:capability(v.capabilities),capability_at:Date.now(),capability_release_digest:digest},revision))return;
+   }else if(v.state==='ready')await this.save(b.subject,{capabilities:null,capability_at:null,capability_release_digest:null},revision);
    if(v.state==='ready'&&this.ready){this.ready.resolve();return;}
    if(v.state==='not_ready'&&this.ready){this.ready.reject(Error(v.error||'participant_dependencies_missing'));return;}
    const stopped=await this.read(b.subject);if(revision!==this.revision)return;
@@ -163,7 +175,7 @@
   async stop(){
    this.revision++;await this.r.intent(false);
    const owner=await this.r.owner(),p=await this.read(owner);
-   if(!p)return;await this.save(owner,{desired_running:false,state:HELD.has(p.state)?'source_unknown':'stopped',error:'participant_stopped'});
+   if(!p)return;await this.save(owner,{capabilities:null,capability_at:null,capability_release_digest:null,desired_running:false,state:HELD.has(p.state)?'source_unknown':'stopped',error:'participant_stopped'});
    // Revocation can stop its own old epoch after Agent invalidation; never authorize RPC.
    if(this.port&&this.binding?.subject===owner){this.post(this.frame('pro_stop',{run_id:p.run_id||null}));return;}
    if(!HELD.has(p.state)||!UUID.test(p.run_id||'')||!UUID.test(p.session||'')||!integer(p.generation))return;
