@@ -165,7 +165,7 @@
   }
   async poll(){
    const p=await this.read();if(!p)return;
-   if(this.port){if(p.intent)this.post(this.frame('pro_status',{run_id:p.run_id||null}));return;}
+   if(this.port){if(p.intent&&UUID.test(p.run_id||''))this.post(this.frame('pro_status',{run_id:p.run_id}));return;}
    if(HELD.has(p.state)||p.pending)return; // Unknown launch is durable; never replay Start.
    if(p.desired_running&&p.error==='participant_waiting_task'&&!this.starting&&!this.r.busy())return this.start();
   }
