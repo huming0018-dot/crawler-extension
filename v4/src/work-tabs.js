@@ -36,7 +36,57 @@
     historicalOpened(entry,session) {
       return entry?.state==='opened' && typeof entry.session==='string' && !!entry.session && entry.session!==session && Number.isInteger(entry.tab) && entry.tab>0 && typeof entry.document==='string' && !!entry.document && typeof entry.token==='string' && !!entry.token;
     }
-    async open(url, slot, {verificationHome=false}={}) {
+    open(url,slot,options={}) {
+      const scope=Promise.all([this.key(),this.session(),this.presentationAllowed()]).then(values=>({values}),error=>({error}));
+      const pending=(this.openTail||Promise.resolve()).catch(()=>{}).then(async()=>{
+        const captured=await scope;if(captured.error)throw captured.error;
+        const [key,session,running]=captured.values;
+        const valid=async()=>{await this.assertKey(key);if((await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session!==session||running&&!await this.presentationAllowed())throw Error('cancelled');};
+        await valid();return this.openOwned(url,slot,options,valid);
+      });
+      this.openTail=pending;return pending;
+    }
+    createdContainer(entry,tab,session,windowId) {
+      // Creation proves only window membership, never permission to read or close content.
+      return entry.state==='opened'&&entry.session===session&&entry.instance===this.instance&&entry.document===null&&typeof entry.token==='string'&&!!entry.token&&Number.isSafeInteger(entry.tab)&&entry.tab>0&&entry.tab===tab.id&&Number.isSafeInteger(windowId)&&windowId>0&&entry.created_window===windowId&&tab.windowId===windowId&&tab.status==='loading'&&!tab.discarded&&!tab.frozen&&(tab.url==='about:blank'||tab.url===entry.url)&&(!tab.pendingUrl||tab.pendingUrl===entry.url);
+    }
+    async ownedWindow(key,session) {
+      const current=Object.entries(await this.entries()).filter(([,e])=>e.session===session&&e.state!=='retired');
+      if(!current.length)return null;
+      const bound=[];
+      for(const [slot,e]of current){
+        if(e.state!=='opened'||!Number.isSafeInteger(e.tab)||e.tab<1||typeof e.token!=='string'||!e.token)throw this.failure('entry_state');
+        if(e.document!==null&&(typeof e.document!=='string'||!e.document)||e.document===null&&e.instance!==this.instance)throw this.failure('close_identity');
+        const tab=await this.chrome.tabs.get(e.tab);
+        if(this.createdContainer(e,tab,session,tab.windowId)){bound.push([slot,{...e},tab.windowId]);continue;}
+        if(e.document===null&&tab.status==='complete'&&!tab.pendingUrl)await this.read('ownership',slot);
+        const entry=(await this.entries())[slot],target=await this.target(slot,{verificationObservation:true});
+        const proof=(await this.probe(entry.tab,'ownership')).response;
+        if(target.pending||typeof entry.document!=='string'||!entry.document||proof?.token!==entry.token||proof?.document!==entry.document)throw this.failure('close_identity');
+        bound.push([slot,{...entry},target.tab.windowId]);
+      }
+      const windowId=bound[0][2],selected=bound.filter(([,e,id])=>id===windowId).map(([slot,e])=>[slot,e]);
+      await this.checkWindow(windowId,selected,key,session);return {windowId,selected};
+    }
+    async checkWindow(windowId,selected,key,session,added=null) {
+      await this.assertKey(key);
+      if((await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session!==session)throw Error('cancelled');
+      const window=await this.chrome.windows.get(windowId,{populate:true}),ids=selected.map(([,e])=>e.tab).concat(added?[added.tab]:[]);
+      if(!Number.isSafeInteger(windowId)||windowId<1||window.id!==windowId||window.type!=='normal'||window.incognito||window.state!=='minimized'||!Array.isArray(window.tabs)||new Set(ids).size!==ids.length||window.tabs.length!==ids.length||window.tabs.some(t=>!ids.includes(t.id)||t.windowId!==windowId))throw this.failure('silent_window_unconfirmed');
+      const entries=await this.entries();
+      for(const [slot,e]of selected){
+        const live=entries[slot],tab=window.tabs.find(t=>t.id===e.tab);
+        if(!live||['state','session','tab','document','token','url','instance','created_window'].some(k=>live[k]!==e[k]))throw this.failure('close_identity');
+        if(this.createdContainer(e,tab,session,windowId))continue;
+        const proof=(await this.probe(e.tab,'ownership')).response;
+        if(typeof e.document!=='string'||!e.document||tab.discarded||tab.frozen||tab.pendingUrl||tab.status!=='complete'||!this.matches(tab.url,e.url)&&!(e.verification&&slot.startsWith('verify-')&&e.url===root.CrowdCore.HOST+'/'&&(()=>{try{root.CrowdCore.noteURL(tab.url);return true;}catch(_){return false;}})())||proof?.token!==e.token||proof?.document!==e.document)throw this.failure('close_identity');
+      }
+      if(added){const tab=window.tabs.find(t=>t.id===added.tab);if(!tab||!this.matches(tab.url,added.url)&&!this.matches(tab.pendingUrl,added.url))throw this.failure('silent_window_unconfirmed');}
+      await this.assertKey(key);
+      if((await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session!==session)throw Error('cancelled');
+    }
+    async openOwned(url, slot, {verificationHome=false}={},valid=async()=>{}) {
+      await valid();
       const home=verificationHome&&slot.startsWith('verify-')&&url===root.CrowdCore.HOST+'/';
       const key=await this.key(),destination=home?url:root.CrowdCore.navigationURL(url),session=await this.session();
       let entry=(await this.entries())[slot];
@@ -65,6 +115,10 @@
         await this.assertKey(key);
         await this.chrome.tabs.update(entry.tab,{url:entry.url,active:false});
       } else {
+        await this.assertKey(key);
+        if((await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session!==session)throw Error('cancelled');
+        const reuse=await this.ownedWindow(key,session);
+        await valid();
         entry={url:destination,token:this.uuid(),state:'opening',session,tab:null,instance:this.instance,document:null,...(slot.startsWith('verify-')?{verification:true}:{})};
         // A crash after creation and before saving the ID remains unknown;
         // recovery refuses a second creation under the same admission.
@@ -73,9 +127,11 @@
         // Do not attach a durable capture to an arbitrary temporary automation window.
         if(await this.structuredAllowed()){try{root.CrowdCore.noteURL(destination);const u=new URL(destination);u.searchParams.set('crowd_capture',entry.token);entry.url=u.href;}catch(error){if(error.message!=='invalid_note_url')throw error;}}
         await this.assertKey(key);
-        const window=await this.chrome.windows.create({url:entry.url,type:'normal',state:'minimized',focused:false});
-        const tab=window.tabs?.[0];
-        entry={...entry,tab:Number.isSafeInteger(tab?.id)?tab.id:null,created_window:Number.isSafeInteger(window.id)?window.id:null};
+        if(reuse)await this.checkWindow(reuse.windowId,reuse.selected,key,session);
+        await valid();
+        const window=reuse?null:await this.chrome.windows.create({url:entry.url,type:'normal',state:'minimized',focused:false});
+        const tab=reuse?await this.chrome.tabs.create({windowId:reuse.windowId,url:entry.url,active:false}):window.tabs?.[0];
+        entry={...entry,tab:Number.isSafeInteger(tab?.id)?tab.id:null,created_window:reuse?reuse.windowId:Number.isSafeInteger(window.id)?window.id:null};
         // Save the known creation outcome before visibility confirmation can fail.
         await this.write(entries=>{if(entries[slot]?.token!==entry.token)throw Error('cancelled');entries[slot]=entry;},key);
         {
@@ -84,18 +140,21 @@
             const current=(await this.entries())[slot],marker=(await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session;
             if(marker!==session||!current||['state','session','tab','token','url','instance','created_window'].some(k=>current[k]!==entry[k]))throw Error('cancelled');
             if(!Number.isSafeInteger(entry.tab)||entry.tab<1||!Number.isSafeInteger(entry.created_window)||entry.created_window<1)throw this.failure('silent_window_unconfirmed');
+            if(reuse){await this.checkWindow(reuse.windowId,reuse.selected,key,session,entry);return await this.chrome.windows.get(entry.created_window,{populate:true});}
             const actual=await this.chrome.windows.get(entry.created_window,{populate:true}),only=actual?.tabs?.[0];
             if(actual?.id!==entry.created_window||actual.type!=='normal'||actual.incognito||!Array.isArray(actual.tabs)||actual.tabs.length!==1||only?.id!==entry.tab||only.windowId!==actual.id||!this.matches(only.url,entry.url)&&!this.matches(only.pendingUrl,entry.url))throw this.failure('silent_window_unconfirmed');
             await this.assertKey(key);return actual;
           };
           const actual=await createdWindow();
           if(actual.state!=='minimized'){
+            if(reuse)throw this.failure('silent_window_unconfirmed');
             await createdWindow();
             try{await this.chrome.windows.update(entry.created_window,{state:'minimized',focused:false});}catch(_){throw this.failure('silent_window_unconfirmed');}
           }
           const confirmed=await createdWindow();if(confirmed.state!=='minimized')throw this.failure('silent_window_unconfirmed');
         }
       }
+      await valid();
       await this.write(entries=>{entries[slot]={...entry,state:'opened'};},key);
     }
     rateLimitURL(value) {

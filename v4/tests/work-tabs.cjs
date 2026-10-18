@@ -1,10 +1,11 @@
 'use strict';
-const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto');
-for(const file of ['core','work-tabs'])vm.runInThisContext(fs.readFileSync('v4/src/'+file+'.js','utf8'));
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto'),path=require('node:path');
+const SRC=path.resolve(process.argv[2]||path.join(__dirname,'../src'));
+for(const file of ['core','work-tabs'])vm.runInThisContext(fs.readFileSync(path.join(SRC,file+'.js'),'utf8'));
 (async()=>{
  let owner='one',seq=0,created=0,removed=[],data={},session={},tabs=new Map();
  const chrome={storage:{session:{get:async key=>({[key]:session[key]}),set:async value=>Object.assign(session,value)}},windows:{getAll:async()=>[{id:1}]},tabs:{
-  create:async({url})=>{const tab={id:++seq,url,status:'complete',document:crypto.randomUUID(),token:null};tabs.set(tab.id,tab);created++;return {...tab};},
+  create:async({url,windowId})=>{const tab={id:++seq,windowId,url,status:'complete',document:crypto.randomUUID(),token:null};tabs.set(tab.id,tab);created++;return {...tab};},
   get:async id=>{if(!tabs.has(id))throw Error('missing');return {...tabs.get(id)};},
   update:async(id,{url})=>Object.assign(tabs.get(id),{url,document:crypto.randomUUID(),token:null}),
   sendMessage:async(id,m)=>{const tab=tabs.get(id);tab.token=m.token;return {bound:true,document:tab.document};},remove:async id=>{removed.push(id);tabs.delete(id);}
@@ -16,7 +17,7 @@ for(const file of ['core','work-tabs'])vm.runInThisContext(fs.readFileSync('v4/s
  const make=()=>new CrowdWorkTabs({chrome,storage,owner:async()=>owner,probe,uuid:crypto.randomUUID});
  const w=make(),urls=['a','b'].map(x=>CrowdCore.HOST+'/explore/'+x.repeat(24));
  await Promise.all([w.open(urls[0],'a'),w.open(urls[1],'b')]);assert.equal(created,2);assert.equal(new Set(Object.values(data['work_tabs:one']).map(e=>e.session)).size,1);
- const pending=data['work_tabs:one'].a.tab;tabs.get(pending).status='loading';tabs.get(pending).url=undefined;assert.equal((await w.read('note_ready','a')).reason,'page_loading');await assert.rejects(()=>make().read('note_ready','a'),/pool_recovery_required/);tabs.get(pending).url=urls[0];tabs.get(pending).status='complete';
+ const pending=data['work_tabs:one'].a.tab;tabs.get(pending).status='loading';tabs.get(pending).url=undefined;tabs.get(pending).pendingUrl=urls[0];assert.equal((await w.read('note_ready','a')).reason,'page_loading');assert.equal((await make().read('note_ready','a')).reason,'page_loading');delete tabs.get(pending).pendingUrl;tabs.get(pending).url=urls[0];tabs.get(pending).status='complete';
  await w.read('note_ready','a');await w.read('note_ready','b');
  const restart=make();assert.equal((await restart.read('note_ready','a')).ready,true,'worker restart keeps bound document');
  const a=data['work_tabs:one'].a.tab,originalURL=tabs.get(a).url;tabs.get(a).url=CrowdCore.HOST+'/explore/'+'c'.repeat(24);

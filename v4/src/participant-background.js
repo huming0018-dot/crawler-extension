@@ -66,6 +66,16 @@ const runtime = {
     if(!['opened','missing'].includes(old.state)||(old.state==='missing'&&old.session===marker)||typeof old.session!=='string'||!old.session||typeof marker!=='string'||!marker)throw Error('task_reconciliation_required');
     if(old.session!==marker)await workTabs.retireLoginPage(valid);
   },
+  async retireMissingVerification(slot,expected,valid){
+    const owner=await runtime.owner(),s=await agent.read(),m=s.verification_page,entries=await workTabs.entries(),entry=entries[slot],marker=(await chrome.storage.session.get('crowd_work_session')).crowd_work_session;
+    const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+    if(typeof slot!=='string'||!slot.startsWith('verify-')||!uuid(slot.slice(7))||!/^[a-f0-9]{64}$/.test(expected||'')||!await valid()||owner!==agent.generationOwner||s.owner_id!==owner||!m||m.slot!==slot||m.manual!==true||!['opened','confirmed'].includes(m.stage)||m.expected_ref!==expected||(await platformHealth.read()).xiaohongshu?.expected_ref!==expected||!entry||entry.state!=='missing'||entry.verification!==true||entry.url!==CrowdCore.HOST+'/'||!Number.isSafeInteger(entry.tab)||entry.tab<1||!uuid(entry.token)||!uuid(entry.document)||typeof entry.session!=='string'||!entry.session||typeof marker!=='string'||!marker)throw Error('verification_page_unknown');
+    if(entry.session===marker){let absent=false;try{await chrome.tabs.get(entry.tab);}catch(error){absent=typeof error?.message==='string'&&new RegExp('^No tab with id: '+entry.tab+'\\.?$').test(error.message);}if(!absent)throw Error('verification_page_unknown');}
+    if(!await valid()||owner!==await runtime.owner()||(await platformHealth.read()).xiaohongshu?.expected_ref!==expected)throw Error('cancelled');
+    await workTabs.write(all=>{const current=all[slot];if(!current||['tab','session','token','document','url','state','instance','verification'].some(k=>current[k]!==entry[k]))throw Error('cancelled');all[slot]={...current,state:'retired',retired_reason:'known_missing_verification'};},'work_tabs:'+owner);
+    if(!await valid()||owner!==await runtime.owner()||(await platformHealth.read()).xiaohongshu?.expected_ref!==expected)throw Error('cancelled');
+    return true;
+  },
   expectedPrincipal:async()=>(await platformHealth.read()).xiaohongshu?.expected_ref,
   verificationCurrent:slot=>workTabs.verificationCurrent(slot),
   async verifyPage(slot){const owner=await runtime.owner(),expected=(await platformHealth.read()).xiaohongshu?.expected_ref;const page=await workTabs.verificationProbe(slot,async value=>{const p=await normalizeSessionPage(value,owner);return p.status==='authenticated'&&p.principal_ref===expected;});return normalizeSessionPage(page,owner);},

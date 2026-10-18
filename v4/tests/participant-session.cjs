@@ -1,6 +1,7 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),{randomUUID}=require('node:crypto');
-for(const name of ['core','agent','session-health','participant-session'])vm.runInThisContext(fs.readFileSync('v4/src/'+name+'.js','utf8'));
+const path=require('node:path'),SRC=process.argv[2]?path.resolve(process.argv[2]):path.join(__dirname,'../src');
+for(const name of ['core','agent','session-health','participant-session'])vm.runInThisContext(fs.readFileSync(path.join(SRC,name+'.js'),'utf8'));
 const pause=()=>new Promise(r=>setImmediate(r));
 function fixture(extra={}){
  let now=Date.now(),owner='fixture-owner',pages={xiaohongshu:{status:'authenticated',principal_ref:'a'.repeat(64)}},probe=null,status=null;

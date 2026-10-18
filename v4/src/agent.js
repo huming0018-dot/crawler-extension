@@ -158,7 +158,15 @@
         await this.save(s);return false;
       })().finally(()=>{this.active=null;});return this.active;
     }
-    async recoverLoginPage(valid,{manual=false,confirm=false,focus=manual}={}) {
+    async pendingAcceptanceVerification(s) {
+      const a=s.acceptance_supplement;
+      if(s.consent!==C.CONSENT||s.task!=null||s.phase!=='idle'||s.pilot_phase!=='awaiting_acceptance'||s.pilot_waiting!==false||s.pilot_check_pending||s.last_error!=='identity_verification_required'||s.delivery_error!=null||this.recoveryUnsafe(s)||s.enrichment!=null||s.navigation_stage!=null||s.task_closure&&s.task_closure.stage!=='acknowledged'||!Array.isArray(s.outbox)||s.outbox.length||s.work_slots!=null&&(!Array.isArray(s.work_slots)||s.work_slots.length)||a?.schema!=='crowd-acceptance-batch-v1'||a.state!=='admitted')return false;
+      const wire=Object.fromEntries(['schema','id','task_id','installation_id','baseline_received','extra_limit','target','remaining'].map(k=>[k,a[k]])),g=this.supplementGrant({acceptance_supplement:wire});
+      if(!g||!Number.isSafeInteger(s.received)||s.received<g.baseline_received||s.received>=g.target||g.remaining!==g.target-s.received)return false;
+      const owner=await this.r.owner?.(),node=await this.r.storage.get('node-monitor:'+owner);
+      return !!owner&&owner===s.owner_id&&owner===this.generationOwner&&node?.installation_id===g.installation_id&&owner===await this.r.owner?.();
+    }
+    async recoverLoginPage(valid,{manual=false,confirm=false,focus=manual,acceptance=false}={}) {
       await this.initializeGeneration();if(this.active||this.stopping||this.maintenance)throw Error('executor_busy');
       const generation=this.generation,stopIntent=this.stopIntent||0,owner=this.generationOwner;
       const check=async()=>{if(generation!==this.generation||stopIntent!==(this.stopIntent||0)||owner!==(await this.r.owner?.()||'standalone')||!await valid())throw Error('cancelled');};
@@ -169,7 +177,15 @@
         if(s.consent!==C.CONSENT)throw Error('consent_required');
         if(this.recoveryUnsafe(s))throw Error('task_reconciliation_required');
         const expected=await this.r.expectedPrincipal?.();if(!/^[a-f0-9]{64}$/.test(expected||''))throw Error('identity_verification_required');
-        let m=s.verification_page;
+        let m=s.verification_page,checkedControl=null;
+        if(acceptance){
+          if(manual!==true||focus!==false||confirm||!await this.pendingAcceptanceVerification(s)||!m||m.manual!==true||!['opened','confirmed'].includes(m.stage)||m.expected_ref!==expected)throw Error('identity_verification_required');
+          checkedControl=await this.control(s,'control',alive,signal);await check();
+          const fresh=this.supplementGrant(checkedControl),a=s.acceptance_supplement;
+          if(!fresh||checkedControl.allowed!==true||checkedControl.paused!==false||checkedControl.reason!==null||checkedControl.pilot_phase!=='awaiting_acceptance'||['schema','id','task_id','installation_id','baseline_received','extra_limit','target','remaining'].some(k=>fresh[k]!==a[k])||!await this.pendingAcceptanceVerification(s))throw Error('identity_verification_required');
+          if(!this.r.retireMissingVerification)throw Error('verification_page_unknown');
+          await this.r.retireMissingVerification(m.slot,expected,valid);await check();
+        }
         if(confirm){
           if(!m||m.stage!=='opened'||m.expected_ref!==expected)throw Error('verification_page_unknown');
           const page=await this.r.verifyPage(m.slot);await check();
@@ -202,7 +218,7 @@
         if(!manual){s.enabled=false;s.last_error='identity_verification_required';await this.save(s);await check();}
         if(!m){m=s.verification_page={stage:'intent',slot:'verify-'+this.r.uuid(),manual,expected_ref:expected,created_at:this.r.now()};await this.save(s);await check();}
         const status=await this.api.rpc('status',{},signal);await check();if(status.participant?.status!=='approved')throw Error('approval_required');
-        const control=await this.control(s,'control',alive,signal);await check();await this.save(s);
+        const control=checkedControl||await this.control(s,'control',alive,signal);await check();await this.save(s);
         const wait=async value=>{m.stage='waiting';m.reason=value.reason;m.retry_at=this.r.now()+Math.max(1000,value.wait_ms||60000);await this.save(s);return {waiting:true,reason:m.reason,retry_at:m.retry_at};};
         if(manual){
           if(control.reason&&!['test_completed','daily_quota','task_full','session_rest','action_gap','global_pause'].includes(control.reason))throw Error(control.reason);

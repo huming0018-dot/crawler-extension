@@ -59,10 +59,11 @@
    // A known manual page from a prior Chrome generation cannot supply current DOM proof.
    // Reuse the original recovery metadata path, never adopt/read the stale tab ID.
    const manual=s.verification_page,bound=manual?.manual===true&&['opened','confirmed'].includes(manual.stage)?(await this.r.health.read(owner)).xiaohongshu?.expected_ref:null;
-   const sourceIntent=p.desired_running===true&&!s.pilot_waiting&&!s.pilot_check_pending&&!s.test_run&&!s.acceptance_reconcile&&!BACKEND.has(s.last_error)&&!BACKEND.has(s.delivery_error)&&(s.pilot_phase==='active'||Number.isSafeInteger(s.task?.target)&&Number.isSafeInteger(s.task?.received)&&s.task.target>s.task.received);
+   const batchVerification=p.desired_running===true&&this.r.agent.pendingAcceptanceVerification&&await this.r.agent.pendingAcceptanceVerification(s);if(!await valid())return;
+   const sourceIntent=p.desired_running===true&&!s.pilot_waiting&&!s.pilot_check_pending&&!s.test_run&&!s.acceptance_reconcile&&!BACKEND.has(s.last_error)&&!BACKEND.has(s.delivery_error)&&(s.pilot_phase==='active'||Number.isSafeInteger(s.task?.target)&&Number.isSafeInteger(s.task?.received)&&s.task.target>s.task.received||batchVerification===true);
    if(sourceIntent&&this.r.verificationCurrent&&this.r.recoverPage&&manual?.manual===true&&['opened','confirmed'].includes(manual.stage)&&/^[a-f0-9]{64}$/.test(bound||'')&&manual.expected_ref===bound&&s.last_error!=='user_stopped'&&!this.r.agent.active&&!this.r.agent.stopping&&!this.r.agent.maintenance&&!this.r.agent.recoveryUnsafe(s)){
     let current=null;try{current=await this.r.verificationCurrent(manual.slot);}catch(_){}if(!await valid())return;
-    if(current===false){await this.r.recoverPage(valid,{manual:true,focus:false});if(!await valid())return;s=await this.r.agent.read();}
+    if(current===false){await this.r.recoverPage(valid,{manual:true,focus:false,acceptance:batchVerification===true});if(!await valid())return;s=await this.r.agent.read();}
    }
    // Explicit extra-one permission is the only automatic wake from completed acceptance.
    // A prior user stop, unsafe queue or account mismatch never enters this path.
