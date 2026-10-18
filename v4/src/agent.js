@@ -935,7 +935,7 @@
           }
           const resumeBatch=s.acceptance_supplement?.schema==='crowd-acceptance-batch-v1'&&s.acceptance_supplement.state==='admitted'&&s.acceptance_supplement.task_id===finishedTask&&s.acceptance_supplement.remaining>0&&!finished.error&&finished.status==='open'&&finished.received===s.task.received&&finished.received<s.task.target&&Number.isSafeInteger(s.task.lease_start_received)&&s.task.received>s.task.lease_start_received;
           if(resumeBatch)s.assignment_refresh=true;
-          s.task = null; s.phase = 'idle'; s.next_at = now + (continueBatch||resumeBatch?1000:60000); await this.r.close();
+          s.task = null; s.phase = 'idle'; s.next_at = now + (continueBatch||resumeBatch?1000:60000); if(this.r.closeSlot)await this.r.closeSlot('search');else await this.r.close();
         } else if (s.task.remaining_today === 0 && !s.task.repair_only) {
           if(s.test_run){await this.endTest(s,'test_quota');return;}
           s.next_at = now + 3600000;
