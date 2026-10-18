@@ -20,7 +20,7 @@ with zipfile.ZipFile(old) as z:z.extractall(directory)
 channel=work/'channel.json'
 config={'directory':str(directory),'extension_key':json.loads((directory/'manifest.json').read_text())['key'],'test_channel':channel.as_uri()}
 (helper/'config.json').write_text(json.dumps(config))
-def publish(package,sequence=1):subprocess.run(['node',str(ROOT/'publish.cjs'),str(keys/'private.pem'),str(package),package.as_uri(),str(sequence),str(channel)],check=True,capture_output=True)
+def publish(package,sequence=1):subprocess.run(['node',str(ROOT/'test_publish_fixture.cjs'),str(keys/'private.pem'),str(package),package.as_uri(),str(sequence),str(channel)],check=True,capture_output=True)
 def call(action,version='4.2.0',**extra):
     msg=json.dumps(dict(action=action,version=version,**extra)).encode();p=subprocess.run([str(binary),'chrome-extension://licijehcpohikchlnkbpjdjdfkcocndg/'],input=struct.pack('<I',len(msg))+msg,capture_output=True,check=True)
     assert len(p.stdout)>=4,(p.stdout,p.stderr)

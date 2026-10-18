@@ -9,7 +9,7 @@ def fixture(name,running=False):
     directory=root/'original';directory.mkdir()
     with zipfile.ZipFile(old) as z:z.extractall(directory)
     channel=root/'channel.json'
-    subprocess.run(['node',str(base['ROOT']/'publish.cjs'),str(key),str(new),new.as_uri(),'10',str(channel)],check=True,capture_output=True)
+    subprocess.run(['node',str(base['ROOT']/'test_publish_fixture.cjs'),str(key),str(new),new.as_uri(),'10',str(channel)],check=True,capture_output=True)
     config=helper/'config.json';config.write_text(json.dumps({'directory':str(directory),'extension_key':json.loads((directory/'manifest.json').read_text())['key'],'test_channel':channel.as_uri(),'test_browser_running':running,'scheduled_enabled':False}))
     def call(action,version='4.2.3',**extra):
         msg=json.dumps(dict(action=action,version=version,**extra)).encode()

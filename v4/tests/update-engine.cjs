@@ -48,7 +48,7 @@ with zipfile.ZipFile(sys.argv[2],'w',zipfile.ZIP_DEFLATED) as z:
  for n,b in files.items():
   i=zipfile.ZipInfo(n);i.create_system=3;i.external_attr=0o100644<<16;i.compress_type=zipfile.ZIP_DEFLATED;z.writestr(i,b)
 `,fixture.new,broken,targetVersion,badVersion]);
- cp.execFileSync(process.execPath,['v4/updater/publish.cjs',fixture.private_key,broken,require('url').pathToFileURL(broken).href,'5',fixture.channel]);
+ cp.execFileSync(process.execPath,['v4/updater/test_publish_fixture.cjs',fixture.private_key,broken,require('url').pathToFileURL(broken).href,'5',fixture.channel]);
  await next.evaluate(()=>updater.check()).catch(()=>{});
  const rollbackUntil=Date.now()+20000;let rollbackWorker;
  while(Date.now()<rollbackUntil){const state=JSON.parse(fs.readFileSync(stateFile));if(state.status==='rolled_back'&&state.failed_sequence===5){for(const t of browser.targets().filter(t=>t.type()==='service_worker'&&t.url().endsWith(targetWorker))){try{const w=await t.worker();if(await w.evaluate(()=>CrowdCore.VERSION)===targetVersion)rollbackWorker=w;}catch{}}if(rollbackWorker)break;}await new Promise(r=>setTimeout(r,200));}
@@ -67,7 +67,7 @@ with zipfile.ZipFile(sys.argv[2],'w',zipfile.ZIP_DEFLATED) as z:
  for n,b in files.items():
   i=zipfile.ZipInfo(n);i.create_system=3;i.external_attr=0o100644<<16;i.compress_type=zipfile.ZIP_DEFLATED;z.writestr(i,b)
 `,fixture.new,future,targetVersion,badVersion]);
-  cp.execFileSync(process.execPath,['v4/updater/publish.cjs',fixture.private_key,future,require('url').pathToFileURL(future).href,'6',fixture.channel]);
+  cp.execFileSync(process.execPath,['v4/updater/test_publish_fixture.cjs',fixture.private_key,future,require('url').pathToFileURL(future).href,'6',fixture.channel]);
   const configFile=path.join(fixture.helper,'config.json'),config=JSON.parse(fs.readFileSync(configFile));config.test_browser_running=false;fs.writeFileSync(configFile,JSON.stringify(config));
   cp.execFileSync(path.join(fixture.helper,'crowd-v4-updater'),['--poll']);
   assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.directory,'manifest.json'))).version,badVersion);

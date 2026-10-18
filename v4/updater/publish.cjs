@@ -3,6 +3,7 @@
 const fs=require('fs'),crypto=require('crypto'),cp=require('child_process');
 const [keyfile,zip,url,sequence,out]=process.argv.slice(2);
 if(!out||!/^\d+$/.test(sequence))throw Error('Usage: publish.cjs KEY ZIP PINNED_URL SEQUENCE OUTPUT');
+if(typeof url!=='string'||!/^https:\/\/raw\.githubusercontent\.com\/huming0018-dot\/crowd-pages\/[a-f0-9]{40}\/v4\/releases\/[a-z0-9.-]+\.zip$/.test(url))throw Error('invalid_url');
 const data=fs.readFileSync(zip),release=cp.execFileSync('/usr/bin/unzip',['-p',zip,'release.json']);
 const info=JSON.parse(release);if(info.protocol!=='crowd_v4'||!/^4\.\d+\.\d+$/.test(info.version))throw Error('invalid release');
 const config=cp.execFileSync('/usr/bin/unzip',['-p',zip,'src/config.js']).toString();

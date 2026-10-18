@@ -20,7 +20,7 @@ def build(ver):
 old=build('4.2.13');new=build('4.2.14')
 with zipfile.ZipFile(old) as z:z.extractall(directory)
 channel=work/'channel.json';config={'directory':str(directory),'extension_id':'ipccepibnkcfpikgebdaanimocdappfk','test_channel':channel.as_uri()};(helper/'config.json').write_text(json.dumps(config))
-def publish(package,sequence):subprocess.run(['node',str(ROOT/'publish.cjs'),str(private),str(package),package.as_uri(),str(sequence),str(channel)],check=True,capture_output=True)
+def publish(package,sequence):subprocess.run(['node',str(ROOT/'test_publish_fixture.cjs'),str(private),str(package),package.as_uri(),str(sequence),str(channel)],check=True,capture_output=True)
 def call(action,ver='4.2.13',origin='ipccepibnkcfpikgebdaanimocdappfk',**extra):
     msg=json.dumps({'action':action,'version':ver,**extra}).encode();r=subprocess.run([str(binary),'chrome-extension://'+origin+'/'],input=struct.pack('<I',len(msg))+msg,capture_output=True,check=True);return json.loads(r.stdout[4:])
 publish(new,1)
