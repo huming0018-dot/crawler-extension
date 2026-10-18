@@ -46,7 +46,11 @@ function fixture(extra={}){
  const open=(tabs,storage)=>new Function('workTabs','CrowdCore','trace','clearNavigation','storage','pendingTabCreation','return ({'+bg.slice(oa,ob)+'}).open')(tabs,CrowdCore,{event:async()=>{}},async()=>{},storage,null);
  let f=fixture({task:null,enrichment:null,phase:'idle'});await f.session.openLogin();let state=await f.read();assert.equal(state.verification_page.stage,'confirmed');
  const url=CrowdCore.taskPlatform({}).searchURL('original');
- await assert.rejects(()=>f.workTabs.open(url,'search'),e=>e.poolCause==='entry_state');
+ await f.workTabs.open(url,'search');
+ assert.notEqual((await f.workTabs.entries()).search.tab,999);
+ assert(Object.values(await f.workTabs.entries()).some(e=>e.tab===999&&e.state==='retired'&&e.retired_reason==='browser_session_changed'));
+ // Keep the original supplement wrapper integration on its own stale fixture.
+ f=fixture({task:null,enrichment:null,phase:'idle'});await f.session.openLogin();
  // Install only the production thin wrapper; no old tab read, close or parser substitute.
  const install=randomUUID(),g={schema:'crowd-acceptance-extra1-v1',id:randomUUID(),task_id:19,installation_id:install,baseline_received:2,extra_limit:1,remaining:1,expires_at:new Date(f.now+3600000).toISOString()};
  await f.storage.set('node-monitor:fixture-owner',{installation_id:install});
@@ -59,5 +63,5 @@ function fixture(extra={}){
  assert(Object.values(entries).some(e=>e.tab===999&&e.state==='retired'));
  // Unknown old navigation must never be retired to clear a path.
  for(const bad of ['opening','claiming','unknown']){const before=await f.workTabs.entries();before.search={...before.search,state:bad,session:'old-browser'};await f.storage.set('work_tabs:fixture-owner',before);await assert.rejects(()=>f.r.retireSupplementPage(async()=>true),/task_reconciliation_required/);assert.equal((await f.workTabs.entries()).search.state,bad);}
- console.log('PASS reproduced stale search entry_state; actual Agent.step control/claim/search admission + exact runtime.open + real WorkTabs navigation/bind/ownership; retired metadata only, no old-tab access, three unknown-state refusals');
+ console.log('PASS stale search automatically retired metadata-only; actual Agent.step control/claim/search admission + exact runtime.open + real WorkTabs navigation/bind/ownership; retired metadata only, no old-tab access, three unknown-state refusals');
 })().catch(e=>{console.error(e.stack);process.exitCode=1;});

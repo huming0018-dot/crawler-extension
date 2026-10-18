@@ -37,6 +37,17 @@
       const home=verificationHome&&slot.startsWith('verify-')&&url===root.CrowdCore.HOST+'/';
       const key=await this.key(),destination=home?url:root.CrowdCore.navigationURL(url),session=await this.session();
       let entry=(await this.entries())[slot];
+      if(entry?.state==='opened' && typeof entry.session==='string' && entry.session && entry.session!==session && Number.isInteger(entry.tab) && entry.tab>0 && typeof entry.document==='string' && entry.document && typeof entry.token==='string' && entry.token) {
+        // OTA invalidates tab IDs. Keep their history without touching the old page.
+        await this.write(async entries=>{
+          await this.assertKey(key);
+          const current=entries[slot];
+          if(!current || ['state','session','tab','document','token','url','instance'].some(name=>current[name]!==entry[name]))throw Error('cancelled');
+          entries['session-retired-'+this.uuid()]={...current,state:'retired',retired_reason:'browser_session_changed'};
+          delete entries[slot];
+        },key);
+        await this.assertKey(key);entry=null;
+      }
       if(entry?.state==='retired') {
         await this.write(entries=>{if(entries[slot]?.token===entry.token)delete entries[slot];},key);entry=null;
       }
