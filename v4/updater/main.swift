@@ -456,16 +456,22 @@ func proSession(_ first:[String:Any]) throws {
  let process=Process(),input=Pipe(),output=Pipe();process.executableURL=URL(fileURLWithPath:c["python"] as! String);process.arguments=["-u",c["entry"] as! String,"--config",root.appendingPathComponent("pro-config.json").path];process.standardInput=input;process.standardOutput=output;process.standardError=FileHandle.nullDevice
  process.environment=["PATH":"/usr/bin:/bin:/usr/sbin:/sbin","HOME":fm.homeDirectoryForCurrentUser.path,"PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1"]
  do {try process.run()} catch {try write(["busy":previousBusy,"state":"not_ready"],busyURL);try framedWrite(proResponse(first,"not_ready","pro_not_ready"),.standardOutput);return}
- let stateLock=NSLock();var clean=false;var run:Any=NSNull();var readerFailed=false;var pendingRPC=Set<String>();var recovering=previousBusy;var commandIssued=first["type"] as? String == "pro_start"
+ let stateLock=NSLock();var clean=false;var run:Any=NSNull();var readerFailed=false;var pendingRPC=Set<String>();var recovering=previousBusy;var commandIssued=first["type"] as? String == "pro_start";var childFrameSeen=false;var helloStartupFailed=false
  let done=DispatchGroup();done.enter()
  DispatchQueue.global().async {
   defer{done.leave()}
   do {while let m=try framedRead(output.fileHandleForReading) {try proMessage(m,child:true);try require(m["session"] as? String==first["session"] as? String && proInteger(m["epoch"])==proInteger(first["epoch"]),"pro_invalid_message")
-    stateLock.lock();defer{stateLock.unlock()}
+    stateLock.lock();defer{stateLock.unlock()};childFrameSeen=true
     if m["type"] as? String=="rpc_request" {try require(!pendingRPC.contains(m["id"] as! String),"pro_invalid_message");pendingRPC.insert(m["id"] as! String);clean=false}
     if m["type"] as? String=="pro_state" {run=m["run_id"]!;let state=m["state"] as! String;if ["stopped","complete","partial","source_failed"].contains(state){recovering=false};clean = !recovering && pendingRPC.isEmpty && (["stopped","complete","partial","source_failed"].contains(state) || (!commandIssued && ["ready","not_ready"].contains(state))) && proInteger(m["pending"])==0;try write(["busy":!clean,"state":state],busyURL)}
     try framedWrite(m,.standardOutput)
-  }} catch {stateLock.lock();readerFailed=true;clean=false;stateLock.unlock();try? write(["busy":true,"state":"unknown"],busyURL);try? input.fileHandleForWriting.close()}
+  }
+   // A HELLO-only interpreter exit has no task authority; report dependency failure instead of waiting forever.
+   process.waitUntilExit();stateLock.lock();defer{stateLock.unlock()}
+   if first["type"] as? String=="pro_hello" && !commandIssued && !recovering && !childFrameSeen && !readerFailed && pendingRPC.isEmpty {
+    helloStartupFailed=true;clean=true;try write(["busy":false,"state":"not_ready"],busyURL);try framedWrite(proResponse(first,"not_ready","pro_not_ready"),.standardOutput)
+   } else if !clean {try write(["busy":true,"state":"unknown"],busyURL)}
+  } catch {stateLock.lock();readerFailed=true;clean=false;stateLock.unlock();try? write(["busy":true,"state":"unknown"],busyURL);try? input.fileHandleForWriting.close()}
  }
  defer {
   // EOF cancels the owned worker via its reader. Never signal Chrome or a foreign process group.
@@ -475,7 +481,7 @@ func proSession(_ first:[String:Any]) throws {
   let until=Date().addingTimeInterval(12);while process.isRunning && Date()<until {Thread.sleep(forTimeInterval:0.02)}
   if process.isRunning {process.terminate()}
   _=done.wait(timeout:.now()+1)
-  stateLock.lock();let safe=clean && !readerFailed && pendingRPC.isEmpty && !process.isRunning && process.terminationStatus==0;stateLock.unlock()
+  stateLock.lock();let safe=clean && !readerFailed && pendingRPC.isEmpty && !process.isRunning && (process.terminationStatus==0 || (helloStartupFailed && !commandIssued && !recovering));stateLock.unlock()
   try? write(["busy":!safe,"state":safe ? "stopped":"unknown"],busyURL)
  }
  try framedWrite(first,input.fileHandleForWriting)
