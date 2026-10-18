@@ -73,7 +73,7 @@
         // Do not attach a durable capture to an arbitrary temporary automation window.
         if(await this.structuredAllowed()){try{root.CrowdCore.noteURL(destination);const u=new URL(destination);u.searchParams.set('crowd_capture',entry.token);entry.url=u.href;}catch(error){if(error.message!=='invalid_note_url')throw error;}}
         await this.assertKey(key);
-        const window=await this.chrome.windows.create({url:entry.url,type:'normal',focused:false});
+        const window=await this.chrome.windows.create({url:entry.url,type:'normal',state:'minimized',focused:false});
         const tab=window.tabs[0];
         entry={...entry,tab:tab.id};
       }
@@ -193,7 +193,7 @@
     }
     async focusVerification(slot) {
       const {entry,tab}=await this.target(slot);if(!entry.verification)throw this.failure('verification_slot');
-      await this.chrome.tabs.update(entry.tab,{active:true});await this.chrome.windows.update(tab.windowId,{focused:true});
+      await this.chrome.tabs.update(entry.tab,{active:true});await this.chrome.windows.update(tab.windowId,{state:'normal',focused:true});
     }
     async adoptVerification(slot,valid) {
       const key=await this.key();await this.read('ownership',slot);if(!await valid())throw Error('cancelled');
