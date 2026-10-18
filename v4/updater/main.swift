@@ -449,30 +449,30 @@ func proSession(_ first:[String:Any]) throws {
  let process=Process(),input=Pipe(),output=Pipe();process.executableURL=URL(fileURLWithPath:c["python"] as! String);process.arguments=["-u",c["entry"] as! String,"--config",root.appendingPathComponent("pro-config.json").path];process.standardInput=input;process.standardOutput=output;process.standardError=FileHandle.nullDevice
  process.environment=["PATH":"/usr/bin:/bin:/usr/sbin:/sbin","HOME":fm.homeDirectoryForCurrentUser.path,"PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1"]
  do {try process.run()} catch {try write(["busy":previousBusy,"state":"not_ready"],busyURL);try framedWrite(proResponse(first,"not_ready","pro_not_ready"),.standardOutput);return}
- let stateLock=NSLock();var clean=false;var run:Any=NSNull();var readerFailed=false;var pendingRPC=Set<String>();var recovering=previousBusy
+ let stateLock=NSLock();var clean=false;var run:Any=NSNull();var readerFailed=false;var pendingRPC=Set<String>();var recovering=previousBusy;var commandIssued=first["type"] as? String == "pro_start"
  let done=DispatchGroup();done.enter()
  DispatchQueue.global().async {
   defer{done.leave()}
   do {while let m=try framedRead(output.fileHandleForReading) {try proMessage(m,child:true);try require(m["session"] as? String==first["session"] as? String && proInteger(m["epoch"])==proInteger(first["epoch"]),"pro_invalid_message")
     stateLock.lock();defer{stateLock.unlock()}
-    if m["type"] as? String=="rpc_request" {try require(!pendingRPC.contains(m["id"] as! String),"pro_invalid_message");pendingRPC.insert(m["id"] as! String)}
-    if m["type"] as? String=="pro_state" {run=m["run_id"]!;let state=m["state"] as! String;if ["stopped","complete","partial","source_failed"].contains(state){recovering=false};clean = !recovering && pendingRPC.isEmpty && ["ready","not_ready","stopped","complete","partial","source_failed"].contains(state) && proInteger(m["pending"])==0;try write(["busy":!clean,"state":state],busyURL)}
+    if m["type"] as? String=="rpc_request" {try require(!pendingRPC.contains(m["id"] as! String),"pro_invalid_message");pendingRPC.insert(m["id"] as! String);clean=false}
+    if m["type"] as? String=="pro_state" {run=m["run_id"]!;let state=m["state"] as! String;if ["stopped","complete","partial","source_failed"].contains(state){recovering=false};clean = !recovering && pendingRPC.isEmpty && (["stopped","complete","partial","source_failed"].contains(state) || (!commandIssued && ["ready","not_ready"].contains(state))) && proInteger(m["pending"])==0;try write(["busy":!clean,"state":state],busyURL)}
     try framedWrite(m,.standardOutput)
   }} catch {stateLock.lock();readerFailed=true;clean=false;stateLock.unlock();try? write(["busy":true,"state":"unknown"],busyURL);try? input.fileHandleForWriting.close()}
  }
  defer {
   // EOF cancels the owned worker via its reader. Never signal Chrome or a foreign process group.
-  stateLock.lock();let lastRun=run;stateLock.unlock()
+  stateLock.lock();let lastRun=run;let alreadyClean=clean && !readerFailed && pendingRPC.isEmpty;stateLock.unlock()
   var stop=first;stop["type"]="pro_stop";stop["id"]=UUID().uuidString.lowercased();stop=stop.filter{["schema","type","id","session","epoch"].contains($0.key)};stop["run_id"]=lastRun
-  try? framedWrite(stop,input.fileHandleForWriting);try? input.fileHandleForWriting.close()
+  if !alreadyClean {try? framedWrite(stop,input.fileHandleForWriting)};try? input.fileHandleForWriting.close()
   let until=Date().addingTimeInterval(12);while process.isRunning && Date()<until {Thread.sleep(forTimeInterval:0.02)}
   if process.isRunning {process.terminate()}
   _=done.wait(timeout:.now()+1)
-  stateLock.lock();let safe=clean && !readerFailed && !process.isRunning && process.terminationStatus==0;stateLock.unlock()
+  stateLock.lock();let safe=clean && !readerFailed && pendingRPC.isEmpty && !process.isRunning && process.terminationStatus==0;stateLock.unlock()
   try? write(["busy":!safe,"state":safe ? "stopped":"unknown"],busyURL)
  }
  try framedWrite(first,input.fileHandleForWriting)
- while let m=try framedRead(.standardInput) {try proMessage(m);try require(m["session"] as? String==first["session"] as? String && proInteger(m["epoch"])==proInteger(first["epoch"]),"pro_invalid_message");if m["type"] as? String=="rpc_result" {stateLock.lock();let known=pendingRPC.remove(m["id"] as! String) != nil;stateLock.unlock();try require(known,"pro_invalid_message")};try framedWrite(m,input.fileHandleForWriting)}
+ while let m=try framedRead(.standardInput) {try proMessage(m);try require(m["session"] as? String==first["session"] as? String && proInteger(m["epoch"])==proInteger(first["epoch"]),"pro_invalid_message");if ["pro_start","pro_status","pro_stop"].contains(m["type"] as? String ?? "") {stateLock.lock();commandIssued=true;clean=false;stateLock.unlock()};if m["type"] as? String=="rpc_result" {stateLock.lock();let known=pendingRPC.remove(m["id"] as! String) != nil;stateLock.unlock();try require(known,"pro_invalid_message")};try framedWrite(m,input.fileHandleForWriting)}
 }
 func output(_ value: [String:Any]) {if let data=try? JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]){var n=UInt32(data.count).littleEndian;FileHandle.standardOutput.write(Data(bytes:&n,count:4));FileHandle.standardOutput.write(data)}}
 func exactRead(_ count: Int) throws -> Data {var data=Data();while data.count<count {let chunk=FileHandle.standardInput.readData(ofLength:count-data.count);if chunk.isEmpty {throw Failure("invalid_message")};data.append(chunk)};return data}
