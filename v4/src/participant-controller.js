@@ -65,7 +65,7 @@ Object.assign(errors, {
 });
 async function refresh() {
   const ticket = ++viewTicket;
-  const data = await send('state'), s = data.agent, p = data.status;
+  const data = await send('state'), s = data.agent, p = data.status, queued=Array.isArray(s.outbox)?s.outbox.length:null;
   if (ticket !== viewTicket) return;
   current = data;
   renderProgress(data);
@@ -97,7 +97,7 @@ async function refresh() {
   const pendingRejections=s.rejected.filter(item=>!(!item?.kind&&item?.reason==='unrelated_note'));
   const unrelatedSkipped=s.rejected.length-pendingRejections.length;
   const fields = {'插件版本': CrowdCore.VERSION, '中台账户': p.error === 'backend_login_required' ? '需要恢复' : p.error === 'backend_permission_denied' ? '权限待核对' : data.session ? '已登录' : '未登录', '参与状态': p.participant?.status || p.error || '尚未报名', '自动执行': s.enabled ? '已开启' : '已停止', '当前阶段': s.phase === 'idle' && s.task ? '准备执行任务' : labels[s.phase] || s.phase,
-    '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': s.outbox.length + ' / ' + pendingRejections.length, '已跳过（相关性不符）': data.legacy_installation?'请在原版查看':unrelatedSkipped, '最近待处理原因': pendingRejections.length ? (errors[pendingRejections.at(-1)?.reason] || pendingRejections.at(-1)?.reason || '原因待核对') : '无', '最早下一步': !s.enabled ? data.platform_session?.pending&&data.platform_session.desired_running?(data.platform_session.wait_until?new Date(data.platform_session.wait_until).toLocaleString('zh-CN')+'后自动重新核验':'等待原账号核验，成功后自动继续'):'已停止，不会自动执行' : s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
+    '任务': s.task?.query || '暂无', '服务端接收': p.received ?? '—', '核验有效': p.verified ?? '—', '已记奖励': p.reward_fen == null ? '—' : '¥' + (p.reward_fen / 100).toFixed(2), '累计余数': p.remainder ?? '—', '待回传 / 待处理': (queued===null?'待确认':queued) + ' / ' + pendingRejections.length, '已跳过（相关性不符）': data.legacy_installation?'请在原版查看':unrelatedSkipped, '最近待处理原因': pendingRejections.length ? (errors[pendingRejections.at(-1)?.reason] || pendingRejections.at(-1)?.reason || '原因待核对') : '无', '最早下一步': !s.enabled ? data.platform_session?.pending&&data.platform_session.desired_running?(data.platform_session.wait_until?new Date(data.platform_session.wait_until).toLocaleString('zh-CN')+'后自动重新核验':'等待原账号核验，成功后自动继续'):'已停止，不会自动执行' : s.next_at > Date.now() ? new Date(s.next_at).toLocaleString('zh-CN') : '等待调度', '今日访问': s.control ? Object.entries(s.control.counts).map(([k,v]) => ({search:'搜索',detail:'详情',comment:'评论展开',scroll:'滚动'})[k] + ' ' + v + '/' + s.control.caps[k]).join('，') : '尚未同步', '最近提示': errors[s.last_error] || s.last_error || '无'};
   const node=data.node_monitor||{},nodeID=typeof node.installation_id==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(node.installation_id)?node.installation_id:null;
   const registeredAt=Number.isSafeInteger(node.last_registered_at)&&node.last_registered_at>0&&node.last_registered_at<=Date.now()?node.last_registered_at:null;
   fields['本设备安装编号']=nodeID||'尚未确认；请保留原参与身份，不要重新报名';
@@ -122,7 +122,7 @@ async function refresh() {
   if(data.legacy_installation)Object.assign(fields,{'中台账户':'旧版参与身份（待接续）','参与状态':'旧版数据原样保留','任务':'请在原版查看','待回传 / 待处理':'请在原版查看','最近提示':errors.legacy_migration_required});
   $('status').replaceChildren();
   if(!s.enabled&&s.last_error==='rate_limit'&&data.recovery?.gate==='waiting'){fields['最早下一步']=data.recovery.reason==='attempt_active'?'正在自动检查恢复状态':data.recovery.wait_ms>0?new Date(Date.now()+data.recovery.wait_ms).toLocaleString('zh-CN')+' 后自动检查一次':'等待自动恢复检查';fields['最近提示']='限流期间停止采集；确认恢复后自动继续本批，完成后自动停止。';}
-  fields['后台回传'] = s.delivery_error ? (errors[s.delivery_error] || s.delivery_error) : s.outbox.length && (s.enabled || s.delivery_enabled) ? '已有记录会继续回传' : '无待发送记录或已停止回传';
+  fields['后台回传'] = queued===null?'回传状态待确认':s.delivery_error ? (errors[s.delivery_error] || s.delivery_error) : s.outbox.length && (s.enabled || s.delivery_enabled) ? '已有记录会继续回传' : '无待发送记录或已停止回传';
   // Database progress is authoritative; a local parked pilot is not a completed database task.
   if(data.session&&!data.legacy_installation){
     const tasks=Array.isArray(data.progress?.tasks)?data.progress.tasks:null,grant=p.acceptance_supplement;
@@ -130,15 +130,19 @@ async function refresh() {
     const task=tasks&&(selected!==null?tasks.find(t=>t.id===selected):tasks.length===1?tasks[0]:null);
     const validTask=task&&Number.isSafeInteger(task.received)&&task.received>=0&&Number.isSafeInteger(task.target)&&task.target>0&&['open','leased','complete','exhausted','closed'].includes(task.status);
     if(!p.error&&validTask){
-      const remaining=Math.max(0,task.target-task.received),complete=remaining===0&&task.status==='complete',parked=!s.enabled||s.pilot_waiting===true&&s.last_error==='test_completed'&&s.outbox.length===0;
+      const remaining=Math.max(0,task.target-task.received),complete=remaining===0&&task.status==='complete',g=s.acceptance_supplement,source=data.source_runtime;
+      const originalSupplement=g?.state==='consumed'&&Number.isSafeInteger(g.task_id)&&g.task_id===task.id&&Number.isSafeInteger(g.baseline_received)&&g.baseline_received>=0&&Number.isSafeInteger(g.extra_limit)&&g.extra_limit>=1&&g.extra_limit<=100&&g.remaining===0&&task.target===g.baseline_received+g.extra_limit&&s.received===task.received&&task.received===task.target&&(g.schema==='crowd-acceptance-extra1-v1'&&g.extra_limit===1&&(g.target==null||g.target===task.target)||g.schema==='crowd-acceptance-batch-v1'&&g.target===task.target);
+      const parked=originalSupplement&&s.phase==='idle'&&s.pilot_waiting===true&&s.pilot_phase==='awaiting_acceptance'&&s.last_error==='test_completed'&&Array.isArray(s.outbox)&&s.outbox.length===0&&source?.active===false&&source.stopping===false&&source.maintenance===false&&source.session_active===false&&(s.enabled===true||s.delivery_enabled===true)&&data.updater?.enabled===true;
       fields['数据库任务进度']=task.received+' / '+task.target;fields['本轮尚欠']=String(remaining);
       fields['中央任务状态']=({open:'待领取或接续',leased:'已领取',complete:'已结束',exhausted:'未达目标已结束',closed:'已关闭'})[task.status];
       fields['任务']=task.query||'原任务';
       if(complete){
+        fields['自动执行']=parked?'采集已停止，回传和更新保持开启':'中央已收齐，终端停止状态待确认';
         fields['当前阶段']='中央已收齐本轮正文';fields['最早下一步']=parked?'终端已停止来源采集，无需重复采集':'中央已收齐；终端停止状态待确认';
         fields['最近提示']='数据库已入库 '+task.received+' 条；核验与奖励分别统计。';
         $('welcome').textContent='中央已收到 '+task.received+'/'+task.target+' 条正文；'+(parked?'终端已停止来源采集。':'终端停止状态待确认。');
       }else if(pilotWaiting||remaining>0){
+        fields['自动执行']=s.enabled?'原任务尚未完成，等待自动接续':'采集已停止，原任务尚未完成';
         const expired=grant&&typeof grant.expires_at==='string'&&Number.isFinite(Date.parse(grant.expires_at))&&Date.parse(grant.expires_at)<=Date.now();
         fields['当前阶段']=remaining?'中央尚欠 '+remaining+' 条正文':'中央结束状态待确认';
         fields['最早下一步']=s.last_error==='user_stopped'?'本人已停止，不会自动继续；已有进度保留':expired?'本轮许可已到期，等待原任务恢复；已有进度保留':s.last_error&&s.last_error!=='test_completed'?'等待终端处理当前阻断；已有进度保留':s.enabled&&Number.isSafeInteger(grant?.remaining)&&grant.remaining>0?'终端按原任务自动接续':s.enabled?'等待原任务许可或调度反馈':'终端已停止；不会因刷新状态开始采集';
@@ -146,6 +150,7 @@ async function refresh() {
         $('welcome').textContent='中央已收到 '+task.received+'/'+task.target+' 条正文，尚欠 '+remaining+' 条。';
       }
     }else if(p.error||tasks===null||selected!==null||pilotWaiting){
+      fields['自动执行']='数据库反馈待确认，停止状态未核实';
       fields['数据库任务进度']=p.error||tasks===null?'暂时不可查':'本次未返回原任务';
       fields['当前阶段']='数据库反馈待确认';fields['最早下一步']='保留原任务和进度，等待数据库状态恢复';
       $('welcome').textContent='数据库任务状态尚未确认；不会据本机旧计数宣告完成。';
@@ -182,7 +187,7 @@ function renderControls() {
   $('parallelism').value=String(desired);
   $('parallelism').disabled=actions>0 || !data.session || !local;
   const waits=[];
-  if(s.outbox.length)waits.push(s.outbox.length+' 条待回传');
+  if(!Array.isArray(s.outbox))waits.push('回传状态待确认');else if(s.outbox.length)waits.push(s.outbox.length+' 条待回传');
   if(s.work_slots?.length)waits.push(s.work_slots.length+' 个工作页');
   if(s.enrichment)waits.push('当前笔记补充内容');
   if(s.enabled && !['idle','search_done'].includes(s.phase) && !waits.length)waits.push('当前页面');
@@ -191,7 +196,7 @@ function renderControls() {
   const running=run && ['waiting','active'].includes(run.state) && (!expired || s.enabled);
   $('test_start').disabled=actions>0 || !data.session || s.consent!==CrowdCore.CONSENT || !local || !!running;
   $('start').disabled=actions>0 || s.enabled || !!run;
-  $('test_status').textContent=run?((running?(run.state==='waiting'?'正在等待旧记录收尾':'测试进行中'):expired && ['waiting','active'].includes(run.state)?'上次测试已过期，可开始新测试':(errors[run.reason] || '测试已停止'))+'；详情尝试 '+run.attempts+'/'+(run.limit??4)+'，有效新回执 '+run.accepted.length+'/'+(run.goal??2)+(s.outbox.length?'；待回传 '+s.outbox.length+' 条':'')+(run.finish_error?'；任务收尾尚待确认，已停止新访问':'')):'最多打开两篇新详情；完成后自动停止，15分钟或跨日结束。沿用现有配额，旧待回传记录先收尾。';
+  $('test_status').textContent=run?((running?(run.state==='waiting'?'正在等待旧记录收尾':'测试进行中'):expired && ['waiting','active'].includes(run.state)?'上次测试已过期，可开始新测试':(errors[run.reason] || '测试已停止'))+'；详情尝试 '+run.attempts+'/'+(run.limit??4)+'，有效新回执 '+run.accepted.length+'/'+(run.goal??2)+(s.outbox?.length?'；待回传 '+s.outbox.length+' 条':'')+(run.finish_error?'；任务收尾尚待确认，已停止新访问':'')):'最多打开两篇新详情；完成后自动停止，15分钟或跨日结束。沿用现有配额，旧待回传记录先收尾。';
   $('risk_confirm').disabled=actions>0||!data.risk_confirmation?.can_confirm||!$('risk_acknowledge').checked;
   $('profiles').disabled=actions>0 || !data.session;
   $('diagnostics').disabled=actions>0 || !data.session;
