@@ -40,10 +40,20 @@
     async pageReady(target, keyword) {
       const s = await this.read();
       if (!s.enabled || s.wait_kind !== 'page' || s.last_error && !['page_loading','body_pending','content_unavailable','probe_timeout'].includes(s.last_error)) return;
-      if (s.phase === 'search' ? keyword !== s.task?.query : target !== s.note_id) return;
+      if (s.phase === 'search' ? keyword !== this.searchQuery(s) : target !== s.note_id) return;
       this.readyPending = {generation:this.generation,target,keyword};
       if (this.active) return;
       return this.tick();
+    }
+    searchQuery(s, task=s.task, begin=false) {
+      if(!task)return task?.query;
+      const g=s.acceptance_supplement,terms=task.anchor_terms;
+      const anchor=Array.isArray(terms)&&terms.length===1&&typeof terms[0]==='string'?terms[0].normalize('NFC').trim():null;
+      const precise=g?.schema==='crowd-acceptance-batch-v1'&&g.state==='admitted'&&g.task_id===19&&g.task_id===task.id&&Number.isSafeInteger(g.baseline_received)&&g.baseline_received>=0&&Number.isSafeInteger(g.extra_limit)&&g.extra_limit>=1&&g.extra_limit<=100&&g.target===g.baseline_received+g.extra_limit&&g.target===task.target&&Number.isSafeInteger(g.remaining)&&g.remaining>0&&g.remaining<=g.extra_limit&&anchor&&anchor.length<=200&&!/[\u0000-\u001f\u007f]/.test(anchor);
+      const query=precise?anchor:task.query,revision=task.relevance_revision||0,platform=task.platform||'xiaohongshu',old=s.search_checkpoint;
+      if(begin)s.search_checkpoint={task_id:task.id,task_query:task.query,platform,relevance_revision:revision,query};
+      const saved=begin?s.search_checkpoint:old;
+      return saved?.task_id===task.id&&saved.task_query===task.query&&saved.platform===platform&&saved.relevance_revision===revision&&(saved.query===task.query||saved.query===query)?saved.query:task.query;
     }
     supplementTarget(g) {const target=g.schema==='crowd-acceptance-batch-v1'?g.target:g.baseline_received+g.extra_limit;if(!Number.isSafeInteger(target)||target<1||target>100100)throw Error('task_reconciliation_required');return target;}
     supplementGrant(value) {
@@ -212,8 +222,9 @@
           const admission=await this.control(s,'search',alive,signal);await check();
           if(!admission.allowed||admission.paused){if(['session_rest','action_gap','global_pause','test_completed','daily_quota','task_full'].includes(admission.reason))return await wait(admission);m.stage='blocked';m.reason=admission.reason||'control_unavailable';await this.save(s);throw Error(m.reason);}
         }
+        if(!manual)this.searchQuery(s,s.task,true);
         m.stage='opening';delete m.reason;delete m.retry_at;await this.save(s);await check();
-        await this.r.openVerification(manual?C.HOST+'/':C.taskPlatform(s.task).searchURL(s.task.query),m.slot,manual,valid);await check();
+        await this.r.openVerification(manual?C.HOST+'/':C.taskPlatform(s.task).searchURL(this.searchQuery(s)),m.slot,manual,valid);await check();
         m.stage='opened';m.opened_at=this.r.now();await this.save(s);return {opened:true,manual};
       })().finally(()=>{this.active=null;});return this.active;
     }
@@ -560,10 +571,10 @@
         s.task=task;s.first_login_page.stage='admitting';await this.save(s);await check();
         const admission=await this.control(s,'search',alive,signal);await check();
         if(!admission.allowed||admission.paused||admission.reason)return wait(admission);
-        s.first_login_page.stage='opening';await this.save(s);await check();
+        this.searchQuery(s,task,true);s.first_login_page.stage='opening';await this.save(s);await check();
         // Retire metadata only. An old tab ID from another browser session is never touched.
         await this.r.retireLoginPage(valid);await check();
-        await this.r.open(C.taskPlatform(task).searchURL(task.query));await check();
+        await this.r.open(C.taskPlatform(task).searchURL(this.searchQuery(s,task)));await check();
         s.phase='search';s.search_round=0;s.page_deadline=this.r.now()+180000;s.next_at=this.r.now()+1000;s.wait_kind='page';
         s.enabled=false;s.last_error='identity_verification_required';s.first_login_page.stage='opened';
         await this.save(s);return;
@@ -857,7 +868,7 @@
         }
         const pageWake = s.wait_kind === 'page' && ready?.generation === this.generation &&
           now >= (s.retry_at || 0) &&
-          (s.phase === 'search' ? ready.keyword === s.task?.query : ready.target === s.note_id);
+          (s.phase === 'search' ? ready.keyword === this.searchQuery(s) : ready.target === s.note_id);
         if (s.next_at > now && !pageWake && !s.work_slots?.length) { await this.schedule(s,s.next_at); return; }
         if (s.visits >= 60) { s.next_at = now + 3600000; s.wait_kind = 'budget'; await this.save(s); await this.schedule(s,s.next_at); return; }
         if (s.enrichment) {
@@ -911,7 +922,7 @@
         } else if (s.phase === 'idle') {
           if (!await this.admit(s, 'search', alive, signal)) return;
           // One alarm interval for initial search loading; never auto-reopen it.
-          s.phase = 'search'; s.page_deadline = this.r.now() + 30000; s.next_at = this.r.now()+1000; s.wait_kind = 'page';
+          this.searchQuery(s,s.task,true);s.phase = 'search'; s.page_deadline = this.r.now() + 30000; s.next_at = this.r.now()+1000; s.wait_kind = 'page';
           // Persist before navigation: a worker restart after tabs.update must
           // resume probing instead of opening/charging the same search again.
           await this.save(s); alive();
@@ -919,11 +930,11 @@
           // once so a slow guard does not cost another full alarm interval.
           await this.schedule(s,s.next_at, true); alive();
           if(s.test_run?.state==='active' && !s.test_run.first_source_at_ms){s.test_run.first_source_at_ms=this.r.now();await this.save(s);alive();}
-          this.assertTest(s);await this.r.open(platform.searchURL(s.task.query)); alive();
+          this.assertTest(s);await this.r.open(platform.searchURL(this.searchQuery(s))); alive();
         } else if (s.phase === 'search') {
           this.assertTest(s);const page=await this.r.probe('search'); alive();
           const normalize = value => String(value || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
-          if ('keyword' in page && normalize(page.keyword) !== normalize(s.task.query)) throw new Error('page_mismatch');
+          if ('keyword' in page && normalize(page.keyword) !== normalize(this.searchQuery(s))) throw new Error('page_mismatch');
           this.checkPage(page, s, now);
           if (page.ready) {
             s.data_ready_at = this.r.now();
