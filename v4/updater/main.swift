@@ -12,7 +12,9 @@ let channelURL = localTestChannelURL
 #else
 let extensionID = "licijehcpohikchlnkbpjdjdfkcocndg"
 let hostName = "com.crowd.v4.updater"
-#if PARTICIPANT
+#if PRO_PARTICIPANT_NATIVE_V2
+let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-participants-pro-native-v2.json"
+#elseif PARTICIPANT
 let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-participants-pro.json"
 #else
 let channelURL = "https://raw.githubusercontent.com/huming0018-dot/crowd-pages/codex/v4.0.6-handoff/v4/releases/channel-kol.json"

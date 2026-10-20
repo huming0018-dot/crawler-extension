@@ -4,11 +4,13 @@ import argparse, base64, hashlib, json, pathlib, re, subprocess, tempfile
 root=pathlib.Path(__file__).resolve().parent
 p=argparse.ArgumentParser();p.add_argument('--output',type=pathlib.Path,required=True)
 p.add_argument('--participant',action='store_true')
+p.add_argument('--pro-participant-native-v2',action='store_true')
 p.add_argument('--local-test-directory',type=pathlib.Path)
 p.add_argument('--local-test-id')
 p.add_argument('--local-test-public-key')
 p.add_argument('--local-test-channel')
 args=p.parse_args()
+if args.pro_participant_native_v2 and not args.participant:p.error('Native-v2 requires --participant')
 local=[args.local_test_directory,args.local_test_id,args.local_test_public_key,args.local_test_channel]
 if args.participant and any(local):p.error('Participant profile cannot use local-test pins')
 if any(local):
@@ -24,6 +26,7 @@ if any(local):
 args.output.parent.mkdir(parents=True,exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='crowd-host-build-') as d:
     sources=[str(root/'main.swift'),str(root/'ReleaseKey.swift')];flags=['-DPARTICIPANT'] if args.participant else []
+    if args.pro_participant_native_v2:flags.append('-DPRO_PARTICIPANT_NATIVE_V2')
     if all(local):
         profile=pathlib.Path(d)/'LocalTestProfile.swift'
         values={'localTestExtensionID':args.local_test_id,'localTestDirectory':str(args.local_test_directory),'localTestChannelURL':args.local_test_channel,'releasePublicKey':args.local_test_public_key}
@@ -41,4 +44,4 @@ with tempfile.TemporaryDirectory(prefix='crowd-host-build-') as d:
         bins.append(str(target))
     subprocess.run(['lipo','-create',*bins,'-output',str(args.output)],check=True)
     subprocess.run(['codesign','--force','--sign','-',str(args.output)],check=True,capture_output=True)
-print(json.dumps({'bytes':args.output.stat().st_size,'sha256':hashlib.sha256(args.output.read_bytes()).hexdigest(),'architectures':['arm64','x86_64'],'minimum_macos':'14.0','signing':'ad-hoc; not notarized','profile':'local-test' if all(local) else 'participant' if args.participant else 'formal'}))
+print(json.dumps({'bytes':args.output.stat().st_size,'sha256':hashlib.sha256(args.output.read_bytes()).hexdigest(),'architectures':['arm64','x86_64'],'minimum_macos':'14.0','signing':'ad-hoc; not notarized','profile':'local-test' if all(local) else 'pro-participant-native-v2' if args.pro_participant_native_v2 else 'participant' if args.participant else 'formal'}))
