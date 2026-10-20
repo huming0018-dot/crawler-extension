@@ -171,7 +171,9 @@ const participantSession=new CrowdParticipantSession({storage,owner:runtime.owne
   }),reconcile:valid=>agent.reconcileCompletedTask(valid),supplement:valid=>agent.checkAcceptanceSupplement(valid),recoverPage:(valid,options)=>agent.recoverLoginPage(valid,options),verificationCurrent:slot=>workTabs.verificationCurrent(slot),verificationNeeded:()=>workTabs.recoveryNeeded(),indicate:indicatePlatformSession});
 // Direct controller stops cancel persisted intent before any pending recovery can start.
 agent.stop=async(reason='user_stopped',options={})=>{await proParticipant.stop();return stopAgent(reason,options);};
+let otaWindowReady=Promise.resolve();
 agent.tick=async(...args)=>{
+  await otaWindowReady;
   if(await legacyInstallation)return;
   // Pro is the sole source. Preserve original manual-rating/outbox delivery only.
   await proParticipant.poll();
@@ -325,10 +327,69 @@ const proManualLogin=new CrowdProManualLogin({chrome,storage,uuid:()=>crypto.ran
 // Manual login help remains available; automatic checks never open a DOM work page.
 participantSession.start=()=>proParticipant.requestStart();
 participantSession.check=()=>proParticipant.poll();
+const checkParticipantSession=participantSession.check.bind(participantSession);
+const afterOtaWindow=run=>async(...args)=>{
+  const owner=agent.generationOwner,generation=agent.generation,stopIntent=agent.stopIntent||0,revision=proParticipant.revision;
+  const unchanged=()=>agent.generationOwner===owner&&agent.generation===generation&&(agent.stopIntent||0)===stopIntent&&proParticipant.revision===revision;
+  const initialOwner=await runtime.owner(),expected=(await platformHealth.read()).xiaohongshu?.expected_ref;
+  if(!unchanged())throw Error('cancelled');
+  await otaWindowReady;
+  const currentOwner=await runtime.owner(),current=(await platformHealth.read()).xiaohongshu?.expected_ref;
+  if(!unchanged()||currentOwner!==initialOwner||current!==expected)throw Error('cancelled');
+  return run(...args);
+};
+for(const method of ['start','openLogin'])participantSession[method]=afterOtaWindow(participantSession[method].bind(participantSession));
+agent.start=afterOtaWindow(startAgent);
+participantSession.check=async(...args)=>{await otaWindowReady;return checkParticipantSession(...args);};
+proManualLogin.open=afterOtaWindow(proManualLogin.open.bind(proManualLogin));
 localTests.run=async()=>{};
 localTests.allowed=()=>false;
 recovery.run=async()=>{};
-const updater = new CrowdUpdater({chrome,storage,agent,reportOTA:async fields=>{
+async function otaHomeBridgeContext(){
+  const owner=await runtime.owner(),s=await agent.read(),p=await storage.get('participant-session:'+owner),node=await storage.get('node-monitor:'+owner),h=(await platformHealth.read()).xiaohongshu,m=s.verification_page;
+  if(await proParticipant.busy()||!owner||s.owner_id!==owner||!node?.installation_id||!h||!/^[a-f0-9]{64}$/.test(h.expected_ref||'')||m?.manual!==true||m.stage!=='confirmed'||m.expected_ref!==h.expected_ref||p?.desired_running!==true||s.last_error==='user_stopped'||s.task!==null||s.phase!=='idle'||s.outbox?.length||s.work_slots?.length||s.enrichment||s.navigation_stage||agent.recoveryUnsafe(s)||agent.active||agent.stopping||agent.pendingStop||agent.stopActive||agent.poolJobs?.size||participantSession.active||pendingCommands>0||recovery.active)throw Error('executor_busy');
+  const snapshot=JSON.stringify([await storage.get('agent:'+owner),p]),binding=await runtime.leaseScope(snapshot);
+  const context={owner,slot:m.slot,installation_id:node.installation_id,expected_ref:h.expected_ref,binding};
+  const valid=async()=>{
+    const current=await agent.read(),intent=await storage.get('participant-session:'+owner),account=(await platformHealth.read()).xiaohongshu,installation=await storage.get('node-monitor:'+owner);
+    if(await proParticipant.busy()||owner!==await runtime.owner()||JSON.stringify([await storage.get('agent:'+owner),intent])!==snapshot||account?.expected_ref!==context.expected_ref||account.observed_ref!==context.expected_ref||account.status!=='authenticated'||account.reason!=null||!Number.isSafeInteger(account.checked_at)||account.checked_at>Date.now()||installation?.installation_id!==context.installation_id||agent.active||agent.stopping||agent.pendingStop||agent.stopActive||agent.poolJobs?.size||participantSession.active||pendingCommands>0||recovery.active)throw Error('cancelled');
+  };
+  await valid();return {context,valid,health:h};
+}
+async function otaUpdateMode(){
+  const s=await agent.read(),entries=Object.values(await workTabs.entries()).filter(e=>e.state!=='retired');
+  if(await proParticipant.busy()||agent.recoveryUnsafe(s)||s.outbox?.length||s.work_slots?.length||s.enrichment||s.navigation_stage||agent.active||agent.stopping||agent.pendingStop||agent.stopActive||agent.poolJobs?.size||participantSession.active||pendingCommands>0||recovery.active||s.enabled&&(s.task||['search','note','reopen_note','enrich','parallel'].includes(s.phase)))throw Error('executor_busy');
+  // Pro owns its manual page; stopped software maintenance never revives legacy DOM intent.
+  const pro=await proParticipant.read();
+  if(s.enabled===false&&pro?.desired_running===false&&pro.pending===0&&['complete','stopped'].includes(pro.state))return 'software-only';
+  // Known stopped missing pages remain software-only maintenance, not a bridge.
+  if(!entries.length||s.enabled===false&&entries.every(e=>e.state==='missing'))return 'software-only';
+  return 'home';
+}
+async function validateOtaHomeBridge(){
+  if(await otaUpdateMode()==='software-only')return;
+  const {context,valid,health}=await otaHomeBridgeContext(),entry=(await workTabs.entries())[context.slot],session=(await chrome.storage.session.get('crowd_work_session')).crowd_work_session;
+  if(!entry||entry.session!==session||!session||health.status!=='authenticated'||health.observed_ref!==context.expected_ref||!Number.isSafeInteger(health.checked_at)||Date.now()-health.checked_at>120000||health.checked_at>Date.now())throw Error('executor_busy');
+  await workTabs.bridgeWindow(context.slot,entry,await workTabs.key());
+  const proof=(await workTabs.probe(entry.tab,'ownership')).response;
+  if(proof?.token!==entry.token||proof?.document!==entry.document)throw Error('executor_busy');
+  await valid();
+}
+async function prepareOtaHomeBridge(target){
+  if(await otaUpdateMode()==='software-only')return;
+  await validateOtaHomeBridge();
+  const {context,valid}=await otaHomeBridgeContext();
+  await workTabs.prepareReloadBridge({...context,from:CrowdCore.VERSION,target},valid);
+}
+async function restoreOtaHomeBridge(){
+  const owner=await runtime.owner(),bridge=owner&&await storage.get('ota-window-bridge:'+owner);
+  if(!bridge||bridge.target!==CrowdCore.VERSION||bridge.state==='completed')return;
+  const {context,valid}=await otaHomeBridgeContext();
+  await workTabs.restoreReloadBridge(context,CrowdCore.VERSION,valid,async(page,expected)=>{
+    const normalized=await normalizeSessionPage(page,owner);await valid();return normalized.status==='authenticated'&&normalized.principal_ref===expected;
+  });
+}
+const updater = new CrowdUpdater({chrome,storage,agent,beforeApply:validateOtaHomeBridge,beforeReload:prepareOtaHomeBridge,afterReload:restoreOtaHomeBridge,reportOTA:async fields=>{
   const settings=await diagnosticSettings();
   if(!settings.enabled||!settings.id)return false;
   const recorded=await nodeMonitor.event('ota',fields);if(recorded)queueNodeFlush();return recorded===true;
@@ -612,4 +673,5 @@ chrome.tabs.onRemoved.addListener((id,info) => {
 });
 // Service-worker restarts can lose alarms on older browsers. Check the durable
 // running state on every load; initial installation and user stops remain idle.
-legacyInstallation.then(legacy=>{if(legacy)return;return updater.bootstrap().then(repairPlatformHealth).then(()=>chrome.alarms.create('crowd_node_monitor',{periodInMinutes:.5})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>localTests.run()).then(repairDiagnostics).then(()=>recovery.run()).then(()=>localTests.run()).then(reportDiagnostics);}).catch(console.error);
+otaWindowReady=legacyInstallation.then(async legacy=>{if(legacy)return;await updater.bootstrap();const owner=await runtime.owner(),bridge=owner&&await storage.get('ota-window-bridge:'+owner);if(bridge?.target===CrowdCore.VERSION&&bridge.state!=='completed')throw Error('executor_busy');});
+otaWindowReady.then(()=>legacyInstallation).then(legacy=>{if(legacy)return;return Promise.resolve().then(repairPlatformHealth).then(()=>chrome.alarms.create('crowd_node_monitor',{periodInMinutes:.5})).then(()=>trace.event('worker_started')).then(()=>agent.repairDelivery()).then(()=>agent.tick()).then(()=>localTests.run()).then(repairDiagnostics).then(()=>recovery.run()).then(()=>localTests.run()).then(reportDiagnostics);}).catch(console.error);

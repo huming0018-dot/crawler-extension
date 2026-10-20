@@ -403,6 +403,71 @@
         await this.write(all=>{if(all[key]?.token===entry.token)delete all[key];},ownerKey);
       }
     }
+    validNativeDocument(value){return typeof value==='string'&&value.length>0&&value.length<=128&&!/[\u0000-\u001f\u007f]/.test(value);}
+    async bridgeWindow(slot,entry,key,nativeDocument=null) {
+      await this.assertKey(key);
+      const live=await this.entries(),active=Object.entries(live).filter(([,e])=>e.state!=='retired');
+      if(active.length!==1||active[0][0]!==slot||JSON.stringify(active[0][1])!==JSON.stringify(entry)||entry.state!=='opened'||entry.verification!==true||entry.url!==root.CrowdCore.HOST+'/'||!entry.token||!entry.document)throw Error('executor_busy');
+      const tab=await this.chrome.tabs.get(entry.tab),window=await this.chrome.windows.get(tab.windowId,{populate:true});
+      if(tab.status!=='complete'||tab.pendingUrl||tab.discarded||tab.frozen||!this.matches(tab.url,entry.url)||window.type!=='normal'||window.incognito||window.state!=='minimized'||window.focused===true||window.tabs?.length!==1||window.tabs[0].id!==entry.tab||window.tabs[0].windowId!==window.id)throw Error('executor_busy');
+      const frame=await this.chrome.webNavigation.getFrame({tabId:entry.tab,frameId:0,...(nativeDocument?{documentId:nativeDocument}:{})});
+      if(!frame||frame.errorOccurred||frame.documentLifecycle!=='active'||frame.url!==tab.url||!this.validNativeDocument(frame.documentId)||nativeDocument&&frame.documentId!==nativeDocument)throw Error('executor_busy');
+      await this.assertKey(key);return {window:window.id,tab:entry.tab,url:tab.url,native_document:frame.documentId};
+    }
+    async prepareReloadBridge(context,valid) {
+      const key=await this.key();await valid();
+      const entries=await this.entries();if(!Object.values(entries).some(e=>e.state!=='retired'))return false;
+      const slot=context.slot,entry=entries[slot],session=await this.session();
+      if(context.owner!==await this.owner()||!/^4\.\d+\.\d+$/.test(context.target)||context.target===context.from||!entry||entry.session!==session||entry.state!=='opened'||entry.verification!==true||entry.url!==root.CrowdCore.HOST+'/'||typeof entry.token!=='string'||!entry.token||typeof entry.document!=='string'||!entry.document)throw Error('executor_busy');
+      const snapshot=await this.bridgeWindow(slot,entry,key);
+      const proof=(await this.probe(entry.tab,'ownership')).response;
+      if(proof?.token!==entry.token||proof?.document!==entry.document)throw Error('executor_busy');
+      await valid();
+      if((await this.storage.get('ota-window-bridge:'+context.owner))?.state==='reload_sent')throw Error('executor_busy');
+      const prepared_at=Date.now(),bridge={schema:1,state:'prepared',...context,session,entry:{...entry},snapshot,prepared_at,expires_at:prepared_at+120000};
+      await this.storage.set('ota-window-bridge:'+context.owner,bridge);
+      await valid();const after=await this.bridgeWindow(slot,entry,key,snapshot.native_document);
+      if(JSON.stringify(after)!==JSON.stringify(snapshot))throw Error('executor_busy');return true;
+    }
+    restoreReloadBridge(...args){if(this.bridgeRestore)return this.bridgeRestore;this.bridgeRestore=this.restoreReloadBridgeOwned(...args).finally(()=>{this.bridgeRestore=null;});return this.bridgeRestore;}
+    async restoreReloadBridgeOwned(context,version,valid,verify) {
+      const key=await this.key(),bridgeKey='ota-window-bridge:'+context.owner,b=await this.storage.get(bridgeKey);
+      if(!b)return false;
+      if(b.state==='completed'&&b.target===version)return true;
+      if(b.schema!==1||b.state!=='prepared'||b.target!==version||b.owner!==context.owner||['installation_id','expected_ref','binding','slot'].some(k=>b[k]!==context[k])||!Number.isSafeInteger(b.prepared_at)||!Number.isSafeInteger(b.expires_at)||b.expires_at!==b.prepared_at+120000||Date.now()>b.expires_at||Date.now()<b.prepared_at)throw Error('executor_busy');
+      await valid();
+      if((await this.chrome.storage.session.get('crowd_work_session')).crowd_work_session)throw Error('executor_busy');
+      const before=await this.bridgeWindow(b.slot,b.entry,key,b.snapshot.native_document);
+      if(JSON.stringify(before)!==JSON.stringify(b.snapshot))throw Error('executor_busy');
+      // Durable once intent precedes the only page reload; an unknown result is never replayed.
+      b.state='reload_sent';b.reload_sent_at=Date.now();await this.storage.set(bridgeKey,b);await valid();
+      await this.chrome.tabs.reload(b.entry.tab,{bypassCache:false});
+      let page,frame,tab;
+      for(let n=0;n<50;n++){
+        await valid();if(Date.now()>b.expires_at)throw Error('executor_busy');tab=await this.chrome.tabs.get(b.entry.tab);
+        const window=await this.chrome.windows.get(b.snapshot.window,{populate:true});
+        if(window.state!=='minimized'||window.focused===true||window.type!=='normal'||window.incognito||window.tabs?.length!==1||window.tabs[0].id!==tab.id||tab.windowId!==window.id)throw Error('executor_busy');
+        frame=await this.chrome.webNavigation.getFrame({tabId:tab.id,frameId:0});
+        if(tab.status==='complete'&&!tab.pendingUrl&&!tab.discarded&&!tab.frozen&&this.matches(tab.url,b.entry.url)&&frame?.documentLifecycle==='active'&&!frame.errorOccurred&&frame.url===tab.url&&this.validNativeDocument(frame.documentId)&&frame.documentId!==b.snapshot.native_document){
+          try{page=await this.chrome.tabs.sendMessage(tab.id,{type:'crowd_session_probe'});}catch(_){}
+          if(page?.platform==='xiaohongshu'&&page.status==='unknown'&&page.reason==null)page=null;
+          if(page)break;
+        }
+        await new Promise(resolve=>setTimeout(resolve,100));
+      }
+      if(!page||!await verify(page,b.expected_ref))throw Error('identity_verification_required');
+      await valid();
+      const token=this.uuid(),bound=await this.chrome.tabs.sendMessage(tab.id,{type:'crowd_bind',token});
+      const proof=(await this.probe(tab.id,'ownership')).response;
+      if(typeof bound?.document!=='string'||!bound.document||bound.document===b.entry.document||proof?.document!==bound.document||proof?.token!==token)throw Error('executor_busy');
+      const latest=await this.chrome.webNavigation.getFrame({tabId:tab.id,frameId:0,documentId:frame.documentId});
+      if(latest?.documentId!==frame.documentId||latest.documentLifecycle!=='active'||latest.errorOccurred||latest.url!==tab.url)throw Error('executor_busy');
+      if(!await verify(await this.chrome.tabs.sendMessage(tab.id,{type:'crowd_session_probe'}),b.expected_ref))throw Error('platform_identity_changed');
+      await valid();const final=await this.bridgeWindow(b.slot,b.entry,key,frame.documentId);if(final.window!==b.snapshot.window||final.tab!==b.snapshot.tab)throw Error('executor_busy');
+      const session=await this.session();
+      await this.write(entries=>{if(JSON.stringify(entries[b.slot])!==JSON.stringify(b.entry))throw Error('cancelled');entries[b.slot]={...b.entry,session,instance:this.instance,token,document:bound.document};},key);
+      b.state='completed';b.completed_at=Date.now();b.restored_native_document=frame.documentId;await this.storage.set(bridgeKey,b);return true;
+    }
     async first(preferred=[]) {
       if(!await this.owner())return null;
       const entries=await this.entries();

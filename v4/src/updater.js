@@ -7,7 +7,7 @@
  const safeNativeError=value=>NATIVE_ERRORS.has(value)?value:'update_failed';
  const otaError=value=>OTA_ERRORS.has(value)?value:(typeof value==='string'&&Object.hasOwn(OTA_ERROR_MAP,value)?OTA_ERROR_MAP[value]:'ota_unknown');
  class CrowdUpdater {
-  constructor({chrome,storage,agent,version,releaseHash,isBusy=()=>false,reportOTA=async()=>false}) {Object.assign(this,{chrome,storage,agent,version,releaseHash,isBusy,reportOTA});this.active=null;this.updatePeriod=60;}
+  constructor({chrome,storage,agent,version,releaseHash,isBusy=()=>false,reportOTA=async()=>false,beforeApply=async()=>{},beforeReload=async()=>{},afterReload=async()=>{}}) {Object.assign(this,{chrome,storage,agent,version,releaseHash,isBusy,reportOTA,beforeApply,beforeReload,afterReload});this.active=null;this.updatePeriod=60;}
   async telemetry(status,error=null) {
    // Diagnostics failure cannot change signed update or restart behavior.
    try {return await this.reportOTA({status,error_code:status==='failed'?otaError(error):null});}catch(_){return false;}
@@ -62,10 +62,10 @@
   }
   async recoverMismatch(error) {
    if(!['version_mismatch','handshake_mismatch'].includes(error))return false;
-   try {const r=await this.send('status');if(['rolled_back','pending_reload'].includes(r.status)&&/^4\.\d+\.\d+$/.test(r.version)&&r.version!==this.version){await this.telemetry(r.status==='rolled_back'?'failed':'waiting');await this.reloadSettled();return true;}}catch(_){}
+   try {const r=await this.send('status');if(['rolled_back','pending_reload'].includes(r.status)&&/^4\.\d+\.\d+$/.test(r.version)&&r.version!==this.version){await this.telemetry(r.status==='rolled_back'?'failed':'waiting');await this.reloadSettled(r.version);return true;}}catch(_){}
    return false;
   }
-  async reloadSettled() {
+  async reloadSettled(target) {
    // Stop remains available during updates; persist it before replacing the worker.
    for(;;){
     if(this.agent.updateStopFailed)throw Error('executor_busy');
@@ -74,6 +74,7 @@
     if(this.agent.updateStopFailed)throw Error('executor_busy');
     if(!this.agent.pendingStop && !this.agent.stopActive && write===this.agent.writeTail)break;
    }
+   try{await this.beforeReload(target);}catch(error){if(error.message==='executor_busy')await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:this.updatePeriod});throw error;}
    this.chrome.runtime.reload();
   }
   async bootstrap() {
@@ -86,7 +87,8 @@
    await this.storage.set('local_updater_ready',null);
    try {
     const r=await this.send('ack');
-    if(r.status==='pending_reload'&&r.version!==this.version){await this.telemetry('waiting');await this.reloadSettled();return;}
+    if(r.status==='pending_reload'&&r.version!==this.version){await this.telemetry('waiting');await this.reloadSettled(r.version);return;}
+    if(r.status==='applied'&&r.version===this.version)await this.afterReload();
     await this.applied(r);
     await this.storage.set('updater_protocol',r.protocol===2?2:1);
     if(r.protocol===2)await this.send('settings',{enabled:await this.storage.get('updater_enabled')!==false});
@@ -97,12 +99,12 @@
      if(!alarm || alarm.periodInMinutes!==this.updatePeriod)await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:this.updatePeriod});
     }
    }catch(e){if(!await this.recoverMismatch(e.message)){
-    await this.telemetry(e.message==='busy'?'waiting':'failed',e.message);
+    await this.telemetry(['busy','executor_busy'].includes(e.message)?'waiting':'failed',e.message);
     await this.storage.set('local_update_verified',null);
     await this.storage.set('local_updater_ready',null);
-    await this.storage.set('updater_status',{state:e.message==='busy'?'checking':'helper_unavailable',error:e.message,version:this.version});
+    await this.storage.set('updater_status',{state:['busy','executor_busy'].includes(e.message)?'checking':'helper_unavailable',error:e.message,version:this.version});
     if(await this.storage.get('updater_enabled')!==false)await this.chrome.alarms.create('crowd_update_bootstrap',{delayInMinutes:1,periodInMinutes:1});
-    if(e.message==='busy')await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:this.updatePeriod});
+    if(['busy','executor_busy'].includes(e.message))await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:this.updatePeriod});
    }}
   }
   async check() {
@@ -121,20 +123,21 @@
    try {
     await this.storage.set('updater_status',{state:'checking',version:this.version,checked_at:Date.now()});
     await this.telemetry('started');
+    await this.beforeApply();
     const r=await this.send('apply');
     await this.storage.set('updater_status',{state:r.status,version:this.version,target:r.version,checked_at:Date.now()});
     if(r.status==='current'&&r.version===this.version)await this.telemetry('skipped');
     if(r.status==='pending_reload') {
      await this.telemetry('waiting');
      // Evidence/session/consent/stop state stay in extension storage. Reload self only.
-     await this.reloadSettled();
+     await this.reloadSettled(r.version);
     }
    }catch(e){if(!await this.recoverMismatch(e.message)){
-    await this.telemetry(e.message==='busy'?'waiting':'failed',e.message);
+    await this.telemetry(['busy','executor_busy'].includes(e.message)?'waiting':'failed',e.message);
     await this.storage.set('updater_status',{state:'error',error:e.message,version:this.version,checked_at:Date.now()});
     // The OS poll may briefly own the host lock. Do not collide again at the
     // same hourly boundary or postpone a prepared update for another hour.
-    if(e.message==='busy')await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:this.updatePeriod});
+    if(['busy','executor_busy'].includes(e.message))await this.chrome.alarms.create('crowd_update',{delayInMinutes:1,periodInMinutes:this.updatePeriod});
    }}
   }
  }
