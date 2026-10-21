@@ -1,0 +1,58 @@
+{
+  "source_base_commit": "d0129be800126872b64bdd2eebeaeb86caabdc55",
+  "base_published_zip_sha256": "4718775144dc94cefd58900ed0152800b3bd5d67a196414bbdebdd0a57ad0cee",
+  "changes_patch_sha256": "c1de06a30151de2e501e2032c889e442179727cc01997226c3575967bb903156",
+  "current104_source_untouched": true,
+  "build_command": "python3 v4/build.py --profile participant --output <output>/crowd-v4.2.105-legacy-extension.zip",
+  "candidate_zip": {
+    "version": "4.2.105",
+    "profile": "participant",
+    "bytes": 166491,
+    "sha256": "5e6f51cec7b986c83d083985d90751312f5eae19b882e31c059ecee2983a1bb5",
+    "worker": "src/background_v4_2_105.js"
+  },
+  "zip_members": 32,
+  "permission_identity_shape_exact": true,
+  "unchanged_members": [
+    "icons/icon128.png",
+    "src/agent.js",
+    "src/api.js",
+    "src/background.js",
+    "src/config.js",
+    "src/content.js",
+    "src/controller.css",
+    "src/controller.html",
+    "src/hybrid.js",
+    "src/identity.js",
+    "src/join.js",
+    "src/main-observer.js",
+    "src/native-runtime.js",
+    "src/node-monitor.js",
+    "src/participant-background.js",
+    "src/participant-controller.html",
+    "src/participant-policy.js",
+    "src/participant-session.js",
+    "src/passive.js",
+    "src/pool.js",
+    "src/session-content.js",
+    "src/session-health.js",
+    "src/site-sdk.js",
+    "src/structured.js",
+    "src/trace.js",
+    "src/work-tabs.js"
+  ],
+  "changed_members": [
+    "manifest.json",
+    "release.json",
+    "src/core.js",
+    "src/participant-controller.js",
+    "src/updater.js"
+  ],
+  "entry_replaced": [
+    "src/background_v4_2_93.js",
+    "src/background_v4_2_105.js"
+  ],
+  "helper_or_runtime_changed": false,
+  "SDK_included": false,
+  "diagnostics_boundary": "update_track/pro_readiness are fixed local updater.status/UI fields only. Existing cloud OTA event shape unchanged; cloud receives actual version/release and normal completed/skipped events, not these two fields. Pro capability/SDK state remains not reported."
+}
