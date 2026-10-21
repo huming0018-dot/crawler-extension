@@ -168,6 +168,13 @@ async function refresh() {
     fields['任务']=pro.query||'等待中心派单';fields['本任务云端接收']=Number.isSafeInteger(pro.received)&&Number.isSafeInteger(pro.target)?pro.received+' / '+pro.target:'待数据库确认';
     fields['Pro 待回传']=pro.pending;fields['最近提示']=complete?'本任务已获得逐条云回执，未重开旧任务。':messages[pro.error]||pro.error||'Pro 正在静默执行；不需要保持采集页面在前台。';
     fields['最早下一步']=complete?'本批已完成，不再访问采集来源':pro.error==='login_required'?'恢复原平台账号登录；当前未自动重试':pro.error==='participant_waiting_task'?'自动等待新任务':pro.state.includes('unknown')?'先对账原调用，禁止重开来源':pro.desired_running?'按原任务执行':'本人已停止';
+    const startupPhases={connect:'连接本机 Pro 助手',check:'核对原参与身份',claim:'中央登记与领取任务',idle:'启动检查已完成'};
+    if(Object.hasOwn(startupPhases,pro.startup_phase))fields['Pro 启动阶段']=startupPhases[pro.startup_phase];
+    if(pro.state==='not_ready'&&pro.startup_phase==='claim'&&pro.error==='participant_rpc_outcome_unknown'){
+      fields['当前阶段']='中央登记或领取结果待确认';fields['最近提示']='本机 Pro 助手已连接；中央登记或领取尚未确认。原身份和进度保留，未发送采集开始指令。';fields['最早下一步']='先核对原中央调用；不会重复领取或开始采集';
+    }else if(pro.state==='not_ready'&&['connect','check'].includes(pro.startup_phase)&&pro.error==='participant_native_unavailable'){
+      fields['最近提示']=pro.startup_phase==='connect'?'本机 Pro 助手连接尚未确认；原身份和进度保留，未开始采集。':'原参与身份核对尚未完成；原身份和进度保留，未开始采集。';
+    }
     $('welcome').textContent=fields['最近提示'];
   }
   for (const [name, value] of Object.entries(fields)) { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = String(value); $('status').append(dt, dd); }

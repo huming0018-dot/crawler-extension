@@ -147,20 +147,22 @@
    const old=await this.read(scope.subject);
    requireValue(!old||!HELD.has(old.state)&&!old.pending,'participant_recovery_required');
    await this.r.intent(true);requireValue(revision===this.revision,'participant_stopped');
-   const session=this.r.uuid();await this.save(scope.subject,{...scope,session,state:'not_ready',desired_running:true,intent:null,run_id:null,pending:0,error:null},revision);
+   const session=this.r.uuid();await this.save(scope.subject,{...scope,session,state:'not_ready',desired_running:true,intent:null,run_id:null,pending:0,error:null,startup_phase:'connect'},revision);
    if(this.port){const port=this.port;this.port=null;port.disconnect();}
-   try{await this.connect({...scope,epoch:scope.generation,session});await this.check();
+   let startupPhase='connect';
+   try{await this.connect({...scope,epoch:scope.generation,session});startupPhase='check';await this.check();
     requireValue(revision===this.revision,'participant_stopped');
-    const claim=await this.r.claim();await this.check();
+    startupPhase='claim';const claim=await this.r.claim();startupPhase='check';await this.check();
+    startupPhase='claim';
     requireValue(revision===this.revision,'participant_stopped');
     if(claim?.error)throw Error(ERRORS.has(claim.error)?claim.error:'participant_contract_refused');
-    if(!claim?.task){await this.save(scope.subject,{state:'stopped',error:'participant_waiting_task'},revision);this.closeClean();return;}
+    if(!claim?.task){await this.save(scope.subject,{state:'stopped',error:'participant_waiting_task',startup_phase:'idle'},revision);this.closeClean();return;}
     const task=claim.task;requireValue(Number.isSafeInteger(task.id)&&task.id>0,'participant_protocol_invalid');
-    const intent=this.r.uuid();await this.save(scope.subject,{state:'native_ready',task_id:task.id,query:task.query,intent,target:task.target,received:task.received,error:null},revision);
+    const intent=this.r.uuid();await this.save(scope.subject,{state:'native_ready',startup_phase:'idle',task_id:task.id,query:task.query,intent,target:task.target,received:task.received,error:null},revision);
     // UI mutation releases its command lock before the native child can request RPC.
     setTimeout(()=>{void this.launch(scope.subject,revision);},0);
    }catch(error){
-    await this.save(scope.subject,{state:'not_ready',error:ERRORS.has(error.message)?error.message:'participant_native_unavailable'},revision);
+    await this.save(scope.subject,{state:'not_ready',startup_phase:startupPhase,error:ERRORS.has(error.message)?error.message:startupPhase==='claim'?'participant_rpc_outcome_unknown':'participant_native_unavailable'},revision);
     // No pro_start has been sent on activate's failure path.
     if(this.binding?.session===session)this.closeClean();throw error;
    }
