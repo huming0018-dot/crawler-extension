@@ -199,6 +199,17 @@
    const p=await this.read();if(!p)return;
    if(this.port){if(p.intent&&UUID.test(p.run_id||''))this.post(this.frame('pro_status',{run_id:p.run_id}));return;}
    if(HELD.has(p.state)||p.pending)return; // Unknown launch is durable; never replay Start.
+   // One recovery for the source-free pre-phase error retained across an OTA release.
+   const stale=v=>v?.desired_running===true&&v.state==='not_ready'&&v.pending===0&&v.intent===null&&v.run_id===null&&v.startup_phase==null&&v.error==='participant_native_unavailable'&&UUID.test(v.subject||'')&&UUID.test(v.installation_id||'')&&/^[a-f0-9]{64}$/.test(v.capability_release_digest||'');
+   if(stale(p)&&this.r.releaseDigest&&!this.starting&&!this.otaRecovering&&!this.r.busy()){
+    this.otaRecovering=true;const revision=this.revision;
+    try{
+     capability(p.capabilities);const digest=await this.r.releaseDigest(),owner=await this.r.owner(),fresh=await this.read(owner),node=await this.r.storage.get('node-monitor:'+owner);
+     if(revision!==this.revision||this.starting||this.r.busy()||!stale(fresh)||fresh.subject!==owner||fresh.subject!==p.subject||fresh.installation_id!==p.installation_id||!UUID.test(node?.installation_id||'')||node.installation_id!==fresh.installation_id||fresh.capability_release_digest!==p.capability_release_digest||!/^[a-f0-9]{64}$/.test(digest)||digest===fresh.capability_release_digest||fresh.startup_recovery_release_digest===digest)return;
+     if(!await this.save(owner,{startup_recovery_release_digest:digest},revision)||revision!==this.revision||this.r.busy())return;
+     return await this.start();
+    }finally{this.otaRecovering=false;}
+   }
    if(p.desired_running&&p.error==='participant_waiting_task'&&!this.starting&&!this.r.busy())return this.start();
   }
  }
