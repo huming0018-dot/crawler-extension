@@ -1,0 +1,47 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto'),path=require('node:path');
+const SRC=path.resolve(process.argv[2]||path.join(__dirname,'../src'));
+for(const file of ['core','work-tabs'])vm.runInThisContext(fs.readFileSync(path.join(SRC,file+'.js'),'utf8'));
+(async()=>{
+ let owner='one',seq=0,created=0,removed=[],data={},session={},tabs=new Map();
+ const chrome={storage:{session:{get:async key=>({[key]:session[key]}),set:async value=>Object.assign(session,value)}},windows:{getAll:async()=>[{id:1}]},tabs:{
+  create:async({url,windowId})=>{const tab={id:++seq,windowId,url,status:'complete',document:crypto.randomUUID(),token:null};tabs.set(tab.id,tab);created++;return {...tab};},
+  get:async id=>{if(!tabs.has(id))throw Error('missing');return {...tabs.get(id)};},
+  update:async(id,{url})=>Object.assign(tabs.get(id),{url,document:crypto.randomUUID(),token:null}),
+  sendMessage:async(id,m)=>{const tab=tabs.get(id);tab.token=m.token;return {bound:true,document:tab.document};},remove:async id=>{removed.push(id);tabs.delete(id);}
+ }};
+ chrome.windows.create=async({url})=>{const id=++seq,tab=await chrome.tabs.create({url});tabs.get(tab.id).windowId=id;return {id,tabs:[{...tab,windowId:id}]};};
+ chrome.windows.get=async id=>({id,type:'normal',state:'minimized',incognito:false,tabs:[...tabs.values()].filter(t=>t.windowId===id)});
+ const storage={get:async key=>structuredClone(data[key]),set:async(key,value)=>data[key]=structuredClone(value)};
+ const probe=async(id,action)=>({response:action==='ownership'?{token:tabs.get(id).token,document:tabs.get(id).document}:{ready:true}});
+ const make=()=>new CrowdWorkTabs({chrome,storage,owner:async()=>owner,probe,uuid:crypto.randomUUID});
+ const w=make(),urls=['a','b'].map(x=>CrowdCore.HOST+'/explore/'+x.repeat(24));
+ await Promise.all([w.open(urls[0],'a'),w.open(urls[1],'b')]);assert.equal(created,2);assert.equal(new Set(Object.values(data['work_tabs:one']).map(e=>e.session)).size,1);
+ const pending=data['work_tabs:one'].a.tab;tabs.get(pending).status='loading';tabs.get(pending).url=undefined;tabs.get(pending).pendingUrl=urls[0];assert.equal((await w.read('note_ready','a')).reason,'page_loading');assert.equal((await make().read('note_ready','a')).reason,'page_loading');delete tabs.get(pending).pendingUrl;tabs.get(pending).url=urls[0];tabs.get(pending).status='complete';
+ await w.read('note_ready','a');await w.read('note_ready','b');
+ const restart=make();assert.equal((await restart.read('note_ready','a')).ready,true,'worker restart keeps bound document');
+ const a=data['work_tabs:one'].a.tab,originalURL=tabs.get(a).url;tabs.get(a).url=CrowdCore.HOST+'/explore/'+'c'.repeat(24);
+ await assert.rejects(()=>restart.open(urls[1],'a'),/pool_recovery_required/);assert.equal(tabs.get(a).url,CrowdCore.HOST+'/explore/'+'c'.repeat(24),'profile navigation cannot overwrite a user-taken SPA page');tabs.get(a).url=originalURL;
+ const document=tabs.get(a).document;tabs.get(a).document=crypto.randomUUID();await assert.rejects(()=>restart.open(urls[1],'a'),/pool_recovery_required/);tabs.get(a).document=document;
+ // Login recovery is explicit and only rebonds the same tab/session/URL after principal verification.
+ tabs.get(a).document=crypto.randomUUID();tabs.get(a).token=null;await restart.rebindAfterLogin(async()=>true);assert.equal((await restart.read('note_ready','a')).ready,true);assert.equal(created,2);
+ tabs.get(a).url=CrowdCore.HOST+'/explore/'+'c'.repeat(24);await assert.rejects(()=>restart.rebindAfterLogin(async()=>true),/pool_recovery_required/);tabs.get(a).url=originalURL;
+ await assert.rejects(()=>restart.rebindAfterLogin(async()=>false),/cancelled/);
+ const b=data['work_tabs:one'].b.tab;tabs.get(b).token='unowned';tabs.get(b).document=crypto.randomUUID();
+ await assert.rejects(()=>restart.read('note_ready','b'),/pool_recovery_required/);assert.equal(tabs.get(b).token,'unowned','cannot rebind unowned same-URL document');
+ await restart.close('b');assert.equal(removed.includes(b),false);assert.equal(data['work_tabs:one'].b.state,'retired');assert.equal(data['work_tabs:one'].b.retired_reason,'close_identity');
+ owner='two';await make().close();assert.equal(removed.length,0,'new owner cannot close old owner slots');
+ owner=null;await make().close();assert.equal(removed.length,0,'signed-out stop is a no-op');
+ owner='one';session={};await assert.rejects(()=>make().read('note_ready','a'),/pool_recovery_required/);assert.equal(created,2,'browser restart never adopts stale tab ID');
+ data['work_tabs:one'].c={session:session.crowd_work_session,state:'opening',tab:null,url:urls[0]};await assert.rejects(()=>make().open(urls[0],'c'),/pool_recovery_required/);assert.equal(created,2,'unrecorded creation cannot create again');
+ const beforeRemoved=[...removed];await make().close('a');await make().close('b');
+ assert.deepEqual(removed,beforeRemoved,'retiring an old browser session never touches reused user tab IDs');
+ assert.equal(data['work_tabs:one'].a,undefined);assert.equal(data['work_tabs:one'].b,undefined);
+ await make().close('c');assert.equal(data['work_tabs:one'].c.state,'retired','uncertain creation retired without touching a tab');
+ // OTA may clear storage.session and leave a 62 content receiver. Retire metadata only.
+ session={};const oldTab=999;tabs.set(oldTab,{id:oldTab,url:urls[0],document:'old-document',token:'old-token'});const originalOld=structuredClone(tabs.get(oldTab));
+ data['work_tabs:one'].search={session:'before-ota',tab:oldTab,url:urls[0],document:'old-document',token:'old-token',state:'opened'};
+ for(const method of ['get','update','sendMessage','remove']){const original=chrome.tabs[method];chrome.tabs[method]=async(id,...args)=>{assert.notEqual(id,oldTab,'never read/adopt/navigate/bind/close old tab ID');return original(id,...args);};}
+ const fresh=make();await fresh.retireLoginPage(async()=>true);const countBefore=created;await fresh.open(CrowdCore.HOST+'/search_result?keyword=original','search');assert.equal(created,countBefore+1);assert.deepEqual(tabs.get(oldTab),originalOld);assert.ok(Object.values(data['work_tabs:one']).some(e=>e.tab===oldTab&&e.retired_reason==='first_login_update'));await fresh.read('ownership','search');
+ console.log('PASS owned work tabs: two direct navigations, one browser session, bound worker recovery, same-URL ownership mismatch retained, owner/signed-out isolation, stale tab IDs and uncertain creation refuse duplication');
+})().catch(error=>{console.error(error);process.exitCode=1;});

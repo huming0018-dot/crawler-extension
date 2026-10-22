@@ -1,0 +1,67 @@
+--- a/v4/manifest.json
++++ b/v4/manifest.json
+@@ -2,7 +2,7 @@
+   "manifest_version": 3,
+   "minimum_chrome_version": "120",
+   "name": "众包公开笔记采集",
+-  "version": "4.2.93",
++  "version": "4.2.105",
+   "description": "自愿参与、自动任务与公开网页采集，验证与奖励分账，遇到验证或限流立即暂停。",
+   "permissions": [
+     "storage",
+--- a/v4/src/core.js
++++ b/v4/src/core.js
+@@ -1,7 +1,7 @@
+ /* One contract for desktop and native containers. No page receives credentials. */
+ (function (root) {
+   'use strict';
+-  const VERSION = '4.2.93', CONSENT = 'crowd-public-v4';
++  const VERSION = '4.2.105', CONSENT = 'crowd-public-v4';
+   const HOST = 'https://www.xiaohongshu.com';
+   const publicOrigin = u => u.protocol === 'https:' && ['www.xiaohongshu.com', 'm.xiaohongshu.com'].includes(u.hostname) && !u.username && !u.password && !u.port;
+   function noteURL(value) {
+--- a/v4/src/updater.js
++++ b/v4/src/updater.js
+@@ -44,7 +44,7 @@
+      await this.storage.set('updater_poll',poll);
+     }catch(e){poll={...poll,poll_query_error:['busy','invalid_response'].includes(e.message)?e.message:'helper_unavailable'};await this.storage.set('updater_poll',poll);}
+    }
+-   return {system_ota:await this.storage.get('updater_protocol')===2,enabled:await this.storage.get('updater_enabled')!==false,...saved,...poll,poll_stale:await this.storage.get('updater_enabled')!==false&&Number.isFinite(poll.last_poll_at)&&Date.now()/1000-poll.last_poll_at>7200,busy:!!this.active};
++   return {system_ota:await this.storage.get('updater_protocol')===2,enabled:await this.storage.get('updater_enabled')!==false,...saved,...poll,poll_stale:await this.storage.get('updater_enabled')!==false&&Number.isFinite(poll.last_poll_at)&&Date.now()/1000-poll.last_poll_at>7200,busy:!!this.active,update_track:'legacy_participant',pro_readiness:'not_reported'};
+   }
+   serializePreferences(work) {
+    const next=(this.preferenceTail||Promise.resolve()).catch(()=>{}).then(work);
+--- a/v4/src/participant-controller.js
++++ b/v4/src/participant-controller.js
+@@ -73,7 +73,7 @@
+   $('auto_update').checked=data.updater?.enabled!==false;
+   $('auto_update').disabled=!!data.updater?.busy;
+   const updateDeferred=data.updater?.state==='error'&&data.updater?.error==='executor_busy';
+-  $('updater_status').textContent=(updateDeferred?'当前操作进行中，稍后自动检查更新':updates[data.updater?.state]||'更新状态尚未确认')+(!updateDeferred&&data.updater?.error?'（'+data.updater.error+'）':'')+(data.updater?.system_ota?'；系统定时 OTA 已接通':'；系统定时 OTA 尚未接通')+(data.updater?.last_poll_at?'；系统最近检查 '+new Date(data.updater.last_poll_at*1000).toLocaleString('zh-CN'):'；系统尚无检查记录')+(data.updater?.poll_status==='downloaded'?'；新版已验证缓存，等待空闲切换':'')+(data.updater?.poll_error?'；系统更新失败（'+data.updater.poll_error+'）':'')+(data.updater?.poll_query_error?'；系统状态暂时不可查':'')+(data.updater?.poll_stale?'；超过2小时未收到系统检查，请检查更新助手':'');
++  $('updater_status').textContent=(updateDeferred?'当前操作进行中，稍后自动检查更新':updates[data.updater?.state]||'更新状态尚未确认')+(!updateDeferred&&data.updater?.error?'（'+data.updater.error+'）':'')+(data.updater?.system_ota?'；系统定时 OTA 已接通':'；系统定时 OTA 尚未接通')+(data.updater?.last_poll_at?'；系统最近检查 '+new Date(data.updater.last_poll_at*1000).toLocaleString('zh-CN'):'；系统尚无检查记录')+(data.updater?.poll_status==='downloaded'?'；新版已验证缓存，等待空闲切换':'')+(data.updater?.poll_error?'；系统更新失败（'+data.updater.poll_error+'）':'')+(data.updater?.poll_query_error?'；系统状态暂时不可查':'')+(data.updater?.poll_stale?'；超过2小时未收到系统检查，请检查更新助手':'')+(data.updater?.update_track==='legacy_participant'?'；旧版兼容通道（未报告 Pro 就绪）；Pro 接入须完整安装与身份绑定核验':'');
+   $('risk_confirmation').hidden=!data.risk_confirmation?.can_confirm&&!data.risk_confirmation?.source;
+   $('risk_confirm').disabled=!data.risk_confirmation?.can_confirm||!$('risk_acknowledge').checked||actions>0;
+   $('risk_evidence').textContent=data.risk_confirmation?.source==='operator_confirmation'?'风险证据：操作员确认；仅暂停上报，不是当前页面元数据或恢复证明。':'';
+--- /dev/null
++++ b/v4/tests/legacy-ota-bridge.cjs
+@@ -0,0 +1,20 @@
++'use strict';
++const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
++const context=vm.createContext({console,Date,Set,Promise});vm.runInContext(fs.readFileSync('v4/src/updater.js','utf8'),context);
++function fixture(reply={status:'current',version:'4.2.105'}){
++ const data={session:{user:{id:'original'},refresh_token:'fixture-private'},'agent:original':{enabled:false,task:{id:29},outbox:[{request:'unchanged'}]},updater_protocol:2},messages=[],events=[];let reloads=0;
++ const updater=new context.CrowdUpdater({version:'4.2.105',releaseHash:async()=>'a'.repeat(64),agent:{},storage:{get:async k=>data[k],set:async(k,v)=>data[k]=v},reportOTA:async e=>{events.push(e);return true;},chrome:{runtime:{sendNativeMessage:async(host,m)=>{assert.equal(host,'com.crowd.v4.updater');messages.push(JSON.parse(JSON.stringify(m)));return reply;},reload:()=>reloads++},alarms:{create:async()=>{},clear:async()=>{}}}});
++ return {updater,data,messages,events,reloads:()=>reloads};
++}
++(async()=>{
++ let f=fixture(),original=JSON.stringify([f.data.session,f.data['agent:original']]);
++ const status=await f.updater.status();assert.equal(status.update_track,'legacy_participant');assert.equal(status.pro_readiness,'not_reported');assert.equal(status.system_ota,true);assert.equal(JSON.stringify([f.data.session,f.data['agent:original']]),original);
++ assert.deepEqual(f.messages,[{action:'status',version:'4.2.105'}]);
++ f.data.updater_status={state:'current',update_track:'native_v2',pro_readiness:'ready'};f.updater.pollAt=Date.now();const bounded=await f.updater.status();assert.equal(bounded.update_track,'legacy_participant');assert.equal(bounded.pro_readiness,'not_reported');
++ f=fixture();await f.updater.check();assert.deepEqual(f.events.map(e=>e.status),['started','skipped']);assert.equal(f.reloads(),0);assert.deepEqual(f.messages,[{action:'apply',version:'4.2.105'}]);assert.deepEqual(Object.keys(f.events[1]).sort(),['error_code','status']);
++ f=fixture({status:'pending_reload',version:'4.2.105'});await f.updater.check();assert.equal(f.reloads(),1);assert.deepEqual(f.events.map(e=>e.status),['started','waiting']);assert(!f.events.some(e=>e.status==='completed'));
++ f=fixture();f.updater.isBusy=async()=>true;assert.equal((await f.updater.check()).blocked,'executor_busy');assert.equal(f.messages.length,0);
++ const source=fs.readFileSync('v4/src/participant-controller.js','utf8'),line=source.split('\n').find(s=>s.includes("$('updater_status').textContent="));assert(line);const element={};vm.runInNewContext(line,{data:{updater:{state:'current',system_ota:true,update_track:'legacy_participant',pro_readiness:'not_reported'}},updates:{current:'已是当前通道最新版本'},updateDeferred:false,$:()=>element,Date});assert(element.textContent.includes('旧版兼容通道'));assert(element.textContent.includes('未报告 Pro 就绪'));assert(!line.includes('innerHTML'));
++ const manifest=JSON.parse(fs.readFileSync('v4/manifest.json'));assert.equal(manifest.version,'4.2.105');assert(fs.readFileSync('v4/src/core.js','utf8').includes("VERSION = '4.2.105'"));assert(!fs.readFileSync('v4/src/participant-background.js','utf8').includes('CrowdParticipantPro'));
++ console.log('PASS legacy105 bridge: fixed local-only diagnostics, old strict native verbs, skipped/pending/busy semantics, identity/task/outbox preserved, visible no-Pro claim, no Pro core switch');
++})().catch(e=>{console.error(e);process.exitCode=1;});
