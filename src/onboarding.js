@@ -1,6 +1,6 @@
 // onboarding.js — 参与协议页：手动填编号 + 「我要加入」自动注册
 //
-// 报名流程：apply.html 仅作下载页；参与者在插件内点「我要加入」自动获得编号。
+// 报名流程：下载网页由独立 crowd-pages 仓维护；参与者在插件内点「我要加入」自动获得编号。
 // 原因：网页 localStorage 的 device salt 插件读不到（salt 不出 Service Worker/扩展域），
 // 网页注册会导致采集侧 device_salt_mismatch，故注册必须发生在扩展域内。
 //
