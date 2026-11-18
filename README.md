@@ -1,124 +1,23 @@
-# Crawler Extension
+# 小红书列表卡片适配样例（项目资产）
 
-An informed, voluntary, paid crowdsourcing browser extension. Participants
-use their **own account, device and network** to collect **public**
-Xiaohongshu (RED) notes and taste ratings for a crowd-sourced food guide,
-under server-issued safety limits. Open source and auditable by design.
+保留旧项目中可独立运行的列表卡片适配，退出浏览器采集器的运行框架。不是可安装扩展、不是完整采集产品，也不是通用爬虫工具。
 
-## Architecture
+## 留下的实现
 
-One sentence: the extension talks only to **Supabase security-definer
-RPCs** (`crowd_fetch_tasks`, `crowd_submit_proof`, …) — the server owns the
-task pool, adjudication and payout; the client holds no direct table access
-(the publishable anon key is distributed by design, RLS closes everything
-else server-side).
+`core/xhs_note_cards.cjs` 导出 `extractNoteCards(document)`。调用方提供已取得的 DOM 或同接口对象；返回每张卡片的链接、笔记 ID、标题、作者和缺失标记。只在各卡片子树查询，不把其他卡片的字段补进来；列表正文恒为 null。
 
-```
-extension ──RPC──▶ Supabase (task pool → adjudication → payout)
-    │  queue + idempotent retry + dead letters (chrome.storage.local)
-    └─ safety-line engine (rate limits, sessions, circadian, warmup)
+沿用原选择器、文本和作者处理函数，只把原全局 document 改为显式参数。没有网络、浏览器控制、凭据、队列、任务或存储依赖。
+
+```sh
+node --test tests/note_cards.test.cjs
 ```
 
-## Features
+局限：选择器是历史站点适配，未验证当前真实页面；作者末尾时间形态清理可能删掉真实昵称末尾；链接不做域名身份认证；不是全文采集，不验证来源真实性。缺失作者为空字符串，缺失正文为 null，保留旧数据合同，不冒称全部字段统一 null。
 
-- **Task loop**: fetch keyword/store packs → rotate keywords until each
-  reaches its KPI → archive and claim the next pack automatically.
-- **Fully automatic collection**: a dedicated background tab (never steals
-  focus) visits the search page; the content script does read-only,
-  per-card extraction with page/keyword consistency checks.
-- **Durable upload pipeline**: every envelope gets a `submission_id` at
-  enqueue time (server-idempotent), per-item verdict handling, exponential
-  backoff, quota parking to the server `reset_at`, dead letters for
-  permanent failures — nothing is lost across service-worker restarts.
-- **Safety line (harm reduction, not a promise)**: conservative local
-  baselines the server can only tighten, never loosen; truncated
-  lognormal / inverse-gaussian sampling for action pacing; session
-  budgets and breaks; circadian profile (no late-night activity);
-  seven-day warmup; rate-limit state machine with 24–72 h cooldowns;
-  flow-stall detection against false-positive uploads.
-- **Taste ratings**: 1–5 stars with an ≥8-char reason, anchored to an
-  already-collected note; rides the same idempotent queue.
-- **Informed consent gate**: install ≠ consent. Collection starts only
-  after the participant reads the agreement and taps "agree & start";
-  declining wipes all half-registered state.
-- **Firefox (incl. Android)**: dual-shape background (Chrome MV3 service
-  worker / Firefox MV3 event page) from one codebase.
-- **Web/PWA companion**: maintained separately in [crowd-pages](https://github.com/huming0018-dot/crowd-pages). This extension source no longer duplicates its pages or service worker.
+## 边界与恢复
 
-## Source maintenance status
+[保留/退出判断、证据和影响](docs/PROJECT-CORE-SELECTION.md)。源码恢复点是 `f4d1a49d5ed968c229035cab0d15d1273b1fd35b`；网页归并已合并；本批基线为 `d3e99fa62e37b53cb61e83e900b19658b5af07e2`。
 
-Windows installer/updater and the old publishing script have been retired from
-this source tree. No deployed resource or installed client was changed.
-See [scope, lessons and recovery](docs/RETIRED-DISTRIBUTION.md).
-The participation notes below describe legacy project behavior, not current
-release verification. Crowdsourcing development and rollout remain paused.
+`CROWD_CONTRACT.md`、`CHANGELOG.md` 是历史协议/沿革，不是当前可运行功能承诺。旧完整实现留在 Git 历史，不另存源码副本。LICENSE 保留；图标尚未纳入删除，不声称存在新发布物。
 
-## Web ownership and deployment boundary
-
-The separate [crowd-pages repository](https://github.com/huming0018-dot/crowd-pages)
-is the source of the web/PWA companion and existing distribution artifacts.
-This repository contains the extension implementation, not a second website.
-See [consolidation scope and recovery](docs/WEB-CONSOLIDATION.md).
-
-Removing duplicate source pages here does not remove or update published pages,
-CRX/ZIP packages, update manifests, installed extensions or server data.
-Existing publishing links and `manifest.json` update URLs are unchanged.
-Crowdsourcing development and rollout remain paused; the linked repository is
-not an instruction to resume collection or an assertion of production health.
-
-## Directory layout
-
-```
-crawler-extension/
-├── manifest.json            # MV3 manifest (dual-shape background)
-├── CROWD_CONTRACT.md        # data contract (format/intake/upload/sync rules)
-├── src/
-│   ├── background.js        # service worker: task loop, queue, upload, scheduling
-│   ├── safety_engine.js     # safety-line engine (tighten-only remote limits)
-│   ├── sampler.js           # truncated lognormal / inverse-gaussian samplers
-│   ├── device_profile.js    # per-device jitter, circadian profile, warmup
-│   ├── content.js           # read-only page extraction (list cards / note detail)
-│   ├── config.js            # Supabase connection (publishable anon key only)
-│   ├── popup.html/.js       # status panel + rating UI
-│   └── onboarding.html/.js  # agreement, registration, consent gate
-├── docs/RETIRED-DISTRIBUTION.md # retired distribution scope and recovery
-└── icons/
-```
-
-## Development
-
-Plain JavaScript, no build step. Load the repo root as an unpacked
-extension (`chrome://extensions` → developer mode) or via
-`about:debugging` in Firefox.
-
-```bash
-# syntax check
-for f in src/*.js; do node --check "$f"; done
-```
-
-**E2E harness**: the behavioral test harness lives in the crowd-platform
-monorepo under `test-harness/` (puppeteer-core + Chrome for Testing; all
-Supabase/XHS traffic is intercepted or DNS-pinned to localhost — it can
-never touch production). To run it against this repo: copy the harness
-directory, point `EXT_DIR` (and the service-worker URL match) at this
-repo's `src/background.js`, then `node run-all.js` — expect **47/47**.
-
-## Safety & compliance
-
-- **Informed & voluntary**: participants sign an in-extension agreement;
-  declining or uninstalling stops everything. Registration and device
-  salt never leave the extension origin.
-- **Public content only**: search-result cards and note pages anyone can
-  read; no DMs, settings or account data; author names are minimized.
-- **Safety line ≠ immunity**: the pacing engine only *reduces the
-  likelihood* of triggering platform risk control. It must never be
-  described as "won't get you banned" or "guaranteed safe".
-- **No CAPTCHA bypass, ever.** On any risk-control signal the extension
-  stops for the day and backs off for 24–72 h.
-- The publishable anon key ships by design; all reads/writes go through
-  security-definer RPCs that enforce participant status, contract
-  version, idempotency and scoring server-side.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+网页和既有分发物仍属于 [crowd-pages](https://github.com/huming0018-dot/crowd-pages)。本地整理不改发布仓、CRX/ZIP、更新清单、已安装客户端或设备任务，不表示线上升级/停用已完成。禁止将本目录作为旧扩展的自动更新包。
