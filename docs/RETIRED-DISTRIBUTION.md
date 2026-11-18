@@ -24,3 +24,20 @@
 如需审阅原实现：`git show 5b9e327a5812974fdd08cbeb109141a57e41fda1:<文件路径>`。历史保留不表示批准重新运行或部署。
 
 本次仅 GitHub 候选分支源码整理；未修改 GitHub Pages、对象存储、已安装客户端、计划任务或机器配置，未运行众包采集。旧线上下载物可能仍存在，不将源码删除宣称为撤销线上发布。
+
+
+## 追加：旧 Mac 分发配套退出
+
+恢复点：`6d24f8e2ce42f09ed50a73ec946250827870cad2`。此批删除 `crowd-install-mac.command`、`crowd-updater.sh`、`crowd-updater-launchagent.plist`、`write-crowd-policy.sh`；更新 README、install.html、apply.html 的现行指引。前文“保留 Mac 脚本”仅描述上一批，已由本节取代。
+
+四件均为固定本项目扩展 ID、分发端点和 Mac 环境的发布胶水，不是独立工具核心。安装器还内嵌另一份更新器和 LaunchAgent。插件运行时 manifest/src 不引用这些文件；脚本、模板和策略写入器作为一个旧分发批次退出，不影响源码中的采集、排队、提交和人工入口代码。
+
+证据：
+- 安装器在下载 ZIP 前执行旧安装目录 rm -rf；这里只做顺序检查，没有运行安装器。
+- 更新器以 rsync --delete 覆盖正在使用的目录，并非原子切换。离线假 curl/unzip/rsync/pgrep、临时 HOME 与目录下实际运行旧更新脚本：rsync 返回 23，旧 manifest 仍为 1.0，却上报 upd_applied 并退出 0。没有网络请求、Chrome 或系统任务操作。
+- 解包只检查 manifest 存在，不比较包内版本与更新清单；没有把清单成功读取等同完整包验收。
+- LaunchAgent 模板依赖该更新器；策略写入器固定项目 ID 和公共更新端点，不能因使用系统命令就归为通用环境资产。
+
+保留经验：先暂存并验证包与目标版本，检查外部命令退出状态，成功切换后才报告完成；安装/更新失败保留旧版本。避免脚本内嵌副本与独立文件并行维护。
+
+只清理 GitHub 源码，不部署页面、不删除线上资源、不停止已有 LaunchAgent、不卸载用户设备、不改 Chrome 策略。不合并仍开放的旧 PR1，不将本次退出解读为新升级方案。
