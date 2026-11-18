@@ -56,11 +56,10 @@ release verification. Crowdsourcing development and rollout remain paused.
 
 ## Participate
 
-1. **Web / one-click install**: open `install.html` (desktop) or
-   `install-mobile.html` (phone) and follow the one-click installers
-   (`crowd-install-mac.command`, retained but not revalidated here).
-   Windows one-click installation has been retired. No replacement rollout
-   or automatic-update guarantee is provided by this cleanup.
+1. **Legacy installation pages**: `install.html` and `install-mobile.html`
+   remain historical project guides. Mac and Windows one-click installers,
+   automatic updaters and Mac policy-writing support have been retired from
+   source. No replacement rollout or automatic-update guarantee is provided.
 2. **Firefox**: install the signed package linked from `install.html`
    (Android supported, `strict_min_version` 126).
 3. Open the options page, tap **我要加入** to get your participant ID
@@ -83,12 +82,10 @@ crawler-extension/
 │   ├── popup.html/.js       # status panel + rating UI
 │   └── onboarding.html/.js  # agreement, registration, consent gate
 ├── apply.html               # application/download page
-├── install.html             # one-click install (desktop)
+├── install.html             # legacy guide; desktop installers retired
 ├── install-mobile.html      # install guide (mobile)
 ├── submit.html + sw.js      # PWA share-target receiver
 ├── status.html              # participant status page
-├── crowd-install-mac.command  # legacy Mac installer (not revalidated)
-├── crowd-updater.sh (+ launchagent plist)             # legacy Mac updater
 ├── docs/RETIRED-DISTRIBUTION.md # retired distribution scope and recovery
 └── icons/
 ```
