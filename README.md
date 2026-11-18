@@ -43,8 +43,7 @@ extension ──RPC──▶ Supabase (task pool → adjudication → payout)
   declining wipes all half-registered state.
 - **Firefox (incl. Android)**: dual-shape background (Chrome MV3 service
   worker / Firefox MV3 event page) from one codebase.
-- **PWA share target**: `sw.js` + `submit.html` accept system shares from
-  the Xiaohongshu app.
+- **Web/PWA companion**: maintained separately in [crowd-pages](https://github.com/huming0018-dot/crowd-pages). This extension source no longer duplicates its pages or service worker.
 
 ## Source maintenance status
 
@@ -54,17 +53,18 @@ See [scope, lessons and recovery](docs/RETIRED-DISTRIBUTION.md).
 The participation notes below describe legacy project behavior, not current
 release verification. Crowdsourcing development and rollout remain paused.
 
-## Participate
+## Web ownership and deployment boundary
 
-1. **Legacy installation pages**: `install.html` and `install-mobile.html`
-   remain historical project guides. Mac and Windows one-click installers,
-   automatic updaters and Mac policy-writing support have been retired from
-   source. No replacement rollout or automatic-update guarantee is provided.
-2. **Firefox**: install the signed package linked from `install.html`
-   (Android supported, `strict_min_version` 126).
-3. Open the options page, tap **我要加入** to get your participant ID
-   (e.g. `P-B269XL1K`), read the agreement, then **同意并开始使用**.
-   You can stop any time from the popup; uninstalling removes everything.
+The separate [crowd-pages repository](https://github.com/huming0018-dot/crowd-pages)
+is the source of the web/PWA companion and existing distribution artifacts.
+This repository contains the extension implementation, not a second website.
+See [consolidation scope and recovery](docs/WEB-CONSOLIDATION.md).
+
+Removing duplicate source pages here does not remove or update published pages,
+CRX/ZIP packages, update manifests, installed extensions or server data.
+Existing publishing links and `manifest.json` update URLs are unchanged.
+Crowdsourcing development and rollout remain paused; the linked repository is
+not an instruction to resume collection or an assertion of production health.
 
 ## Directory layout
 
@@ -81,11 +81,6 @@ crawler-extension/
 │   ├── config.js            # Supabase connection (publishable anon key only)
 │   ├── popup.html/.js       # status panel + rating UI
 │   └── onboarding.html/.js  # agreement, registration, consent gate
-├── apply.html               # application/download page
-├── install.html             # legacy guide; desktop installers retired
-├── install-mobile.html      # install guide (mobile)
-├── submit.html + sw.js      # PWA share-target receiver
-├── status.html              # participant status page
 ├── docs/RETIRED-DISTRIBUTION.md # retired distribution scope and recovery
 └── icons/
 ```
@@ -98,7 +93,7 @@ extension (`chrome://extensions` → developer mode) or via
 
 ```bash
 # syntax check
-for f in src/*.js sw.js; do node --check "$f"; done
+for f in src/*.js; do node --check "$f"; done
 ```
 
 **E2E harness**: the behavioral test harness lives in the crowd-platform
